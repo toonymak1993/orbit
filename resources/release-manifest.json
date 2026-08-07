@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "product": "ORBIT",
+  "appId": "com.orbit.launcher",
+  "channel": "development",
+  "displayVersion": "0.0.0.3",
+  "packageVersion": "0.0.3",
+  "releaseSequence": 3,
+  "platform": "windows",
+  "architecture": "x64",
+  "packageFormats": ["nsis", "appx"],
+  "updateMode": "manual-package",
+  "automaticUpdatesEnabled": false,
+  "publisher": "ORBIT Development",
+  "minimumWindowsVersion": "10.0.22000.0",
+  "xboxMode": {
+    "enabled": true,
+    "minimumWindowsVersion": "10.0.26100.7019",
+    "packageIdentity": "ORBIT.GamingHome",
+    "applicationId": "ORBIT",
+    "appExtension": "windows.gamingApp",
+    "customCapability": "Microsoft.appCategory.gamingHome_8wekyb3d8bbwe"
+  }
+}

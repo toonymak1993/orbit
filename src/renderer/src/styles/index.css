@@ -1,0 +1,329 @@
+@import './theme.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    @apply border-white/5;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-base text-text antialiased overflow-hidden select-none font-sans;
+    background-image: var(--theme-ambient);
+  }
+
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-white/10 rounded-full;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  /* Controller/keyboard focus ring — never rely on mouse :hover alone in a console UI */
+  [data-focusable]:focus-visible,
+  [data-focusable][data-focused='true'] {
+    outline: none;
+    box-shadow:
+      0 0 0 var(--focus-ring-width) rgb(var(--color-accent) / 0.9),
+      var(--focus-shadow);
+  }
+}
+
+@layer utilities {
+  .glass {
+    background-color: rgb(var(--color-surface) / var(--glass-opacity));
+    backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));
+  }
+
+  .scrollbar-none {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+[data-theme-choice]:focus-visible,
+[data-theme-choice][data-focused='true'] {
+  box-shadow: none;
+}
+
+[data-theme-choice]:focus-visible .theme-swatch-orb,
+[data-theme-choice][data-focused='true'] .theme-swatch-orb {
+  border-color: rgb(var(--color-accent) / 0.95);
+  box-shadow:
+    0 0 0 calc(var(--focus-ring-width) + 2px) rgb(var(--color-accent) / 0.38),
+    var(--focus-shadow);
+}
+
+[data-settings-scroll] [data-focusable] {
+  scroll-margin-block: clamp(1.5rem, 6vh, 4rem);
+}
+
+@keyframes orbit-ticker {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+@keyframes orbit-card-shine {
+  0% {
+    left: -45%;
+    opacity: 0;
+  }
+  18% {
+    opacity: 0.72;
+  }
+  72% {
+    opacity: 0.42;
+  }
+  100% {
+    left: 118%;
+    opacity: 0;
+  }
+}
+
+.game-card-shine {
+  left: -45%;
+  width: 34%;
+  opacity: 0;
+  transform: skewX(-10deg);
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgb(255 255 255 / 0.08) 22%,
+    rgb(255 255 255 / 0.58) 50%,
+    rgb(var(--color-accent) / 0.22) 68%,
+    transparent 100%
+  );
+  filter: blur(1px);
+  mix-blend-mode: screen;
+}
+
+[data-home-game-card='true']:hover .game-card-shine,
+[data-home-game-card='true']:focus-visible .game-card-shine,
+[data-home-game-card='true'][data-focused='true'] .game-card-shine {
+  animation: orbit-card-shine 620ms cubic-bezier(0.2, 0.72, 0.25, 1) both;
+}
+
+.ticker-track {
+  animation: orbit-ticker 28s linear infinite;
+}
+
+.game-detail-panel {
+  top: 3vh;
+  right: 2vw;
+  bottom: 3vh;
+  width: 84vw;
+}
+
+.game-detail-layout {
+  grid-template-columns: minmax(15rem, 0.82fr) minmax(24rem, 1.18fr);
+  gap: clamp(1.25rem, 2.5vw, 3rem);
+  padding: clamp(5rem, 13vh, 9rem) clamp(1.4rem, 3vw, 3.5rem)
+    clamp(1.3rem, 3vh, 2.75rem);
+}
+
+.game-detail-identity {
+  margin-bottom: clamp(0.7rem, 1.5vh, 1.2rem);
+}
+
+.game-detail-meta,
+.game-detail-summary {
+  margin-bottom: clamp(0.75rem, 1.7vh, 1.25rem);
+}
+
+.game-detail-stats {
+  margin-bottom: clamp(0.75rem, 1.5vh, 1.15rem);
+}
+
+@media (orientation: landscape) and (max-width: 1500px) {
+  .game-detail-panel {
+    top: 2vh;
+    right: 1.5vw;
+    bottom: 2vh;
+    width: 92vw;
+  }
+
+  .game-detail-layout {
+    grid-template-columns: minmax(14rem, 0.78fr) minmax(22rem, 1.22fr);
+    gap: clamp(1rem, 2vw, 1.6rem);
+    padding: clamp(4.5rem, 12vh, 6rem) clamp(1.2rem, 2.5vw, 2rem)
+      clamp(1.1rem, 2.5vh, 1.6rem);
+  }
+}
+
+@media (orientation: landscape) and (max-height: 720px) {
+  .game-detail-panel {
+    top: 1.25vh;
+    right: 1vw;
+    bottom: 1.25vh;
+    width: 94vw;
+  }
+
+  .game-detail-layout {
+    grid-template-columns: minmax(13rem, 0.76fr) minmax(21rem, 1.24fr);
+    gap: 1rem;
+    padding: 4.25rem 1.25rem 1rem;
+  }
+
+  .game-detail-summary {
+    display: none;
+  }
+
+  .game-detail-identity,
+  .game-detail-meta,
+  .game-detail-stats {
+    margin-bottom: 0.65rem;
+  }
+
+  .game-detail-achievements {
+    padding: 0.7rem;
+  }
+}
+
+/* Home scales by the effective CSS viewport rather than raw panel pixels.
+   This accounts for Windows display scaling on handhelds and compact laptops. */
+.home-stage {
+  height: clamp(20rem, 55vh, 33rem);
+}
+
+.home-game-row {
+  margin-top: clamp(2.75rem, 7vh, 5rem);
+  padding-top: 2rem;
+}
+
+.home-game-tile {
+  flex-basis: calc((100% - 4rem - 4 * var(--tile-gap)) / 5);
+}
+
+/* 720p-class handheld viewports and scaled Full-HD laptops. */
+@media (orientation: landscape) and (max-width: 1700px) and (max-height: 900px) {
+  .home-stage {
+    height: clamp(14rem, 40vh, 19rem);
+  }
+
+  .home-game-row {
+    margin-top: clamp(1.25rem, 4vh, 2.25rem);
+    padding-top: 1.5rem;
+    padding-bottom: 1rem;
+  }
+
+  .home-game-tile {
+    flex-basis: clamp(9.5rem, calc((100% - 4rem - 4 * var(--tile-gap)) / 5), 13rem);
+  }
+}
+
+/* Very short effective viewports, e.g. Ally/Legion at 150–175% scaling. */
+@media (orientation: landscape) and (max-height: 720px) {
+  .home-stage {
+    height: clamp(12.5rem, 38vh, 15rem);
+  }
+
+  .home-game-row {
+    margin-top: clamp(0.9rem, 3vh, 1.35rem);
+    padding-top: 1.15rem;
+    padding-bottom: 0.75rem;
+  }
+
+  .home-game-tile {
+    flex-basis: clamp(9.25rem, calc((100% - 3rem - 4 * var(--tile-gap)) / 5), 11.5rem);
+  }
+}
+
+/* FLOAT is a poster-first Home preset. It intentionally removes both banners,
+   spends the released height on library-sized artwork, and keeps the focused
+   game's information in one low horizontal strip. */
+[data-home-layout='float'] .home-stage {
+  height: clamp(8.5rem, 18vh, 11rem);
+}
+
+[data-home-layout='float'] .home-game-row {
+  margin-top: clamp(7rem, 14vh, 13rem);
+  padding-top: 1.4rem;
+}
+
+[data-home-layout='float'] .home-game-tile {
+  min-width: 12rem;
+  flex-basis: clamp(12rem, 17vw, 18rem);
+}
+
+.home-focus-card-float {
+  display: grid;
+  width: min(72rem, 88vw);
+  grid-template-columns: minmax(16rem, 0.78fr) minmax(0, 1.22fr);
+  align-items: center;
+  gap: clamp(1rem, 2vw, 2rem);
+  padding: clamp(0.75rem, 1.3vw, 1.1rem) clamp(0.9rem, 1.7vw, 1.4rem);
+  border-radius: clamp(1rem, 1.5vw, 1.4rem);
+}
+
+.home-focus-card-float .home-focus-icon {
+  width: clamp(3.5rem, 4.5vw, 4.75rem);
+  height: clamp(3.5rem, 4.5vw, 4.75rem);
+}
+
+.home-focus-card-float .home-focus-identity h2 {
+  font-size: clamp(1.15rem, 2vw, 1.75rem);
+  -webkit-line-clamp: 1;
+}
+
+.home-focus-card-float .home-focus-stats {
+  margin-top: 0;
+  flex-wrap: nowrap;
+  gap: clamp(0.45rem, 0.8vw, 0.75rem);
+}
+
+.home-focus-card-float .home-focus-stat {
+  min-width: 0;
+  flex: 1 1 0;
+  padding: 0.65rem 0.75rem;
+}
+
+.home-focus-card-float .home-focus-stat p:last-child {
+  margin-top: 0.25rem;
+  font-size: clamp(0.85rem, 1.2vw, 1rem);
+}
+
+@media (orientation: landscape) and (max-height: 720px) {
+  [data-home-layout='float'] .home-stage {
+    height: clamp(7rem, 17vh, 8rem);
+  }
+
+  [data-home-layout='float'] .home-game-row {
+    margin-top: clamp(3rem, 9vh, 4.5rem);
+    padding-top: 1rem;
+  }
+
+  [data-home-layout='float'] .home-game-tile {
+    min-width: 9.5rem;
+    flex-basis: clamp(9.5rem, 18vw, 13rem);
+  }
+
+  .home-focus-card-float {
+    width: min(68rem, 92vw);
+    grid-template-columns: minmax(14rem, 0.72fr) minmax(0, 1.28fr);
+    padding: 0.6rem 0.8rem;
+  }
+
+  .home-focus-card-float .home-focus-identity > div:last-child > div {
+    display: none;
+  }
+}

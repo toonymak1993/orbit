@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+  xmlns:uap4="http://schemas.microsoft.com/appx/manifest/uap/windows10/4"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap uap3 uap4 rescap">
+  <Identity
+    Name="ORBIT.GamingHome"
+    ProcessorArchitecture="x64"
+    Publisher="CN=ORBIT Development"
+    Version="0.0.0.3" />
+  <Properties>
+    <DisplayName>ORBIT</DisplayName>
+    <PublisherDisplayName>ORBIT Development</PublisherDisplayName>
+    <Description>Controller-first gaming launcher and library</Description>
+    <Logo>assets\StoreLogo.png</Logo>
+  </Properties>
+  <Resources>
+    <Resource Language="en-US" />
+    <Resource Language="de-DE" />
+  </Resources>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.26100.7019" MaxVersionTested="10.0.26200.0" />
+  </Dependencies>
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+    <uap4:CustomCapability Name="Microsoft.appCategory.gamingHome_8wekyb3d8bbwe" />
+  </Capabilities>
+  <Applications>
+    <Application Id="ORBIT" Executable="app\ORBIT.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        BackgroundColor="#05070c"
+        DisplayName="ORBIT"
+        Square150x150Logo="assets\Square150x150Logo.png"
+        Square44x44Logo="assets\Square44x44Logo.png"
+        Description="Controller-first gaming launcher and library">
+        <uap:DefaultTile Wide310x150Logo="assets\Wide310x150Logo.png">
+          <uap:ShowNameOnTiles>
+            <uap:ShowOn Tile="wide310x150Logo" />
+            <uap:ShowOn Tile="square150x150Logo" />
+          </uap:ShowNameOnTiles>
+        </uap:DefaultTile>
+        <uap:SplashScreen Image="assets\SplashScreen.png" BackgroundColor="#05070c" />
+      </uap:VisualElements>
+      <Extensions>
+        <uap3:Extension Category="windows.appExtension">
+          <uap3:AppExtension
+            Name="windows.gamingApp"
+            Id="App"
+            DisplayName="ORBIT"
+            Description="ORBIT Gaming Home"
+            PublicFolder="Public" />
+        </uap3:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+</Package>

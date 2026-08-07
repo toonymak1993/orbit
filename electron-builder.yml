@@ -1,0 +1,59 @@
+appId: com.orbit.launcher
+productName: ORBIT
+buildVersion: 0.0.0.3
+artifactName: ORBIT-Setup-0.0.0.3-${arch}.${ext}
+copyright: Copyright © 2026 Luis Garcia
+forceCodeSigning: true
+
+directories:
+  buildResources: build
+  output: release
+
+files:
+  - out/**/*
+  - package.json
+
+extraResources:
+  - from: resources/release-manifest.json
+    to: release-manifest.json
+
+asar: true
+compression: normal
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: build/icon.ico
+  executableName: ORBIT
+  requestedExecutionLevel: asInvoker
+  legalTrademarks: ORBIT is a gaming launcher project.
+  signtoolOptions:
+    publisherName: ORBIT Development
+    signingHashAlgorithms:
+      - sha256
+    rfc3161TimeStampServer: http://timestamp.digicert.com
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowElevation: true
+  allowToChangeInstallationDirectory: true
+  installerLanguages:
+    - en_US
+    - de_DE
+  displayLanguageSelector: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: ORBIT
+  runAfterFinish: true
+  packElevateHelper: false
+  differentialPackage: false
+  uninstallDisplayName: ORBIT 0.0.0.3
+  installerIcon: build/installerIcon.ico
+  uninstallerIcon: build/uninstallerIcon.ico
+  installerHeader: build/installerHeader.bmp
+  installerSidebar: build/installerSidebar.bmp
+  uninstallerSidebar: build/uninstallerSidebar.bmp
+  include: build/installer.nsh

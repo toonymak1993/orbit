@@ -1,0 +1,222 @@
+/* ORBIT themes define color and material. Presets intentionally vary shape,
+   glass, depth and focus treatment so they feel distinct beyond accent color. */
+:root {
+  --color-base: 5 7 12;
+  --color-surface: 15 18 28;
+  --color-surface-2: 22 26 39;
+  --color-text: 244 246 251;
+  --color-muted: 138 146 166;
+  --color-accent: 63 208 255;
+  --color-accent-2: 139 92 246;
+
+  --radius-card: 1.25rem;
+  --focus-ring-width: 1.5px;
+  --focus-shadow: 0 8px 30px -6px rgb(var(--color-accent) / 0.5);
+  --glass-blur: 20px;
+  --glass-opacity: 0.68;
+  --glass-saturation: 1.1;
+  --shadow-card: 0 6px 24px -6px rgb(0 0 0 / 0.55);
+  --shadow-glow: 0 0 0 1px rgb(var(--color-accent) / 0.24), 0 8px 30px -6px rgb(var(--color-accent) / 0.45);
+  --theme-ambient: radial-gradient(circle at 18% 8%, rgb(63 208 255 / 0.08), transparent 34%), radial-gradient(circle at 82% 92%, rgb(139 92 246 / 0.08), transparent 38%);
+
+  --content-gap: 3rem;
+  --tile-gap: 1.25rem;
+}
+
+[data-density='compact'] {
+  --content-gap: 2rem;
+  --tile-gap: 1rem;
+}
+
+[data-theme='midnight'] {
+  --color-base: 5 7 12;
+  --color-surface: 15 18 28;
+  --color-surface-2: 22 26 39;
+  --color-accent: 63 208 255;
+  --color-accent-2: 139 92 246;
+  --radius-card: 1.25rem;
+  --focus-ring-width: 1.5px;
+  --glass-blur: 20px;
+  --glass-opacity: 0.68;
+  --glass-saturation: 1.1;
+  --shadow-card: 0 6px 24px -6px rgb(0 0 0 / 0.55);
+  --focus-shadow: 0 8px 30px -6px rgb(63 208 255 / 0.5);
+  --theme-ambient: radial-gradient(circle at 18% 8%, rgb(63 208 255 / 0.08), transparent 34%), radial-gradient(circle at 82% 92%, rgb(139 92 246 / 0.08), transparent 38%);
+}
+
+[data-theme='aurora'] {
+  --color-base: 4 10 13;
+  --color-surface: 10 24 27;
+  --color-surface-2: 15 34 37;
+  --color-accent: 45 212 191;
+  --color-accent-2: 129 140 248;
+  --radius-card: 1.65rem;
+  --focus-ring-width: 1.65px;
+  --glass-blur: 30px;
+  --glass-opacity: 0.56;
+  --glass-saturation: 1.35;
+  --shadow-card: 0 12px 34px -10px rgb(45 212 191 / 0.24), 0 8px 28px -8px rgb(0 0 0 / 0.5);
+  --focus-shadow: 0 10px 36px -7px rgb(45 212 191 / 0.58);
+  --theme-ambient: radial-gradient(ellipse at 15% 15%, rgb(45 212 191 / 0.16), transparent 36%), radial-gradient(ellipse at 88% 75%, rgb(129 140 248 / 0.14), transparent 42%);
+}
+
+[data-theme='violet'] {
+  --color-base: 10 6 17;
+  --color-surface: 24 14 36;
+  --color-surface-2: 35 20 49;
+  --color-accent: 167 139 250;
+  --color-accent-2: 244 114 182;
+  --radius-card: 1.5rem;
+  --focus-ring-width: 1.6px;
+  --glass-blur: 24px;
+  --glass-opacity: 0.64;
+  --glass-saturation: 1.25;
+  --shadow-card: 0 10px 32px -9px rgb(167 139 250 / 0.24), 0 6px 24px -6px rgb(0 0 0 / 0.52);
+  --focus-shadow: 0 10px 34px -7px rgb(167 139 250 / 0.62);
+  --theme-ambient: radial-gradient(circle at 76% 6%, rgb(244 114 182 / 0.13), transparent 34%), radial-gradient(circle at 12% 86%, rgb(167 139 250 / 0.16), transparent 40%);
+}
+
+[data-theme='sakura'] {
+  --color-base: 14 7 14;
+  --color-surface: 29 15 28;
+  --color-surface-2: 42 20 38;
+  --color-accent: 251 113 173;
+  --color-accent-2: 196 181 253;
+  --radius-card: 1.8rem;
+  --focus-ring-width: 1.5px;
+  --glass-blur: 28px;
+  --glass-opacity: 0.58;
+  --glass-saturation: 1.18;
+  --shadow-card: 0 14px 38px -12px rgb(251 113 173 / 0.28), 0 8px 24px -8px rgb(0 0 0 / 0.45);
+  --focus-shadow: 0 12px 38px -8px rgb(251 113 173 / 0.58);
+  --theme-ambient: radial-gradient(circle at 20% 12%, rgb(251 113 173 / 0.15), transparent 38%), radial-gradient(circle at 84% 88%, rgb(196 181 253 / 0.12), transparent 40%);
+}
+
+[data-theme='emerald'] {
+  --color-base: 4 11 9;
+  --color-surface: 10 26 21;
+  --color-surface-2: 15 37 30;
+  --color-accent: 52 211 153;
+  --color-accent-2: 34 211 238;
+  --radius-card: 0.9rem;
+  --focus-ring-width: 1.35px;
+  --glass-blur: 14px;
+  --glass-opacity: 0.76;
+  --glass-saturation: 1.08;
+  --shadow-card: 0 8px 24px -8px rgb(0 0 0 / 0.62);
+  --focus-shadow: 0 8px 26px -7px rgb(52 211 153 / 0.58);
+  --theme-ambient: linear-gradient(135deg, rgb(52 211 153 / 0.08), transparent 38%), radial-gradient(circle at 92% 12%, rgb(34 211 238 / 0.1), transparent 30%);
+}
+
+[data-theme='ocean'] {
+  --color-base: 3 10 18;
+  --color-surface: 8 24 38;
+  --color-surface-2: 12 34 51;
+  --color-accent: 34 211 238;
+  --color-accent-2: 59 130 246;
+  --radius-card: 1.4rem;
+  --focus-ring-width: 1.5px;
+  --glass-blur: 26px;
+  --glass-opacity: 0.61;
+  --glass-saturation: 1.3;
+  --shadow-card: 0 16px 42px -14px rgb(34 211 238 / 0.22), 0 8px 28px -9px rgb(0 0 0 / 0.58);
+  --focus-shadow: 0 12px 40px -9px rgb(34 211 238 / 0.6);
+  --theme-ambient: radial-gradient(ellipse at 50% 110%, rgb(59 130 246 / 0.19), transparent 48%), radial-gradient(circle at 8% 8%, rgb(34 211 238 / 0.11), transparent 32%);
+}
+
+[data-theme='amber'] {
+  --color-base: 14 10 4;
+  --color-surface: 31 23 10;
+  --color-surface-2: 45 33 13;
+  --color-accent: 251 191 36;
+  --color-accent-2: 251 113 133;
+  --radius-card: 0.8rem;
+  --focus-ring-width: 1.7px;
+  --glass-blur: 12px;
+  --glass-opacity: 0.78;
+  --glass-saturation: 1.05;
+  --shadow-card: 0 9px 26px -9px rgb(251 191 36 / 0.24), 0 6px 20px -6px rgb(0 0 0 / 0.58);
+  --focus-shadow: 0 8px 28px -6px rgb(251 191 36 / 0.62);
+  --theme-ambient: linear-gradient(155deg, rgb(251 191 36 / 0.12), transparent 36%), radial-gradient(circle at 86% 82%, rgb(251 113 133 / 0.1), transparent 34%);
+}
+
+[data-theme='sunset'] {
+  --color-base: 16 7 6;
+  --color-surface: 35 16 13;
+  --color-surface-2: 50 23 17;
+  --color-accent: 251 146 60;
+  --color-accent-2: 244 63 94;
+  --radius-card: 1.7rem;
+  --focus-ring-width: 1.55px;
+  --glass-blur: 22px;
+  --glass-opacity: 0.63;
+  --glass-saturation: 1.22;
+  --shadow-card: 0 14px 36px -12px rgb(244 63 94 / 0.24), 0 7px 24px -8px rgb(0 0 0 / 0.54);
+  --focus-shadow: 0 11px 36px -8px rgb(251 146 60 / 0.62);
+  --theme-ambient: radial-gradient(circle at 16% 90%, rgb(244 63 94 / 0.17), transparent 42%), radial-gradient(circle at 86% 8%, rgb(251 146 60 / 0.16), transparent 38%);
+}
+
+[data-theme='crimson'] {
+  --color-base: 13 5 7;
+  --color-surface: 29 10 15;
+  --color-surface-2: 43 14 20;
+  --color-accent: 251 113 133;
+  --color-accent-2: 245 158 11;
+  --radius-card: 0.55rem;
+  --focus-ring-width: 1.75px;
+  --glass-blur: 10px;
+  --glass-opacity: 0.82;
+  --glass-saturation: 1.08;
+  --shadow-card: 0 6px 0 -1px rgb(84 18 30 / 0.46), 0 12px 26px -10px rgb(0 0 0 / 0.68);
+  --focus-shadow: 0 8px 26px -5px rgb(251 113 133 / 0.66);
+  --theme-ambient: linear-gradient(118deg, rgb(251 113 133 / 0.12), transparent 26%), linear-gradient(298deg, rgb(245 158 11 / 0.08), transparent 30%);
+}
+
+[data-theme='ice'] {
+  --color-base: 5 10 16;
+  --color-surface: 13 24 34;
+  --color-surface-2: 20 35 47;
+  --color-accent: 186 230 253;
+  --color-accent-2: 96 165 250;
+  --radius-card: 1.1rem;
+  --focus-ring-width: 1.25px;
+  --glass-blur: 34px;
+  --glass-opacity: 0.52;
+  --glass-saturation: 1.42;
+  --shadow-card: 0 18px 44px -16px rgb(96 165 250 / 0.25), 0 8px 24px -10px rgb(0 0 0 / 0.45);
+  --focus-shadow: 0 12px 38px -9px rgb(186 230 253 / 0.54);
+  --theme-ambient: radial-gradient(ellipse at 50% -10%, rgb(186 230 253 / 0.18), transparent 44%), linear-gradient(180deg, transparent, rgb(96 165 250 / 0.07));
+}
+
+[data-theme='lime'] {
+  --color-base: 7 11 5;
+  --color-surface: 18 27 13;
+  --color-surface-2: 27 39 18;
+  --color-accent: 163 230 53;
+  --color-accent-2: 45 212 191;
+  --radius-card: 0.45rem;
+  --focus-ring-width: 1.1px;
+  --glass-blur: 8px;
+  --glass-opacity: 0.86;
+  --glass-saturation: 1.05;
+  --shadow-card: 4px 4px 0 rgb(0 0 0 / 0.42), 0 9px 20px -8px rgb(0 0 0 / 0.62);
+  --focus-shadow: 0 7px 22px -5px rgb(163 230 53 / 0.62);
+  --theme-ambient: repeating-linear-gradient(135deg, rgb(163 230 53 / 0.035) 0 1px, transparent 1px 28px), radial-gradient(circle at 84% 12%, rgb(45 212 191 / 0.1), transparent 34%);
+}
+
+[data-theme='monochrome'] {
+  --color-base: 6 6 7;
+  --color-surface: 19 19 21;
+  --color-surface-2: 31 31 34;
+  --color-accent: 244 244 245;
+  --color-accent-2: 161 161 170;
+  --color-muted: 161 161 170;
+  --radius-card: 0.3rem;
+  --focus-ring-width: 1px;
+  --glass-blur: 6px;
+  --glass-opacity: 0.9;
+  --glass-saturation: 0.15;
+  --shadow-card: 0 1px 0 rgb(255 255 255 / 0.08), 0 10px 24px -12px rgb(0 0 0 / 0.82);
+  --focus-shadow: 0 0 0 1px rgb(255 255 255 / 0.18), 0 8px 20px -10px rgb(0 0 0 / 0.9);
+  --theme-ambient: linear-gradient(180deg, rgb(255 255 255 / 0.025), transparent 32%), repeating-linear-gradient(90deg, rgb(255 255 255 / 0.012) 0 1px, transparent 1px 96px);
+}

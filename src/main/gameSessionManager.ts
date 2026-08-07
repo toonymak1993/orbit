@@ -1,0 +1,855 @@
+import { execFile, spawn, type ChildProcess } from 'node:child_process'
+import { EventEmitter } from 'node:events'
+import { createInterface, type Interface as ReadlineInterface } from 'node:readline'
+import type { BrowserWindow } from 'electron'
+import type { GameLaunchStatus, LibraryGame } from '@shared/ipc'
+import { launchGame } from './gameLauncher'
+import { settingsStore } from './settingsStore'
+
+interface WindowsProcess {
+  ProcessId?: number
+  ParentProcessId?: number
+  Name?: string
+  ExecutablePath?: string
+  CommandLine?: string
+  MainWindowHandle?: number
+  MainWindowTitle?: string
+}
+
+interface ProcessSnapshot {
+  sequence: number
+  capturedAt: number
+  processes: WindowsProcess[]
+}
+
+interface ProcessStreamMessage {
+  Kind?: 'snapshot' | 'delta'
+  Processes?: WindowsProcess | WindowsProcess[]
+  Started?: WindowsProcess | WindowsProcess[]
+  Stopped?: number | number[]
+  Updated?: WindowsProcess | WindowsProcess[]
+}
+
+interface ScoredProcess {
+  process: WindowsProcess
+  pid: number
+  key: string
+  score: number
+  visible: boolean
+}
+
+const PROCESS_SAMPLE_INTERVAL_MS = 250
+const SNAPSHOT_TIMEOUT_MS = 2_000
+const BASELINE_TIMEOUT_MS = 3_000
+const STARTUP_TIMEOUT_MS = 4 * 60_000
+const CANDIDATE_STABILITY_MS = 650
+const GAME_CONFIRMATION_MS = 4_000
+const EARLY_SESSION_WINDOW_MS = 20_000
+const EARLY_HANDOFF_GRACE_MS = 6_000
+const PROCESS_EXIT_GRACE_MS = 1_200
+const SPLASH_LEAD_IN_MS = 350
+const LAUNCH_SHIELD_TIMEOUT_MS = 10_000
+const RETURN_SPLASH_MS = 520
+const ERROR_SPLASH_MS = 3_000
+const MIN_GAME_PROCESS_SCORE = 90
+
+type LauncherFamily =
+  | 'steam'
+  | 'epic'
+  | 'ea'
+  | 'ubisoft'
+  | 'gog'
+  | 'battlenet'
+  | 'rockstar'
+  | '2k'
+  | 'xbox'
+
+const LAUNCHER_PROCESS_FAMILIES = new Map<string, LauncherFamily>([
+  ['steam.exe', 'steam'],
+  ['steamwebhelper.exe', 'steam'],
+  ['gameoverlayui.exe', 'steam'],
+  ['epicgameslauncher.exe', 'epic'],
+  ['epicwebhelper.exe', 'epic'],
+  ['eadesktop.exe', 'ea'],
+  ['ealauncher.exe', 'ea'],
+  ['eabackgroundservice.exe', 'ea'],
+  ['origin.exe', 'ea'],
+  ['originwebhelperservice.exe', 'ea'],
+  ['ubisoftconnect.exe', 'ubisoft'],
+  ['upc.exe', 'ubisoft'],
+  ['uplay.exe', 'ubisoft'],
+  ['uplaywebcore.exe', 'ubisoft'],
+  ['galaxyclient.exe', 'gog'],
+  ['galaxyclientservice.exe', 'gog'],
+  ['galaxycommunication.exe', 'gog'],
+  ['battle.net.exe', 'battlenet'],
+  ['agent.exe', 'battlenet'],
+  ['rockstar-games-launcher.exe', 'rockstar'],
+  ['launcherpatcher.exe', 'rockstar'],
+  ['socialclubhelper.exe', 'rockstar'],
+  ['2klauncher.exe', '2k'],
+  ['xboxpcapp.exe', 'xbox'],
+  ['gamingapp.exe', 'xbox']
+])
+
+const LAUNCHER_ROOT_PROCESSES = new Set([
+  'steam.exe',
+  'epicgameslauncher.exe',
+  'eadesktop.exe',
+  'ealauncher.exe',
+  'origin.exe',
+  'ubisoftconnect.exe',
+  'upc.exe',
+  'uplay.exe',
+  'galaxyclient.exe',
+  'battle.net.exe',
+  'rockstar-games-launcher.exe',
+  '2klauncher.exe',
+  'xboxpcapp.exe',
+  'gamingapp.exe'
+])
+
+const SYSTEM_PROCESSES = new Set([
+  'applicationframehost.exe',
+  'conhost.exe',
+  'csrss.exe',
+  'dwm.exe',
+  'explorer.exe',
+  'fontdrvhost.exe',
+  'lsass.exe',
+  'powershell.exe',
+  'pwsh.exe',
+  'registry',
+  'runtimebroker.exe',
+  'searchhost.exe',
+  'services.exe',
+  'shellexperiencehost.exe',
+  'sihost.exe',
+  'smss.exe',
+  'spoolsv.exe',
+  'startmenuexperiencehost.exe',
+  'svchost.exe',
+  'system',
+  'systemsettings.exe',
+  'taskhostw.exe',
+  'textinputhost.exe',
+  'userinit.exe',
+  'wininit.exe',
+  'winlogon.exe',
+  'wmiprvse.exe'
+])
+
+const NON_GAME_PROCESS =
+  /(activationui|anti.?cheat|battleye|bootstrap|browser|cef|crash|dedicated|dxsetup|gamelaunchhelper|helper|installer|launcher|link2ea|overlay|prereq|protectedgame|redist|report|server|service|setup|startprotectedgame|telemetry|tray|unins|updat|vc_redist|watchdog|webhelper)/i
+
+const GAME_NAME_STOP_WORDS = new Set([
+  'and',
+  'complete',
+  'definitive',
+  'deluxe',
+  'edition',
+  'for',
+  'game',
+  'gold',
+  'remastered',
+  'the',
+  'ultimate',
+  'with'
+])
+
+const PROCESS_SNAPSHOT_SCRIPT = `
+$ErrorActionPreference = 'SilentlyContinue'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$metadata = @{}
+  $windowState = @{}
+
+function New-ProcessRow($entry, $details) {
+  $fallbackName = if ([string]$entry.ProcessName -match '\.exe$') { [string]$entry.ProcessName } else { "$($entry.ProcessName).exe" }
+  [pscustomobject]@{
+    ProcessId = [int]$entry.Id
+    ParentProcessId = if ($null -ne $details) { [int]$details.ParentProcessId } else { 0 }
+    Name = if ($null -ne $details -and $details.Name) { [string]$details.Name } else { $fallbackName }
+    ExecutablePath = if ($entry.Path) { [string]$entry.Path } elseif ($null -ne $details) { [string]$details.ExecutablePath } else { '' }
+    CommandLine = if ($null -ne $details) { [string]$details.CommandLine } else { '' }
+    MainWindowHandle = [int64]$entry.MainWindowHandle
+    MainWindowTitle = [string]$entry.MainWindowTitle
+  }
+}
+
+$live = @(Get-Process)
+foreach ($cim in @(Get-CimInstance Win32_Process)) {
+  $metadata[[int]$cim.ProcessId] = [pscustomobject]@{
+    ParentProcessId = [int]$cim.ParentProcessId
+    Name = [string]$cim.Name
+    ExecutablePath = [string]$cim.ExecutablePath
+    CommandLine = [string]$cim.CommandLine
+  }
+}
+$initialRows = @($live | ForEach-Object {
+  $windowState[[int]$_.Id] = "$( [int64]$_.MainWindowHandle ):$([string]$_.MainWindowTitle)"
+  New-ProcessRow $_ $metadata[[int]$_.Id]
+})
+[Console]::Out.WriteLine((ConvertTo-Json -InputObject ([pscustomobject]@{
+  Kind = 'snapshot'
+  Processes = [object[]]$initialRows
+}) -Compress -Depth 3))
+[Console]::Out.Flush()
+
+while ($true) {
+  Start-Sleep -Milliseconds ${PROCESS_SAMPLE_INTERVAL_MS}
+  $live = @(Get-Process)
+  $liveIds = @{}
+  foreach ($entry in $live) { $liveIds[[int]$entry.Id] = $true }
+
+  $stopped = @($metadata.Keys | Where-Object { -not $liveIds.ContainsKey([int]$_) } | ForEach-Object { [int]$_ })
+  foreach ($stoppedId in $stopped) {
+    $metadata.Remove($stoppedId)
+    $windowState.Remove($stoppedId)
+  }
+
+  $newEntries = @($live | Where-Object { -not $metadata.ContainsKey([int]$_.Id) })
+  $newIds = @($newEntries | ForEach-Object { [int]$_.Id })
+  if ($newIds.Count -gt 0) {
+    $filter = ($newIds | ForEach-Object { "ProcessId = $_" }) -join ' OR '
+    foreach ($cim in @(Get-CimInstance Win32_Process -Filter $filter)) {
+    $metadata[[int]$cim.ProcessId] = [pscustomobject]@{
+      ParentProcessId = [int]$cim.ParentProcessId
+      Name = [string]$cim.Name
+      ExecutablePath = [string]$cim.ExecutablePath
+      CommandLine = [string]$cim.CommandLine
+    }
+  }
+  }
+
+  $newLookup = @{}
+  $started = @($newEntries | ForEach-Object {
+    $newLookup[[int]$_.Id] = $true
+    $windowState[[int]$_.Id] = "$( [int64]$_.MainWindowHandle ):$([string]$_.MainWindowTitle)"
+    New-ProcessRow $_ $metadata[[int]$_.Id]
+  })
+
+  $updated = @($live | Where-Object { -not $newLookup.ContainsKey([int]$_.Id) } | ForEach-Object {
+    $windowIdentity = "$( [int64]$_.MainWindowHandle ):$([string]$_.MainWindowTitle)"
+    if ($windowState[[int]$_.Id] -ne $windowIdentity) {
+      $windowState[[int]$_.Id] = $windowIdentity
+      [pscustomobject]@{
+        ProcessId = [int]$_.Id
+        MainWindowHandle = [int64]$_.MainWindowHandle
+        MainWindowTitle = [string]$_.MainWindowTitle
+      }
+    }
+  })
+
+  [Console]::Out.WriteLine((ConvertTo-Json -InputObject ([pscustomobject]@{
+    Kind = 'delta'
+    Started = [object[]]$started
+    Stopped = [int[]]$stopped
+    Updated = [object[]]$updated
+  }) -Compress -Depth 3))
+  [Console]::Out.Flush()
+}`
+
+function wait(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds))
+}
+
+function encodedPowerShell(script: string): string {
+  return Buffer.from(script, 'utf16le').toString('base64')
+}
+
+function processId(candidate: WindowsProcess): number {
+  return candidate.ProcessId ?? 0
+}
+
+function processName(candidate: WindowsProcess): string {
+  return (candidate.Name ?? '').trim().toLowerCase()
+}
+
+function normalizedPath(value?: string): string {
+  return (value ?? '').trim().replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase()
+}
+
+function processKey(candidate: WindowsProcess): string {
+  return normalizedPath(candidate.ExecutablePath) || processName(candidate)
+}
+
+function hasVisibleWindow(candidate: WindowsProcess): boolean {
+  return Boolean(candidate.MainWindowHandle)
+}
+
+function isInsideInstallDir(candidate: WindowsProcess, installDir?: string): boolean {
+  const root = normalizedPath(installDir)
+  const executable = normalizedPath(candidate.ExecutablePath)
+  return Boolean(root && executable && (executable === root || executable.startsWith(`${root}\\`)))
+}
+
+function launcherFamily(candidate: WindowsProcess): LauncherFamily | undefined {
+  const knownFamily = LAUNCHER_PROCESS_FAMILIES.get(processName(candidate))
+  if (knownFamily) return knownFamily
+  const executable = normalizedPath(candidate.ExecutablePath)
+  if (executable.includes('\\rockstar games\\launcher\\')) return 'rockstar'
+  if (executable.includes('\\2klauncher\\') || executable.includes('\\2k launcher\\')) return '2k'
+  return undefined
+}
+
+function isLauncherRootProcess(candidate: WindowsProcess): boolean {
+  const name = processName(candidate)
+  if (LAUNCHER_ROOT_PROCESSES.has(name)) return true
+  const family = launcherFamily(candidate)
+  return Boolean(family && (name === 'launcher.exe' || name === 'launcherpatcher.exe'))
+}
+
+function baselineInstance(
+  candidate: WindowsProcess,
+  baselineByPid: ReadonlyMap<number, WindowsProcess>
+): boolean {
+  const baseline = baselineByPid.get(processId(candidate))
+  if (!baseline) return false
+  return processName(baseline) === processName(candidate) && processKey(baseline) === processKey(candidate)
+}
+
+function ancestorMatches(
+  candidate: WindowsProcess,
+  processesByPid: ReadonlyMap<number, WindowsProcess>,
+  predicate: (ancestor: WindowsProcess) => boolean
+): boolean {
+  let parentId = candidate.ParentProcessId ?? 0
+  const visited = new Set<number>()
+  for (let depth = 0; depth < 14 && parentId > 0 && !visited.has(parentId); depth += 1) {
+    visited.add(parentId)
+    const parent = processesByPid.get(parentId)
+    if (!parent) return false
+    if (predicate(parent)) return true
+    parentId = parent.ParentProcessId ?? 0
+  }
+  return false
+}
+
+function gameNameTokens(game: LibraryGame): string[] {
+  return game.name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .split(/\s+/)
+    .filter((token) => token.length >= 3 && !GAME_NAME_STOP_WORDS.has(token))
+}
+
+function scoreGameProcess(
+  candidate: WindowsProcess,
+  game: LibraryGame,
+  baselineByPid: ReadonlyMap<number, WindowsProcess>,
+  processesByPid: ReadonlyMap<number, WindowsProcess>,
+  trackedPids: ReadonlySet<number>
+): ScoredProcess | null {
+  const pid = processId(candidate)
+  const name = processName(candidate)
+  if (
+    pid <= 0 ||
+    !name.endsWith('.exe') ||
+    baselineInstance(candidate, baselineByPid) ||
+    launcherFamily(candidate) ||
+    SYSTEM_PROCESSES.has(name) ||
+    NON_GAME_PROCESS.test(name)
+  ) {
+    return null
+  }
+
+  const executable = normalizedPath(candidate.ExecutablePath)
+  const commandLine = (candidate.CommandLine ?? '').toLowerCase()
+  const visible = hasVisibleWindow(candidate)
+  const insideInstallDir = isInsideInstallDir(candidate, game.installDir)
+  const fromLauncher = ancestorMatches(candidate, processesByPid, (ancestor) =>
+    Boolean(launcherFamily(ancestor))
+  )
+  const fromTrackedGame = ancestorMatches(candidate, processesByPid, (ancestor) =>
+    trackedPids.has(processId(ancestor))
+  )
+  const nameMatches = gameNameTokens(game).some((token) => name.includes(token))
+  const providerIds = [game.providerGameId, game.appId ? String(game.appId) : '']
+    .map((value) => value.trim().toLowerCase())
+    .filter((value) => value.length >= 4)
+  const idMatches = providerIds.some(
+    (value) => commandLine.includes(value) || executable.includes(value)
+  )
+
+  let score = 0
+  if (insideInstallDir) score += 140
+  if (visible) score += 85
+  if (fromLauncher) score += 55
+  if (fromTrackedGame) score += 70
+  if (nameMatches) score += 35
+  if (idMatches) score += 45
+  if (game.provider === 'xbox' && visible) score += 25
+  if (executable.includes('\\windowsapps\\')) score += 20
+
+  if (score < MIN_GAME_PROCESS_SCORE) return null
+  return { process: candidate, pid, key: processKey(candidate), score, visible }
+}
+
+function asArray<T>(value: T | T[] | undefined): T[] {
+  if (value === undefined) return []
+  return Array.isArray(value) ? value : [value]
+}
+
+class WindowsProcessSampler extends EventEmitter {
+  private child: ChildProcess | null = null
+  private reader: ReadlineInterface | null = null
+  private processesByPid = new Map<number, WindowsProcess>()
+  private latest: ProcessSnapshot = { sequence: 0, capturedAt: 0, processes: [] }
+
+  start(): void {
+    if (process.platform !== 'win32' || this.child) return
+    const child = spawn(
+      'powershell.exe',
+      [
+        '-NoLogo',
+        '-NoProfile',
+        '-NonInteractive',
+        '-EncodedCommand',
+        encodedPowerShell(PROCESS_SNAPSHOT_SCRIPT)
+      ],
+      { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }
+    )
+    this.child = child
+    child.once('error', () => {
+      this.child = null
+    })
+    if (!child.stdout) return
+    const reader = createInterface({ input: child.stdout })
+    this.reader = reader
+    reader.on('line', (line) => {
+      if (!line.trim()) return
+      try {
+        const message = JSON.parse(line) as ProcessStreamMessage
+        if (message.Kind === 'snapshot') {
+          this.processesByPid = new Map(
+            asArray(message.Processes)
+              .filter((candidate) => processId(candidate) > 0)
+              .map((candidate) => [processId(candidate), candidate] as const)
+          )
+        } else if (message.Kind === 'delta') {
+          for (const pid of asArray(message.Stopped)) this.processesByPid.delete(pid)
+          for (const candidate of asArray(message.Started)) {
+            if (processId(candidate) > 0) this.processesByPid.set(processId(candidate), candidate)
+          }
+          for (const update of asArray(message.Updated)) {
+            const pid = processId(update)
+            const current = this.processesByPid.get(pid)
+            if (current) this.processesByPid.set(pid, { ...current, ...update })
+          }
+        } else {
+          return
+        }
+        this.latest = {
+          sequence: this.latest.sequence + 1,
+          capturedAt: Date.now(),
+          processes: [...this.processesByPid.values()]
+        }
+        this.emit('snapshot', this.latest)
+      } catch {
+        // A single malformed snapshot is ignored; the persistent sampler keeps running.
+      }
+    })
+  }
+
+  getLatest(): ProcessSnapshot {
+    return this.latest
+  }
+
+  waitForNext(afterSequence: number, timeoutMs: number): Promise<ProcessSnapshot> {
+    if (this.latest.sequence > afterSequence) return Promise.resolve(this.latest)
+    return new Promise((resolve) => {
+      let settled = false
+      const finish = (snapshot: ProcessSnapshot): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        this.removeListener('snapshot', onSnapshot)
+        resolve(snapshot)
+      }
+      const onSnapshot = (snapshot: ProcessSnapshot): void => {
+        if (snapshot.sequence > afterSequence) finish(snapshot)
+      }
+      const timer = setTimeout(() => finish(this.latest), timeoutMs)
+      this.on('snapshot', onSnapshot)
+    })
+  }
+
+  stop(): void {
+    this.reader?.close()
+    this.reader = null
+    this.child?.kill()
+    this.child = null
+    this.removeAllListeners()
+  }
+}
+
+function closeLauncherProcesses(
+  processes: WindowsProcess[],
+  ownedFamilies: ReadonlySet<LauncherFamily>
+): Promise<void> {
+  if (process.platform !== 'win32' || ownedFamilies.size === 0) return Promise.resolve()
+  const processIds = processes
+    .filter(
+      (candidate) =>
+        isLauncherRootProcess(candidate) &&
+        ownedFamilies.has(launcherFamily(candidate) as LauncherFamily)
+    )
+    .map(processId)
+    .filter((pid) => pid > 0 && pid !== process.pid)
+  if (processIds.length === 0) return Promise.resolve()
+
+  const ids = processIds.join(',')
+  const script = `
+$ids = @(${ids})
+foreach ($id in $ids) {
+  $client = Get-Process -Id $id -ErrorAction SilentlyContinue
+  if ($null -ne $client -and $client.MainWindowHandle -ne 0) {
+    $null = $client.CloseMainWindow()
+  }
+}
+Start-Sleep -Milliseconds 1200
+foreach ($id in $ids) {
+  if (Get-Process -Id $id -ErrorAction SilentlyContinue) {
+    Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+  }
+}`
+
+  return new Promise((resolve) => {
+    execFile(
+      'powershell.exe',
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encodedPowerShell(script)],
+      { windowsHide: true, encoding: 'utf8' },
+      () => resolve()
+    )
+  })
+}
+
+function focusExternalProcess(pid: number): void {
+  if (process.platform !== 'win32' || pid <= 0) return
+  const script = `
+$target = Get-Process -Id ${pid} -ErrorAction SilentlyContinue
+if ($null -ne $target) {
+  $shell = New-Object -ComObject WScript.Shell
+  $null = $shell.AppActivate($target.Id)
+}`
+  execFile(
+    'powershell.exe',
+    ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encodedPowerShell(script)],
+    { windowsHide: true, encoding: 'utf8' },
+    () => undefined
+  )
+}
+
+/**
+ * Provider-neutral session detection for store and third-party hand-offs.
+ * A snapshot taken before launch prevents existing clients from being mistaken
+ * for the game. The monitor then combines install paths, process ancestry,
+ * provider IDs and visible top-level windows, while launcher/helper processes
+ * are explicitly excluded from the game lifetime.
+ */
+export class GameSessionManager extends EventEmitter {
+  private status: GameLaunchStatus = { phase: 'idle' }
+  private activeToken = 0
+  private sampler: WindowsProcessSampler | null = null
+  private launchTargetRevealed = false
+
+  constructor(private readonly mainWindow: BrowserWindow) {
+    super()
+  }
+
+  getStatus(): GameLaunchStatus {
+    return { ...this.status }
+  }
+
+  revealLauncher(): void {
+    if (this.status.phase === 'idle' || this.status.phase === 'returning') return
+    this.launchTargetRevealed = true
+    this.releaseLaunchShield(true)
+  }
+
+  async start(game: LibraryGame): Promise<void> {
+    if (this.status.phase !== 'idle') throw new Error('A game session is already active')
+
+    const token = ++this.activeToken
+    const startedAt = Date.now()
+    this.launchTargetRevealed = false
+    this.update({
+      phase: 'launching',
+      gameId: game.id,
+      gameName: game.name,
+      provider: game.provider,
+      startedAt
+    })
+    this.maintainLaunchShield(token)
+
+    const sampler = new WindowsProcessSampler()
+    this.sampler = sampler
+    sampler.start()
+    const baselinePromise = sampler.waitForNext(0, BASELINE_TIMEOUT_MS)
+    const [baseline] = await Promise.all([baselinePromise, wait(SPLASH_LEAD_IN_MS)])
+
+    try {
+      await launchGame(game)
+    } catch (error) {
+      sampler.stop()
+      if (this.sampler === sampler) this.sampler = null
+      await this.fail(token, error instanceof Error ? error.message : 'Launch failed')
+      return
+    }
+
+    // The provider-neutral launch shield keeps this in-app splash in front while
+    // Steam/Epic/Xbox/EA/Ubisoft hand off. The monitor releases it only for the
+    // detected game's own visible process (or the explicit timeout/Y fallback).
+    void this.monitor(token, game, startedAt, sampler, baseline)
+  }
+
+  private async monitor(
+    token: number,
+    game: LibraryGame,
+    startedAt: number,
+    sampler: WindowsProcessSampler,
+    baseline: ProcessSnapshot
+  ): Promise<void> {
+    const baselineByPid = new Map(
+      baseline.processes.map((candidate) => [processId(candidate), candidate] as const)
+    )
+    const baselineLauncherFamilies = new Set<LauncherFamily>(
+      baseline.processes
+        .filter(isLauncherRootProcess)
+        .map(launcherFamily)
+        .filter((family): family is LauncherFamily => Boolean(family))
+    )
+    const ownedLauncherFamilies = new Set<LauncherFamily>()
+    const trackedPids = new Set<number>()
+    const primaryProcessKeys = new Set<string>()
+    const candidateSeenAt = new Map<string, number>()
+    let sequence = baseline.sequence
+    let detectedAt: number | undefined
+    let primaryStableSince: number | undefined
+    let sessionConfirmed = false
+    let gameFocusHandedOff = false
+    let missingSince: number | undefined
+    let lastProcesses = baseline.processes
+    const startupDeadline = startedAt + STARTUP_TIMEOUT_MS
+
+    try {
+      while (token === this.activeToken) {
+        const snapshot = await sampler.waitForNext(sequence, SNAPSHOT_TIMEOUT_MS)
+        if (snapshot.sequence <= sequence) continue
+        sequence = snapshot.sequence
+        lastProcesses = snapshot.processes
+        const now = Date.now()
+        const processesByPid = new Map(
+          lastProcesses.map((candidate) => [processId(candidate), candidate] as const)
+        )
+
+        if (!detectedAt && !this.launchTargetRevealed) {
+          if (now - startedAt < LAUNCH_SHIELD_TIMEOUT_MS) this.maintainLaunchShield(token)
+          else this.revealLauncher()
+        }
+
+        for (const candidate of lastProcesses) {
+          if (!isLauncherRootProcess(candidate)) continue
+          const family = launcherFamily(candidate)
+          if (family && !baselineLauncherFamilies.has(family)) ownedLauncherFamilies.add(family)
+        }
+
+        const candidates = lastProcesses
+          .map((candidate) =>
+            scoreGameProcess(candidate, game, baselineByPid, processesByPid, trackedPids)
+          )
+          .filter((candidate): candidate is ScoredProcess => Boolean(candidate))
+          .sort((left, right) => right.score - left.score)
+
+        if (!detectedAt) {
+          const best = candidates[0]
+          if (best) {
+            const seenAt = candidateSeenAt.get(best.key) ?? now
+            candidateSeenAt.set(best.key, seenAt)
+            if (now - seenAt >= CANDIDATE_STABILITY_MS) {
+              detectedAt = now
+              primaryStableSince = now
+              sessionConfirmed = false
+              trackedPids.add(best.pid)
+              primaryProcessKeys.add(best.key)
+              missingSince = undefined
+              this.update({
+                phase: 'running',
+                gameId: game.id,
+                gameName: game.name,
+                provider: game.provider,
+                startedAt,
+                detectedAt
+              })
+              if (best.visible) {
+                this.handoffToGame(token, best.pid)
+                gameFocusHandedOff = true
+              }
+            }
+          } else {
+            candidateSeenAt.clear()
+          }
+
+          if (!detectedAt && now >= startupDeadline) {
+            await this.fail(token, 'No game process was detected')
+            return
+          }
+          continue
+        }
+
+        const activePrimary = candidates.filter((candidate) => {
+          if (primaryProcessKeys.has(candidate.key)) return true
+          const inherited = ancestorMatches(candidate.process, processesByPid, (ancestor) =>
+            trackedPids.has(processId(ancestor))
+          )
+          if (inherited && (candidate.visible || candidate.score >= 180)) {
+            primaryProcessKeys.add(candidate.key)
+            return true
+          }
+          if (missingSince && candidate.visible && candidate.score >= 110) {
+            primaryProcessKeys.add(candidate.key)
+            return true
+          }
+          if (missingSince && candidate.score >= 140) {
+            primaryProcessKeys.add(candidate.key)
+            return true
+          }
+          return false
+        })
+
+        trackedPids.clear()
+        for (const candidate of activePrimary) trackedPids.add(candidate.pid)
+
+        if (activePrimary.length > 0) {
+          if (!gameFocusHandedOff) {
+            const visibleGame = activePrimary.find((candidate) => candidate.visible)
+            if (visibleGame) {
+              this.handoffToGame(token, visibleGame.pid)
+              gameFocusHandedOff = true
+            }
+          }
+          primaryStableSince ??= now
+          if (now - primaryStableSince >= GAME_CONFIRMATION_MS) sessionConfirmed = true
+          missingSince = undefined
+        } else {
+          if (!sessionConfirmed) {
+            // Short-lived launch shims (EA/Ubisoft/Xbox bootstrap processes,
+            // anti-cheat hand-offs, etc.) are provisional. Losing one returns
+            // to launch detection instead of incorrectly ending the session.
+            detectedAt = undefined
+            primaryStableSince = undefined
+            gameFocusHandedOff = false
+            missingSince = undefined
+            trackedPids.clear()
+            primaryProcessKeys.clear()
+            candidateSeenAt.clear()
+            this.update({
+              phase: 'launching',
+              gameId: game.id,
+              gameName: game.name,
+              provider: game.provider,
+              startedAt
+            })
+            if (!this.launchTargetRevealed && now - startedAt < LAUNCH_SHIELD_TIMEOUT_MS) {
+              this.maintainLaunchShield(token)
+            }
+            continue
+          }
+          missingSince ??= now
+          const exitGrace =
+            now - detectedAt < EARLY_SESSION_WINDOW_MS
+              ? EARLY_HANDOFF_GRACE_MS
+              : PROCESS_EXIT_GRACE_MS
+          if (now - missingSince >= exitGrace) {
+            await this.returnToOrbit(
+              token,
+              game,
+              startedAt,
+              detectedAt,
+              lastProcesses,
+              ownedLauncherFamilies
+            )
+            return
+          }
+        }
+      }
+    } finally {
+      sampler.stop()
+      if (this.sampler === sampler) this.sampler = null
+    }
+  }
+
+  private async returnToOrbit(
+    token: number,
+    game: LibraryGame,
+    startedAt: number,
+    detectedAt: number,
+    processes: WindowsProcess[],
+    ownedLauncherFamilies: ReadonlySet<LauncherFamily>
+  ): Promise<void> {
+    if (token !== this.activeToken) return
+    this.update({
+      phase: 'returning',
+      gameId: game.id,
+      gameName: game.name,
+      provider: game.provider,
+      startedAt,
+      detectedAt,
+      endedAt: Date.now()
+    })
+    this.releaseLaunchShield(false)
+    this.focusOrbit()
+    if (settingsStore.store.closeLaunchersAfterGame) {
+      void closeLauncherProcesses(processes, ownedLauncherFamilies)
+    }
+    await wait(RETURN_SPLASH_MS)
+    if (token === this.activeToken) this.update({ phase: 'idle' })
+  }
+
+  private async fail(token: number, message: string): Promise<void> {
+    if (token !== this.activeToken) return
+    this.update({ ...this.status, phase: 'error', message, endedAt: Date.now() })
+    this.releaseLaunchShield(false)
+    this.focusOrbit()
+    await wait(ERROR_SPLASH_MS)
+    if (token === this.activeToken) this.update({ phase: 'idle' })
+  }
+
+  private focusOrbit(): void {
+    if (this.mainWindow.isDestroyed()) return
+    if (this.mainWindow.isMinimized()) this.mainWindow.restore()
+    this.mainWindow.show()
+    this.mainWindow.setFullScreen(true)
+    this.mainWindow.moveTop()
+    this.mainWindow.focus()
+  }
+
+  private maintainLaunchShield(token: number): void {
+    if (token !== this.activeToken || this.launchTargetRevealed || this.mainWindow.isDestroyed()) {
+      return
+    }
+    if (this.mainWindow.isMinimized()) this.mainWindow.restore()
+    this.mainWindow.setFullScreen(true)
+    this.mainWindow.setAlwaysOnTop(true, 'screen-saver')
+    this.mainWindow.show()
+    this.mainWindow.moveTop()
+    this.mainWindow.focus()
+  }
+
+  private handoffToGame(token: number, pid: number): void {
+    if (token !== this.activeToken) return
+    this.releaseLaunchShield(true)
+    focusExternalProcess(pid)
+  }
+
+  private releaseLaunchShield(minimize: boolean): void {
+    if (this.mainWindow.isDestroyed()) return
+    this.mainWindow.setAlwaysOnTop(false)
+    if (minimize && !this.mainWindow.isMinimized()) this.mainWindow.minimize()
+  }
+
+  private update(status: GameLaunchStatus): void {
+    this.status = status
+    this.emit('updated', this.getStatus())
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "name": "orbit",
+  "version": "0.0.3",
+  "description": "ORBIT — Gaming Launcher Console UI",
+  "main": "./out/main/index.js",
+  "author": "Luis Garcia",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "build:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/Build-OrbitInstaller.ps1",
+    "build:xbox": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/Build-OrbitXboxPackage.ps1",
+    "install:xbox": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/Install-OrbitXboxMode.ps1",
+    "cert:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/New-OrbitDevCertificate.ps1",
+    "verify:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/Verify-OrbitRelease.ps1",
+    "verify:xbox": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/Verify-OrbitXboxPackage.ps1"
+  },
+  "dependencies": {
+    "@electron-toolkit/preload": "^3.0.1",
+    "@electron-toolkit/utils": "^3.0.0",
+    "electron-store": "^10.0.0",
+    "electron-updater": "^6.3.9",
+    "framer-motion": "^11.11.17",
+    "howlongtobeat-ts": "^1.2.0",
+    "lucide-react": "^0.462.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zustand": "^5.0.1"
+  },
+  "devDependencies": {
+    "@electron-toolkit/tsconfig": "^1.0.1",
+    "@types/node": "^22.9.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "autoprefixer": "^10.4.20",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^2.3.0",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.15",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11"
+  },
+  "allowScripts": {
+    "electron@33.4.11": true,
+    "esbuild@0.21.5": true,
+    "protobufjs@7.6.5": true
+  }
+}
