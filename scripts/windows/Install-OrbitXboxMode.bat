@@ -2,7 +2,7 @@
 setlocal
 title ORBIT Xbox Mode Setup
 echo.
-echo   ORBIT 0.0.0.3 - Xbox Mode Setup
+echo   ORBIT Beta - Xbox Mode Setup
 echo   Requesting administrator permission...
 echo.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Install-OrbitXboxMode.ps1" -Launch

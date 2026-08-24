@@ -6,8 +6,14 @@ Set-StrictMode -Version Latest
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $releaseDir = Join-Path $repoRoot 'release'
-$packagePath = Join-Path $releaseDir 'ORBIT-XboxMode-0.0.0.3-x64.appx'
-$installerPath = Join-Path $releaseDir 'ORBIT-XboxMode-Setup-0.0.0.3-x64.exe'
+$releaseMetadata = Get-Content -LiteralPath (Join-Path $repoRoot 'resources\release-manifest.json') -Raw | ConvertFrom-Json
+$displayVersion = [string]$releaseMetadata.displayVersion
+$packageVersion = [string]$releaseMetadata.packageVersion
+$windowsFileVersion = [string]$releaseMetadata.windowsFileVersion
+$xboxPackageVersion = [string]$releaseMetadata.xboxPackageVersion
+$releaseSequence = [int]$releaseMetadata.releaseSequence
+$packagePath = Join-Path $releaseDir "ORBIT-Beta-XboxMode-$displayVersion-x64.appx"
+$installerPath = Join-Path $releaseDir "ORBIT-Beta-XboxMode-Setup-$displayVersion-x64.exe"
 $certificateMetadataPath = Join-Path $repoRoot '.certificates\orbit-development.json'
 $inspectionDir = Join-Path $releaseDir '_orbit-xbox-inspection'
 $readmePath = Join-Path $releaseDir 'XBOX-MODE-README.txt'
@@ -40,9 +46,12 @@ try {
   $namespaceManager.AddNamespace('uap4', 'http://schemas.microsoft.com/appx/manifest/uap/windows10/4')
 
   $packageIdentity = $manifest.SelectSingleNode('/f:Package/f:Identity', $namespaceManager)
-  if ($packageIdentity.Name -ne 'ORBIT.GamingHome' -or $packageIdentity.Version -ne '0.0.0.3') {
+  if ($packageIdentity.Name -ne 'ORBIT.GamingHome' -or $packageIdentity.Version -ne $xboxPackageVersion) {
     throw "Unexpected package identity/version: $($packageIdentity.Name) $($packageIdentity.Version)"
   }
+  $universalFamily = $manifest.SelectSingleNode("/f:Package/f:Dependencies/f:TargetDeviceFamily[@Name='Windows.Universal']", $namespaceManager)
+  $desktopFamily = $manifest.SelectSingleNode("/f:Package/f:Dependencies/f:TargetDeviceFamily[@Name='Windows.Desktop']", $namespaceManager)
+  if (!$universalFamily -or !$desktopFamily) { throw 'The package must target both Windows.Universal and Windows.Desktop for handheld compatibility.' }
   $gamingExtension = $manifest.SelectSingleNode("//uap3:AppExtension[@Name='windows.gamingApp']", $namespaceManager)
   if (!$gamingExtension) { throw 'The windows.gamingApp extension is missing.' }
   $gamingCapability = $manifest.SelectSingleNode("//uap4:CustomCapability[@Name='Microsoft.appCategory.gamingHome_8wekyb3d8bbwe']", $namespaceManager)
@@ -58,8 +67,8 @@ try {
   }
 
   $packagedRelease = Get-Content -LiteralPath (Join-Path $inspectionDir 'app\resources\release-manifest.json') -Raw | ConvertFrom-Json
-  if ($packagedRelease.displayVersion -ne '0.0.0.3' -or !$packagedRelease.xboxMode.enabled) {
-    throw 'The packaged release manifest does not describe Xbox Mode revision 0.0.0.3.'
+  if ($packagedRelease.displayVersion -ne $displayVersion -or !$packagedRelease.xboxMode.enabled) {
+    throw "The packaged release manifest does not describe Xbox Mode beta $displayVersion."
   }
 
   $certificateMetadata = Get-Content -LiteralPath $certificateMetadataPath -Raw | ConvertFrom-Json
@@ -83,15 +92,16 @@ try {
   $hash = (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash.ToLowerInvariant()
   $installerFile = Get-Item -LiteralPath $installerPath
   $installerHash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash.ToLowerInvariant()
-  if ($installerFile.VersionInfo.FileVersion -notlike '0.0.0.3*') {
+  if ($installerFile.VersionInfo.FileVersion -notlike "$windowsFileVersion*") {
     throw "Unexpected setup file version: $($installerFile.VersionInfo.FileVersion)"
   }
   [ordered]@{
     schemaVersion = 1
     product = 'ORBIT'
-    displayVersion = '0.0.0.3'
-    packageVersion = '0.0.3'
-    releaseSequence = 3
+    displayVersion = $displayVersion
+    packageVersion = $packageVersion
+    releaseSequence = $releaseSequence
+    channel = 'beta'
     packageIdentity = 'ORBIT.GamingHome'
     applicationId = 'ORBIT'
     xboxMode = $true
@@ -126,21 +136,22 @@ try {
     "$hash  $($file.Name)"
   ) | Set-Content -LiteralPath (Join-Path $releaseDir 'XBOX-SHA256SUMS.txt') -Encoding ASCII
 
-  @'
-ORBIT 0.0.0.3 - Xbox Mode test build
+  @"
+ORBIT $displayVersion - Xbox Mode beta
 
-Recommended: run ORBIT-XboxMode-Setup-0.0.0.3-x64.exe. It is a self-contained installer.
+Recommended: run ORBIT-Beta-XboxMode-Setup-$displayVersion-x64.exe. It is a self-contained installer.
 
 ZIP fallback:
 1. Keep all files from the ZIP in the same folder.
 2. Double-click Install-OrbitXboxMode.bat.
 3. Approve the administrator prompt. The installer adds the certificate only to LocalMachine\TrustedPeople,
    enables Developer Mode for the SCCD capability, and installs the AppX package.
-4. Open Settings > Gaming > Xbox mode > Choose home app and select ORBIT.
+4. The installer opens Settings > Gaming > Full screen experience. Under Choose home app, select ORBIT.
 
 Requirements: Windows 11 build 10.0.26100.7019 or newer and a device/installation on which Xbox mode is available.
-This self-signed package is intended only for private development devices.
-'@ | Set-Content -LiteralPath $readmePath -Encoding UTF8
+On native builds such as 26100.8328+ or 26200.8328+, no display-size override is required.
+This community beta is signed with the self-signed ORBIT certificate. Verify its thumbprint before trusting it.
+"@ | Set-Content -LiteralPath $readmePath -Encoding UTF8
 
   Write-Host "Xbox Mode artifacts verified: $($file.Name), $($installerFile.Name)"
 } finally {

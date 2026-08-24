@@ -20,6 +20,12 @@ npm run build
 
 Windows installer and Xbox Mode packaging are documented in [PACKAGING.md](PACKAGING.md).
 
+Create the complete signed community-beta bundle with:
+
+```powershell
+npm run build:beta
+```
+
 ## Files intentionally not stored in GitHub
 
 Generated dependencies and build outputs (`node_modules`, `out`, and `release`), downloaded build tools (`.tools`), local editor/assistant settings, and TypeScript build caches are excluded because they can be recreated.

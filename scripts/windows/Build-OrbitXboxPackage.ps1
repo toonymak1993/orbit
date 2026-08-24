@@ -8,12 +8,19 @@ Set-StrictMode -Version Latest
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $releaseDir = Join-Path $repoRoot 'release'
+$releaseMetadataPath = Join-Path $repoRoot 'resources\release-manifest.json'
+$releaseMetadata = Get-Content -LiteralPath $releaseMetadataPath -Raw | ConvertFrom-Json
+$displayVersion = [string]$releaseMetadata.displayVersion
+$windowsFileVersion = [string]$releaseMetadata.windowsFileVersion
 $appOutDir = Join-Path $releaseDir 'win-unpacked'
 $stageDir = Join-Path $releaseDir '_orbit-xbox-stage'
 $bundleDir = Join-Path $releaseDir '_orbit-xbox-bundle'
-$appxPath = Join-Path $releaseDir 'ORBIT-XboxMode-0.0.0.3-x64.appx'
-$bundlePath = Join-Path $releaseDir 'ORBIT-XboxMode-0.0.0.3-x64.zip'
-$oneClickInstallerPath = Join-Path $releaseDir 'ORBIT-XboxMode-Setup-0.0.0.3-x64.exe'
+$appxFileName = "ORBIT-Beta-XboxMode-$displayVersion-x64.appx"
+$bundleFileName = "ORBIT-Beta-XboxMode-$displayVersion-x64.zip"
+$oneClickInstallerFileName = "ORBIT-Beta-XboxMode-Setup-$displayVersion-x64.exe"
+$appxPath = Join-Path $releaseDir $appxFileName
+$bundlePath = Join-Path $releaseDir $bundleFileName
+$oneClickInstallerPath = Join-Path $releaseDir $oneClickInstallerFileName
 $certificateDir = Join-Path $repoRoot '.certificates'
 $pfxPath = Join-Path $certificateDir 'orbit-development.pfx'
 $cerPath = Join-Path $certificateDir 'orbit-development.cer'
@@ -130,6 +137,8 @@ try {
     "/DAPPX_PATH=$appxPath" `
     "/DCERT_PATH=$cerPath" `
     "/DINSTALL_SCRIPT_PATH=$(Join-Path $PSScriptRoot 'Install-OrbitXboxMode.ps1')" `
+    "/DDISPLAY_VERSION=$displayVersion" `
+    "/DFILE_VERSION=$windowsFileVersion" `
     "/DOUTPUT_PATH=$oneClickInstallerPath" `
     (Join-Path $repoRoot 'build\xbox\OrbitXboxInstaller.nsi')
   if ($LASTEXITCODE -ne 0) { throw 'NSIS failed to create the one-click Xbox Mode setup.' }
@@ -141,7 +150,7 @@ try {
 
   New-Item -ItemType Directory -Force -Path $bundleDir | Out-Null
   foreach ($fileName in @(
-    'ORBIT-XboxMode-0.0.0.3-x64.appx',
+    $appxFileName,
     'ORBIT-Development.cer',
     'Install-OrbitXboxMode.bat',
     'Install-OrbitXboxMode.ps1',

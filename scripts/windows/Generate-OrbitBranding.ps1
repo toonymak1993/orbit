@@ -8,6 +8,8 @@ Add-Type -AssemblyName System.Drawing
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $buildDir = Join-Path $repoRoot 'build'
+$releaseMetadata = Get-Content -LiteralPath (Join-Path $repoRoot 'resources\release-manifest.json') -Raw | ConvertFrom-Json
+$displayVersion = [string]$releaseMetadata.displayVersion
 New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
 
 function New-RoundedPath {
@@ -115,7 +117,7 @@ function New-OrbitSidebar {
       $graphics.DrawString('ORBIT', $titleFont, $white, 43, 154)
       $graphics.DrawString('YOUR GAMES. ONE UNIVERSE.', $labelFont, $accent, 25, 185)
       $graphics.DrawString("Fast. Focused. Controller-first.", $smallFont, $muted, 25, 209)
-      $graphics.DrawString('VERSION 0.0.0.3', $labelFont, $muted, 25, 266)
+      $graphics.DrawString("BETA $displayVersion", $labelFont, $muted, 25, 266)
     } finally {
       $titleFont.Dispose()
       $smallFont.Dispose()
@@ -161,7 +163,7 @@ function New-OrbitHeader {
     $muted = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(176, 188, 204, 226))
     try {
       $graphics.DrawString('ORBIT', $titleFont, $white, 12, 10)
-      $graphics.DrawString('SETUP  -  0.0.0.3', $labelFont, $muted, 13, 34)
+      $graphics.DrawString("BETA  -  $displayVersion", $labelFont, $muted, 13, 34)
     } finally {
       $titleFont.Dispose()
       $labelFont.Dispose()

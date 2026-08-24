@@ -8,8 +8,8 @@ interface ReleaseManifest {
 }
 
 const fallbackManifest: ReleaseManifest = {
-  displayVersion: '0.0.0.3',
-  packageVersion: '0.0.3'
+  displayVersion: '0.1.0-beta.3',
+  packageVersion: '0.1.0-beta.3'
 }
 
 let cachedManifest: ReleaseManifest | null = null

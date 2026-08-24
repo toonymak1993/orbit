@@ -1,5 +1,5 @@
 !macro customHeader
-  BrandingText "ORBIT 0.0.0.3 - Console-first gaming"
+  BrandingText "ORBIT 0.1.0-beta.3 - Console-first gaming"
   !define MUI_ABORTWARNING
 !macroend
 

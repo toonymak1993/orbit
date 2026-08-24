@@ -6,7 +6,12 @@ Set-StrictMode -Version Latest
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $releaseDir = Join-Path $repoRoot 'release'
-$installerPath = Join-Path $releaseDir 'ORBIT-Setup-0.0.0.3-x64.exe'
+$releaseMetadata = Get-Content -LiteralPath (Join-Path $repoRoot 'resources\release-manifest.json') -Raw | ConvertFrom-Json
+$displayVersion = [string]$releaseMetadata.displayVersion
+$packageVersion = [string]$releaseMetadata.packageVersion
+$windowsFileVersion = [string]$releaseMetadata.windowsFileVersion
+$releaseSequence = [int]$releaseMetadata.releaseSequence
+$installerPath = Join-Path $releaseDir "ORBIT-Beta-Setup-$displayVersion-x64.exe"
 $applicationPath = Join-Path $releaseDir 'win-unpacked\ORBIT.exe'
 $packagedManifestPath = Join-Path $releaseDir 'win-unpacked\resources\release-manifest.json'
 $certificateMetadataPath = Join-Path $repoRoot '.certificates\orbit-development.json'
@@ -19,7 +24,7 @@ foreach ($requiredPath in @($installerPath, $applicationPath, $packagedManifestP
 
 $certificateMetadata = Get-Content -LiteralPath $certificateMetadataPath -Raw | ConvertFrom-Json
 $packagedManifest = Get-Content -LiteralPath $packagedManifestPath -Raw | ConvertFrom-Json
-if ($packagedManifest.displayVersion -ne '0.0.0.3') {
+if ($packagedManifest.displayVersion -ne $displayVersion) {
   throw "Packaged manifest contains unexpected display version: $($packagedManifest.displayVersion)"
 }
 
@@ -36,7 +41,7 @@ $verifiedFiles = foreach ($path in @($installerPath, $applicationPath)) {
   }
 
   $file = Get-Item -LiteralPath $path
-  if ($file.VersionInfo.FileVersion -notlike '0.0.0.3*') {
+  if ($file.VersionInfo.FileVersion -notlike "$windowsFileVersion*") {
     throw "Unexpected Windows file version for $path`: $($file.VersionInfo.FileVersion)"
   }
 
@@ -57,10 +62,10 @@ $distributionManifest = [ordered]@{
   schemaVersion = 1
   product = 'ORBIT'
   appId = 'com.orbit.launcher'
-  displayVersion = '0.0.0.3'
-  packageVersion = '0.0.3'
-  releaseSequence = 3
-  channel = 'development'
+  displayVersion = $displayVersion
+  packageVersion = $packageVersion
+  releaseSequence = $releaseSequence
+  channel = 'beta'
   updateMode = 'manual-package'
   generatedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
   artifacts = $verifiedFiles

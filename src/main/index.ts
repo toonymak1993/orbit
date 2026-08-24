@@ -9,6 +9,8 @@ protocol.registerSchemesAsPrivileged([
   { scheme: 'orbit-image', privileges: { supportFetchAPI: true, bypassCSP: true, corsEnabled: true } }
 ])
 
+const hasSingleInstanceLock = app.requestSingleInstanceLock()
+
 function createWindow(): BrowserWindow {
   const mainWindow = new BrowserWindow({
     show: false,
@@ -50,34 +52,46 @@ function createWindow(): BrowserWindow {
   return mainWindow
 }
 
-void app.whenReady().then(() => {
-  // The AppX package already supplies the shell identity used by Xbox Mode.
-  // Overriding it would detach ORBIT from its registered Gaming Home entry.
-  if (!process.windowsStore) {
-    electronApp.setAppUserModelId('com.orbit.launcher')
-  }
+if (!hasSingleInstanceLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    const mainWindow = BrowserWindow.getAllWindows()[0]
+    if (!mainWindow) return
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.show()
+    mainWindow.focus()
+  })
 
-  protocol.handle('orbit-image', (request) => {
-    const fileName = decodeURIComponent(request.url.replace('orbit-image://', ''))
-    if (fileName.includes('..') || fileName.includes('/') || fileName.includes('\\')) {
-      return new Response(null, { status: 400 })
+  void app.whenReady().then(() => {
+    // The AppX package already supplies the shell identity used by Xbox Mode.
+    // Overriding it would detach ORBIT from its registered Gaming Home entry.
+    if (!process.windowsStore) {
+      electronApp.setAppUserModelId('com.orbit.launcher')
     }
-    return net.fetch(pathToFileURL(join(getCacheDir(), fileName)).toString())
+
+    protocol.handle('orbit-image', (request) => {
+      const fileName = decodeURIComponent(request.url.replace('orbit-image://', ''))
+      if (fileName.includes('..') || fileName.includes('/') || fileName.includes('\\')) {
+        return new Response(null, { status: 400 })
+      }
+      return net.fetch(pathToFileURL(join(getCacheDir(), fileName)).toString())
+    })
+
+    app.on('browser-window-created', (_, window) => {
+      optimizer.watchWindowShortcuts(window)
+    })
+
+    createWindow()
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    })
   })
 
-  app.on('browser-window-created', (_, window) => {
-    optimizer.watchWindowShortcuts(window)
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') {
+      app.quit()
+    }
   })
-
-  createWindow()
-
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
-  })
-})
-
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit()
-  }
-})
+}

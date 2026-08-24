@@ -2,5 +2,7 @@
   "schemaVersion": 1,
   "product": "ORBIT",
   "role": "gaming-home",
-  "version": "0.0.0.3"
+  "applicationId": "ORBIT",
+  "version": "0.1.0.2",
+  "channel": "beta"
 }

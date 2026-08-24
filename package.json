@@ -1,6 +1,6 @@
 {
   "name": "orbit",
-  "version": "0.0.3",
+  "version": "0.1.0-beta.3",
   "description": "ORBIT — Gaming Launcher Console UI",
   "main": "./out/main/index.js",
   "author": "Luis Garcia",
@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "build:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/Build-OrbitInstaller.ps1",
     "build:xbox": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/Build-OrbitXboxPackage.ps1",
+    "build:beta": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/Build-OrbitBeta.ps1",
     "install:xbox": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/Install-OrbitXboxMode.ps1",
     "cert:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/New-OrbitDevCertificate.ps1",
     "verify:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/Verify-OrbitRelease.ps1",
@@ -37,7 +38,7 @@
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.3",
     "autoprefixer": "^10.4.20",
-    "electron": "^33.2.0",
+    "electron": "43.4.1",
     "electron-builder": "^25.1.8",
     "electron-vite": "^2.3.0",
     "postcss": "^8.4.49",
@@ -46,7 +47,7 @@
     "vite": "^5.4.11"
   },
   "allowScripts": {
-    "electron@33.4.11": true,
+    "electron@43.4.1": true,
     "esbuild@0.21.5": true,
     "protobufjs@7.6.5": true
   }

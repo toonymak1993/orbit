@@ -622,7 +622,7 @@ export function SettingsView(): JSX.Element {
 
                 <SettingsSection icon={SlidersHorizontal} title={t('settings.about.title')}>
                   <p className="text-sm text-muted">
-                    {t('settings.about.version', { version: version || '0.0.0.3' })}
+                    {t('settings.about.version', { version: version || '0.1.0-beta.3' })}
                   </p>
                 </SettingsSection>
               </div>

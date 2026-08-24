@@ -10,7 +10,7 @@
     Name="ORBIT.GamingHome"
     ProcessorArchitecture="x64"
     Publisher="CN=ORBIT Development"
-    Version="0.0.0.3" />
+    Version="0.1.0.2" />
   <Properties>
     <DisplayName>ORBIT</DisplayName>
     <PublisherDisplayName>ORBIT Development</PublisherDisplayName>
@@ -22,7 +22,8 @@
     <Resource Language="de-DE" />
   </Resources>
   <Dependencies>
-    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.26100.7019" MaxVersionTested="10.0.26200.0" />
+    <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.26100.7019" MaxVersionTested="10.0.26200.9168" />
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.26100.7019" MaxVersionTested="10.0.26200.9168" />
   </Dependencies>
   <Capabilities>
     <rescap:Capability Name="runFullTrust" />

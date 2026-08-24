@@ -40,4 +40,4 @@ if (!$isAdministrator) {
 Import-Certificate -FilePath $resolvedCertificate -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople' | Out-Null
 Write-Host "Trusted ORBIT development publisher in LocalMachine\TrustedPeople: $($certificate.Thumbprint)"
 Write-Host 'No certificate was added to a Root certificate store.'
-Write-Warning 'This certificate is for ORBIT development builds only. Do not use it for public distribution.'
+Write-Warning 'This self-signed publisher is trusted only for ORBIT beta builds. Verify the thumbprint against the official ORBIT beta release before installing.'

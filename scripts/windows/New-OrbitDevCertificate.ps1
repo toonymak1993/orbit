@@ -92,7 +92,7 @@ if (!$hasReusableCertificate) {
     thumbprint = $certificate.Thumbprint
     notBefore = $certificate.NotBefore.ToUniversalTime().ToString('o')
     notAfter = $certificate.NotAfter.ToUniversalTime().ToString('o')
-    usage = 'local-development-code-signing-only'
+    usage = 'orbit-community-beta-code-signing'
     privateKeyFile = '.certificates/orbit-development.pfx'
     publicCertificateFile = '.certificates/orbit-development.cer'
   } | ConvertTo-Json | Set-Content -LiteralPath $metadataPath -Encoding UTF8
