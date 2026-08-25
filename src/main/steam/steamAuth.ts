@@ -31,16 +31,12 @@ function extractSteamId(cookies: Cookie[]): string | null {
   return /^\d{17}$/.test(steamId) ? steamId : null
 }
 
-async function fetchPersonaName(steamId: string, cookies: Cookie[]): Promise<string | null> {
+async function fetchPersonaName(steamId: string): Promise<string | null> {
   try {
-    const cookieHeader = cookies
-      .filter((c) => c.domain?.includes('steampowered.com') || c.domain?.includes('steamcommunity.com'))
-      .map((c) => `${c.name}=${c.value}`)
-      .join('; ')
-
-    const res = await fetch(`https://steamcommunity.com/profiles/${steamId}/?xml=1`, {
-      headers: { Cookie: cookieHeader, 'User-Agent': CHROME_USER_AGENT }
-    })
+    const res = await getLoginSession().fetch(
+      `https://steamcommunity.com/profiles/${steamId}/?xml=1`,
+      { credentials: 'include', headers: { 'User-Agent': CHROME_USER_AGENT } }
+    )
     if (!res.ok) return null
     const xml = await res.text()
     const match = xml.match(/<steamID><!\[CDATA\[(.*?)\]\]><\/steamID>/)
@@ -75,7 +71,7 @@ export class SteamAuthManager extends EventEmitter {
       return cached
     }
 
-    const accountName = (await fetchPersonaName(steamId, cookies)) ?? 'Steam User'
+    const accountName = (await fetchPersonaName(steamId)) ?? 'Steam User'
     const account: SteamAccount = { steamId, accountName }
     accountCache.set('account', account)
     this.account = account

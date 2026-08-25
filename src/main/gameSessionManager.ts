@@ -2,7 +2,7 @@ import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { createInterface, type Interface as ReadlineInterface } from 'node:readline'
 import type { BrowserWindow } from 'electron'
-import type { GameLaunchStatus, LibraryGame } from '@shared/ipc'
+import type { GameLaunchStatus, LibraryGame, LocalGameBackupResult } from '@shared/ipc'
 import { launchGame } from './gameLauncher'
 import { settingsStore } from './settingsStore'
 
@@ -50,6 +50,9 @@ const PROCESS_EXIT_GRACE_MS = 1_200
 const SPLASH_LEAD_IN_MS = 350
 const LAUNCH_SHIELD_TIMEOUT_MS = 10_000
 const RETURN_SPLASH_MS = 520
+const BACKUP_RESULT_SPLASH_MS = 1_400
+const RETURN_FOCUS_GUARD_MS = 1_800
+const FOCUS_GUARD_POLL_MS = 250
 const ERROR_SPLASH_MS = 3_000
 const MIN_GAME_PROCESS_SCORE = 90
 
@@ -342,18 +345,21 @@ function scoreGameProcess(
 ): ScoredProcess | null {
   const pid = processId(candidate)
   const name = processName(candidate)
+  const executable = normalizedPath(candidate.ExecutablePath)
+  const exactLocalExecutable =
+    game.provider === 'local' &&
+    Boolean(executable && executable === normalizedPath(game.local?.executablePath))
   if (
     pid <= 0 ||
     !name.endsWith('.exe') ||
     baselineInstance(candidate, baselineByPid) ||
     launcherFamily(candidate) ||
     SYSTEM_PROCESSES.has(name) ||
-    NON_GAME_PROCESS.test(name)
+    (NON_GAME_PROCESS.test(name) && !exactLocalExecutable)
   ) {
     return null
   }
 
-  const executable = normalizedPath(candidate.ExecutablePath)
   const commandLine = (candidate.CommandLine ?? '').toLowerCase()
   const visible = hasVisibleWindow(candidate)
   const insideInstallDir = isInsideInstallDir(candidate, game.installDir)
@@ -372,6 +378,7 @@ function scoreGameProcess(
   )
 
   let score = 0
+  if (exactLocalExecutable) score += 320
   if (insideInstallDir) score += 140
   if (visible) score += 85
   if (fromLauncher) score += 55
@@ -540,6 +547,78 @@ if ($null -ne $target) {
   )
 }
 
+function nativeWindowHandle(window: BrowserWindow): bigint | null {
+  if (process.platform !== 'win32' || window.isDestroyed()) return null
+  const handle = window.getNativeWindowHandle()
+  if (handle.length >= 8) return handle.readBigUInt64LE(0)
+  if (handle.length >= 4) return BigInt(handle.readUInt32LE(0))
+  return null
+}
+
+export function activateOrbitWindow(window: BrowserWindow): Promise<void> {
+  const handle = nativeWindowHandle(window)
+  if (handle === null || handle <= 0n) return Promise.resolve()
+
+  // BrowserWindow.focus() alone is best-effort on Windows. In particular,
+  // Steam can remain the foreground owner after its game child exits. Attach
+  // this helper's input queue to both windows before activating ORBIT so the
+  // focus hand-off is accepted instead of merely flashing the taskbar entry.
+  const script = `
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class OrbitWindowActivation {
+  [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr processId);
+  [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll")] static extern bool AttachThreadInput(uint attach, uint attachTo, bool value);
+  [DllImport("user32.dll")] static extern bool ShowWindowAsync(IntPtr hWnd, int command);
+  [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr hWnd);
+  [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] static extern IntPtr SetFocus(IntPtr hWnd);
+
+  public static bool Activate(IntPtr target) {
+    IntPtr foreground = GetForegroundWindow();
+    uint currentThread = GetCurrentThreadId();
+    uint foregroundThread = GetWindowThreadProcessId(foreground, IntPtr.Zero);
+    uint targetThread = GetWindowThreadProcessId(target, IntPtr.Zero);
+    bool foregroundAttached = foregroundThread != 0 && foregroundThread != currentThread &&
+      AttachThreadInput(currentThread, foregroundThread, true);
+    bool targetAttached = targetThread != 0 && targetThread != currentThread &&
+      AttachThreadInput(currentThread, targetThread, true);
+
+    try {
+      ShowWindowAsync(target, 9);
+      BringWindowToTop(target);
+      SetForegroundWindow(target);
+      SetFocus(target);
+      return GetForegroundWindow() == target;
+    } finally {
+      if (targetAttached) AttachThreadInput(currentThread, targetThread, false);
+      if (foregroundAttached) AttachThreadInput(currentThread, foregroundThread, false);
+    }
+  }
+}
+'@
+
+$target = [IntPtr]::new([Int64]${handle.toString()})
+for ($attempt = 0; $attempt -lt 3; $attempt++) {
+  if ([OrbitWindowActivation]::Activate($target)) { break }
+  Start-Sleep -Milliseconds 120
+}
+`
+
+  return new Promise((resolve) => {
+    execFile(
+      'powershell.exe',
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encodedPowerShell(script)],
+      { windowsHide: true, encoding: 'utf8', timeout: 2_000 },
+      () => resolve()
+    )
+  })
+}
+
 /**
  * Provider-neutral session detection for store and third-party hand-offs.
  * A snapshot taken before launch prevents existing clients from being mistaken
@@ -553,7 +632,10 @@ export class GameSessionManager extends EventEmitter {
   private sampler: WindowsProcessSampler | null = null
   private launchTargetRevealed = false
 
-  constructor(private readonly mainWindow: BrowserWindow) {
+  constructor(
+    private readonly mainWindow: BrowserWindow,
+    private readonly onGameEnded?: (game: LibraryGame) => Promise<LocalGameBackupResult>
+  ) {
     super()
   }
 
@@ -788,6 +870,7 @@ export class GameSessionManager extends EventEmitter {
     ownedLauncherFamilies: ReadonlySet<LauncherFamily>
   ): Promise<void> {
     if (token !== this.activeToken) return
+    const shouldBackup = Boolean(game.local?.backupEnabled && game.local.savePath && this.onGameEnded)
     this.update({
       phase: 'returning',
       gameId: game.id,
@@ -795,33 +878,77 @@ export class GameSessionManager extends EventEmitter {
       provider: game.provider,
       startedAt,
       detectedAt,
-      endedAt: Date.now()
+      endedAt: Date.now(),
+      returnTask: shouldBackup ? 'backing-up' : undefined
     })
-    this.releaseLaunchShield(false)
-    this.focusOrbit()
+    await this.focusOrbit(token)
     if (settingsStore.store.closeLaunchersAfterGame) {
       void closeLauncherProcesses(processes, ownedLauncherFamilies)
     }
-    await wait(RETURN_SPLASH_MS)
-    if (token === this.activeToken) this.update({ phase: 'idle' })
+    if (shouldBackup && this.onGameEnded) {
+      let result: LocalGameBackupResult
+      try {
+        result = await this.onGameEnded(game)
+      } catch {
+        result = { state: 'failed', completedAt: Date.now() }
+      }
+      if (token !== this.activeToken) return
+      this.update({
+        ...this.status,
+        returnTask: result.state === 'success' ? 'backup-complete' : 'backup-failed'
+      })
+    }
+    await wait(shouldBackup ? BACKUP_RESULT_SPLASH_MS : RETURN_SPLASH_MS)
+    if (token === this.activeToken) {
+      this.update({ phase: 'idle' })
+      void this.finishReturnFocus(token)
+    }
   }
 
   private async fail(token: number, message: string): Promise<void> {
     if (token !== this.activeToken) return
     this.update({ ...this.status, phase: 'error', message, endedAt: Date.now() })
-    this.releaseLaunchShield(false)
-    this.focusOrbit()
+    await this.focusOrbit(token)
     await wait(ERROR_SPLASH_MS)
-    if (token === this.activeToken) this.update({ phase: 'idle' })
+    if (token === this.activeToken) {
+      this.releaseLaunchShield(false)
+      this.update({ phase: 'idle' })
+    }
   }
 
-  private focusOrbit(): void {
-    if (this.mainWindow.isDestroyed()) return
+  private async focusOrbit(token: number): Promise<void> {
+    if (token !== this.activeToken || this.mainWindow.isDestroyed()) return
     if (this.mainWindow.isMinimized()) this.mainWindow.restore()
+    // Keep ORBIT above a launcher until the OS-level activation has completed.
+    // Dropping this flag first creates a race in which Steam wins the z-order.
+    this.mainWindow.setAlwaysOnTop(true, 'screen-saver')
     this.mainWindow.show()
     this.mainWindow.setFullScreen(true)
     this.mainWindow.moveTop()
     this.mainWindow.focus()
+    await activateOrbitWindow(this.mainWindow)
+    if (token !== this.activeToken || this.mainWindow.isDestroyed()) return
+    this.mainWindow.show()
+    this.mainWindow.moveTop()
+    this.mainWindow.focus()
+  }
+
+  private async finishReturnFocus(token: number): Promise<void> {
+    const deadline = Date.now() + RETURN_FOCUS_GUARD_MS
+    while (Date.now() < deadline) {
+      await wait(Math.min(FOCUS_GUARD_POLL_MS, deadline - Date.now()))
+      if (
+        token !== this.activeToken ||
+        this.status.phase !== 'idle' ||
+        this.mainWindow.isDestroyed()
+      ) {
+        return
+      }
+      if (!this.mainWindow.isFocused()) await this.focusOrbit(token)
+    }
+    if (token === this.activeToken && this.status.phase === 'idle') {
+      this.releaseLaunchShield(false)
+    }
   }
 
   private maintainLaunchShield(token: number): void {

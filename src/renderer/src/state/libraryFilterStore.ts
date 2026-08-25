@@ -5,7 +5,7 @@ export type LibrarySource = 'all' | GameProvider
 
 // Add new providers here once their library integration is available. Keeping
 // the order in one place makes LT/RT navigation and the visible tabs agree.
-export const LIBRARY_SOURCE_ORDER: LibrarySource[] = ['all', 'steam', 'epic', 'xbox']
+export const LIBRARY_SOURCE_ORDER: LibrarySource[] = ['all', 'steam', 'epic', 'xbox', 'local']
 
 interface LibraryFilterState {
   source: LibrarySource

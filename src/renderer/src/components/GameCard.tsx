@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion'
-import { Play } from 'lucide-react'
+import { Download, Play } from 'lucide-react'
 import type { LibraryGame } from '@shared/ipc'
 import { GameImage } from './GameImage'
 import { useT } from '@renderer/i18n/useT'
@@ -31,6 +31,11 @@ export function GameCard({
       data-game-id={game.id}
       data-grid-index={navigationIndex}
       data-home-game-card={isHomeCard ? 'true' : undefined}
+      aria-label={
+        game.updateAvailable
+          ? `${game.name}. ${t('library.updateAvailable')}`
+          : game.name
+      }
       onClick={() => openGame(game.id)}
       onMouseEnter={() => onActiveChange?.(true)}
       onMouseLeave={(event) => {
@@ -63,7 +68,20 @@ export function GameCard({
         <p className="line-clamp-2 text-sm font-semibold text-white">{game.name}</p>
         {playtime && <p className="text-xs text-muted">{playtime}</p>}
       </div>
-      <div className="pointer-events-none absolute right-2 top-2 flex h-8 w-8 items-center justify-center rounded-full bg-accent text-black opacity-0 transition-opacity group-hover:opacity-100 group-data-[focused=true]:opacity-100">
+      {game.updateAvailable && (
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute right-0 top-0 z-20 flex items-center gap-1.5 rounded-bl-xl bg-accent px-3 py-2 text-xs font-bold text-black shadow-card"
+        >
+          <Download size={14} strokeWidth={2.5} />
+          <span>{t('library.updateBadge')}</span>
+        </div>
+      )}
+      <div
+        className={`pointer-events-none absolute right-2 flex h-8 w-8 items-center justify-center rounded-full bg-accent text-black opacity-0 transition-opacity group-hover:opacity-100 group-data-[focused=true]:opacity-100 ${
+          game.updateAvailable ? 'top-11' : 'top-2'
+        }`}
+      >
         <Play size={14} fill="currentColor" />
       </div>
     </motion.button>

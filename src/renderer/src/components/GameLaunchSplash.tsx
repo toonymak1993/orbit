@@ -29,13 +29,21 @@ export function GameLaunchSplash({ status }: Props): JSX.Element {
     return () => window.clearInterval(timer)
   }, [status.phase])
 
+  const returnTitle =
+    status.returnTask === 'backing-up'
+      ? t('launch.backingUp')
+      : status.returnTask === 'backup-complete'
+        ? t('launch.backupComplete')
+        : status.returnTask === 'backup-failed'
+          ? t('launch.backupFailed')
+          : t('launch.returning')
   const title =
     status.phase === 'launching'
       ? t('launch.starting')
       : status.phase === 'running'
         ? t('launch.running')
         : status.phase === 'returning'
-          ? t('launch.returning')
+          ? returnTitle
           : t('launch.failed')
   const gameName = status.gameName ?? 'Game'
   const elapsed = status.phase === 'running' ? elapsedLabel(status.startedAt) : null

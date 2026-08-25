@@ -3,6 +3,7 @@ import Store from 'electron-store'
 import { app } from 'electron'
 import type { GameMetadata, GamePlatform } from '@shared/ipc'
 import { syncCoordinator } from '../sync/syncCoordinator'
+import { fetchWithElectronNet } from '../networkFetch'
 
 const POSITIVE_TTL_MS = 30 * 24 * 60 * 60 * 1000
 const NEGATIVE_TTL_MS = 7 * 24 * 60 * 60 * 1000
@@ -171,7 +172,9 @@ async function fetchMetadata(appId: number, language: string): Promise<CachedMet
   url.searchParams.set('l', language)
 
   try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(20_000) })
+    const response = await fetchWithElectronNet(url, {
+      signal: AbortSignal.timeout(20_000)
+    })
     if (response.status === 429) throw new Error('rate-limit')
     if (!response.ok) return null
     const json = (await response.json()) as Record<

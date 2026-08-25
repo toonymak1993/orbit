@@ -6,6 +6,7 @@ interface LibraryState {
   isRefreshing: boolean
   init: () => Promise<void>
   refresh: () => Promise<void>
+  applySnapshot: (snapshot: LibrarySnapshot) => void
 }
 
 let listening = false
@@ -14,6 +15,7 @@ let initialized = false
 export const useLibraryStore = create<LibraryState>((set, get) => ({
   snapshot: { games: [], providerGames: [], recentGameIds: [], loadedAt: 0, isLoadingMetadata: false },
   isRefreshing: false,
+  applySnapshot: (snapshot) => set({ snapshot }),
 
   init: async () => {
     if (initialized) return

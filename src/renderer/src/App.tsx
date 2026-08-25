@@ -7,6 +7,7 @@ import { useNavigationStore } from '@renderer/state/navigationStore'
 import { OnboardingFlow } from '@renderer/views/Onboarding/OnboardingFlow'
 import { MainShell } from '@renderer/components/MainShell'
 import { installPointerUiSounds } from '@renderer/lib/uiAudio'
+import { NotificationCenter } from '@renderer/components/NotificationCenter'
 
 function App(): JSX.Element | null {
   const [ready, setReady] = useState(false)
@@ -42,6 +43,7 @@ function App(): JSX.Element | null {
   return (
     <div className="h-screen w-screen overflow-hidden bg-base">
       {phase === 'onboarding' ? <OnboardingFlow /> : <MainShell />}
+      <NotificationCenter />
     </div>
   )
 }

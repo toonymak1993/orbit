@@ -5,6 +5,7 @@ import { useLibraryStore } from '@renderer/state/libraryStore'
 import { OnboardingWelcome } from './OnboardingWelcome'
 import { OnboardingSuccess } from './OnboardingSuccess'
 import { useSyncStore } from '@renderer/state/syncStore'
+import './onboarding.css'
 
 export function OnboardingFlow(): JSX.Element {
   const [syncBaselineStartedAt, setSyncBaselineStartedAt] = useState<number | undefined>()

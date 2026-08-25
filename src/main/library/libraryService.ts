@@ -1,10 +1,16 @@
 import { EventEmitter } from 'node:events'
+import type { BrowserWindow } from 'electron'
 import type {
+  CustomGameCommitInput,
+  CustomGameDraft,
+  CustomGameImportSource,
+  CustomGameSaveSource,
   GameAchievementsSnapshot,
   GameCompletionTimes,
   LibraryGame,
   LibrarySnapshot,
-  LibraryStats
+  LibraryStats,
+  LocalGameBackupResult
 } from '@shared/ipc'
 import { completionTimesService } from '../completionTimes'
 import { artworkService } from '../imageCache'
@@ -18,6 +24,8 @@ import { achievementService } from '../achievements/achievementService'
 import { settingsStore } from '../settingsStore'
 import { xboxLibraryService } from '../xbox/xboxLibrary'
 import { storeService } from '../store/storeService'
+import { customLibraryService } from '../customLibrary'
+import { customArtworkService } from '../customArtwork'
 
 /** Coordinates every store into one cache and one three-pipeline sync session. */
 export class UnifiedLibraryService extends EventEmitter {
@@ -36,7 +44,14 @@ export class UnifiedLibraryService extends EventEmitter {
   }
 
   getSnapshot(): LibrarySnapshot {
-    return gameRepository.getSnapshot()
+    return {
+      ...gameRepository.getSnapshot(),
+      providerStatuses: [
+        steamLibraryService.getProviderStatus(),
+        epicLibraryService.getProviderStatus(),
+        xboxLibraryService.getProviderStatus()
+      ]
+    }
   }
 
   getGame(gameId: string): LibraryGame | undefined {
@@ -99,6 +114,65 @@ export class UnifiedLibraryService extends EventEmitter {
     if (gameRepository.markStarted(gameId)) this.emitSnapshot()
   }
 
+  beginCustomGameImport(
+    mainWindow: BrowserWindow,
+    source: CustomGameImportSource
+  ): Promise<CustomGameDraft | null> {
+    return customLibraryService.beginImport(mainWindow, source)
+  }
+
+  selectCustomGameArtwork(
+    mainWindow: BrowserWindow,
+    draftId: string
+  ): Promise<CustomGameDraft | null> {
+    return customLibraryService.selectArtwork(mainWindow, draftId)
+  }
+
+  selectCustomGameSave(
+    mainWindow: BrowserWindow,
+    draftId: string,
+    source: CustomGameSaveSource
+  ): Promise<CustomGameDraft | null> {
+    return customLibraryService.selectSave(mainWindow, draftId, source)
+  }
+
+  clearCustomGameSave(draftId: string): CustomGameDraft {
+    return customLibraryService.clearSave(draftId)
+  }
+
+  cancelCustomGameImport(draftId: string): void {
+    customLibraryService.cancel(draftId)
+  }
+
+  async commitCustomGame(input: CustomGameCommitInput): Promise<LibrarySnapshot> {
+    const record = await customLibraryService.commit(input.draftId, input.name)
+    const game = gameRepository.upsertLocalGame(record)
+    artworkService.syncProvider([game], 'local')
+    this.emitSnapshot()
+    return this.getSnapshot()
+  }
+
+  removeCustomGame(gameId: string): LibrarySnapshot {
+    if (!gameRepository.removeLocalGame(gameId)) throw new Error('Custom game is not available')
+    void customArtworkService.reset(gameId)
+    this.emitSnapshot()
+    return this.getSnapshot()
+  }
+
+  async backupCustomGame(gameId: string): Promise<LocalGameBackupResult> {
+    const game = gameRepository.getGame(gameId)
+    if (!game || game.provider !== 'local') throw new Error('Custom game is not available')
+    const result = await customLibraryService.backup(game)
+    if (gameRepository.recordLocalBackup(gameId, result)) this.emitSnapshot()
+    return result
+  }
+
+  async openCustomGameBackups(gameId: string): Promise<void> {
+    const game = gameRepository.getGame(gameId)
+    if (!game || game.provider !== 'local') throw new Error('Custom game is not available')
+    await customLibraryService.openBackupDirectory(game)
+  }
+
   private async doRefresh(): Promise<LibrarySnapshot> {
     const steamAccount = steamAuthManager.getAccount() ?? (await steamAuthManager.restoreSession())
     gameRepository.openProfile(steamAccount?.steamId)
@@ -113,6 +187,7 @@ export class UnifiedLibraryService extends EventEmitter {
     artworkService.syncProvider(gameRepository.getGamesByProvider('steam'), 'steam')
     artworkService.syncProvider(gameRepository.getGamesByProvider('epic'), 'epic')
     artworkService.syncProvider(gameRepository.getGamesByProvider('xbox'), 'xbox')
+    artworkService.syncProvider(gameRepository.getGamesByProvider('local'), 'local')
     const startupTasks: Promise<unknown>[] = [
       achievementService.syncStartup(this.getSnapshot().games)
     ]

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { AnimatePresence, motion } from 'framer-motion'
-import { Building2, ExternalLink, Heart, Play, Sparkles, Timer } from 'lucide-react'
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
+import { Building2, ExternalLink, Heart, Play, Sparkles, Timer, Trophy } from 'lucide-react'
 import { useAutoFocus } from '@renderer/hooks/useAutoFocus'
 import { useLibraryStore } from '@renderer/state/libraryStore'
 import { useAuthStore } from '@renderer/state/authStore'
@@ -11,13 +11,18 @@ import { GameImage } from '@renderer/components/GameImage'
 import { GameCard } from '@renderer/components/GameCard'
 import { useNavigationStore } from '@renderer/state/navigationStore'
 import { useT, type TFunction } from '@renderer/i18n/useT'
-import type { LibraryGame, StoreProduct } from '@shared/ipc'
+import type {
+  GameAchievementsSnapshot,
+  GameCompletionTimes,
+  LibraryGame,
+  StoreProduct
+} from '@shared/ipc'
 import { useGameDetailStore } from '@renderer/state/gameDetailStore'
 import { formatPlaytime } from '@renderer/lib/playtime'
 import { usePreferencesStore } from '@renderer/state/preferencesStore'
-import type { GameCompletionTimes } from '@shared/ipc'
 import { focusElement, HOME_SHOW_BANNERS_EVENT } from '@renderer/lib/spatialNavigation'
 
+const HOME_ACHIEVEMENTS_DELAY_MS = 5_000
 const WISHLIST_ROTATION_MS = 15_000
 
 function normalizedTimestamp(value?: number): number {
@@ -234,9 +239,11 @@ export function HomeView(): JSX.Element {
       className="home-layout relative flex h-full flex-col overflow-hidden"
     >
       <div className="absolute inset-0">
-        <HomeBackdrop game={backdropGame} />
+        <div className="home-backdrop-art absolute inset-0">
+          <HomeBackdrop game={backdropGame} />
+        </div>
         <div className="absolute inset-0 bg-gradient-to-b from-black/20 via-black/38 to-black/15" />
-        <div className="absolute inset-0 bg-black/10" />
+        <div className="home-backdrop-dim absolute inset-0" />
       </div>
 
       <div
@@ -372,7 +379,7 @@ export function HomeView(): JSX.Element {
             {installedGames.map((game, index) => (
               <div
                 key={game.id}
-                className="home-game-tile min-w-[9.5rem] shrink-0"
+                className="home-game-tile shrink-0"
               >
                 <GameCard
                   game={game}
@@ -463,8 +470,52 @@ function GameFocusSummary({
   flat: boolean
   t: TFunction
 }): JSX.Element {
+  const showAchievements = usePreferencesStore((state) => state.showAchievements)
+  const reduceMotion = useReducedMotion()
+  const [achievements, setAchievements] = useState<GameAchievementsSnapshot | null>(null)
+  const [showAchievementView, setShowAchievementView] = useState(false)
   const publishers = game.metadata.publishers?.filter(Boolean).slice(0, 2) ?? []
   const completionAvailable = completionTimes?.state === 'available'
+
+  useEffect(() => {
+    let active = true
+    let delayElapsed = false
+    let availableSnapshot: GameAchievementsSnapshot | null = null
+
+    setAchievements(null)
+    setShowAchievementView(false)
+    if (!showAchievements) return () => undefined
+
+    const revealWhenReady = (): void => {
+      if (active && delayElapsed && availableSnapshot) setShowAchievementView(true)
+    }
+
+    const timer = window.setTimeout(() => {
+      delayElapsed = true
+      revealWhenReady()
+    }, HOME_ACHIEVEMENTS_DELAY_MS)
+
+    void window.api.game
+      .resolveAchievements(game.id)
+      .then((result) => {
+        if (!active || !result || result.state !== 'available' || result.achievements.length === 0) {
+          return
+        }
+        availableSnapshot = result
+        setAchievements(result)
+        revealWhenReady()
+      })
+      .catch(() => undefined)
+
+    return () => {
+      active = false
+      clearTimeout(timer)
+    }
+  }, [game.id, showAchievements])
+
+  const viewTransition = reduceMotion
+    ? { duration: 0 }
+    : { duration: 0.32, ease: [0.22, 1, 0.36, 1] as const }
 
   return (
     <motion.section
@@ -486,62 +537,206 @@ function GameFocusSummary({
       transition={{ duration: 0.14, ease: [0.22, 1, 0.36, 1] }}
       className="absolute inset-0 flex items-start"
     >
-      <div className={`home-focus-card w-[min(48rem,76vw)] rounded-[clamp(1.25rem,2vw,2rem)] border border-white/10 bg-black/55 p-[clamp(1.1rem,2.2vw,2rem)] shadow-[0_24px_70px_rgba(0,0,0,0.25)] ${flat ? 'home-focus-card-float' : ''}`}>
-        <div className="home-focus-identity flex min-w-0 items-center gap-[clamp(0.9rem,1.8vw,1.4rem)]">
-          <div className="home-focus-icon h-[clamp(4.5rem,7vw,6.5rem)] w-[clamp(4.5rem,7vw,6.5rem)] shrink-0 overflow-hidden rounded-[25%] border border-white/15 bg-black/40 shadow-2xl">
-            <GameImage
-              gameId={game.id}
-              name={game.name}
-              orientation="icon"
-              className="h-full w-full object-cover"
-            />
-          </div>
-          <div className="min-w-0">
-            <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-accent">
-              {game.provider}
-            </p>
-            <h2 className="mt-1 line-clamp-2 text-[clamp(1.45rem,2.8vw,2.6rem)] font-bold leading-tight tracking-[-0.025em] text-white">
-              {game.name}
-            </h2>
-            {publishers.length > 0 && (
-              <div className="mt-2 flex items-center gap-2 text-xs text-white/55">
-                <Building2 size={13} className="shrink-0 text-accent" />
-                <span className="truncate">{publishers.join(' · ')}</span>
+      <motion.div
+        layout={!reduceMotion}
+        aria-live="polite"
+        transition={{ layout: viewTransition }}
+        className={`home-focus-card relative w-[min(48rem,76vw)] overflow-hidden rounded-[clamp(1.25rem,2vw,2rem)] border border-white/10 bg-black/55 p-[clamp(1.1rem,2.2vw,2rem)] shadow-[0_24px_70px_rgba(0,0,0,0.25)] ${flat ? 'home-focus-card-float' : ''}`}
+      >
+        <AnimatePresence initial={false} mode="popLayout">
+          {showAchievementView && achievements ? (
+            <motion.div
+              key="achievements"
+              initial={{ opacity: 0, y: reduceMotion ? 0 : 8, filter: 'blur(5px)' }}
+              animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
+              exit={{ opacity: 0, y: reduceMotion ? 0 : -8, filter: 'blur(5px)' }}
+              transition={viewTransition}
+              className="home-focus-view"
+            >
+              <HomeAchievementSummary
+                game={game}
+                snapshot={achievements}
+                progressDuration={reduceMotion ? 0 : 0.7}
+                t={t}
+              />
+            </motion.div>
+          ) : (
+            <motion.div
+              key="information"
+              initial={{ opacity: 0, y: reduceMotion ? 0 : 8, filter: 'blur(5px)' }}
+              animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
+              exit={{ opacity: 0, y: reduceMotion ? 0 : -8, filter: 'blur(5px)' }}
+              transition={viewTransition}
+              className="home-focus-view"
+            >
+              <div className="home-focus-identity flex min-w-0 items-center gap-[clamp(0.9rem,1.8vw,1.4rem)]">
+                <div className="home-focus-icon h-[clamp(4.5rem,7vw,6.5rem)] w-[clamp(4.5rem,7vw,6.5rem)] shrink-0 overflow-hidden rounded-[25%] border border-white/15 bg-black/40 shadow-2xl">
+                  <GameImage
+                    gameId={game.id}
+                    name={game.name}
+                    orientation="icon"
+                    className="h-full w-full object-cover"
+                  />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-accent">
+                    {game.provider}
+                  </p>
+                  <h2 className="mt-1 line-clamp-2 text-[clamp(1.45rem,2.8vw,2.6rem)] font-bold leading-tight tracking-[-0.025em] text-white">
+                    {game.name}
+                  </h2>
+                  {publishers.length > 0 && (
+                    <div className="mt-2 flex items-center gap-2 text-xs text-white/55">
+                      <Building2 size={13} className="shrink-0 text-accent" />
+                      <span className="truncate">{publishers.join(' · ')}</span>
+                    </div>
+                  )}
+                </div>
               </div>
-            )}
-          </div>
-        </div>
 
-        <div className="home-focus-stats mt-[clamp(1rem,2.5vh,1.6rem)] flex flex-wrap gap-2.5">
-          <FocusStat
-            icon={<Timer size={14} />}
-            label={t('details.yourPlaytime')}
-            value={formatPlaytime(game.playtimeMinutes, t) ?? t('details.notPlayed')}
-          />
-          {completionAvailable && completionTimes.mainStoryMinutes && (
-            <FocusStat
-              icon={<Sparkles size={14} />}
-              label={`HLTB · ${t('details.mainStory')}`}
-              value={formatHours(completionTimes.mainStoryMinutes, language)}
-            />
+              <div className="home-focus-stats mt-[clamp(1rem,2.5vh,1.6rem)] flex flex-wrap gap-2.5">
+                <FocusStat
+                  icon={<Timer size={14} />}
+                  label={t('details.yourPlaytime')}
+                  value={formatPlaytime(game.playtimeMinutes, t) ?? t('details.notPlayed')}
+                />
+                {completionAvailable && completionTimes.mainStoryMinutes && (
+                  <FocusStat
+                    icon={<Sparkles size={14} />}
+                    label={`HLTB · ${t('details.mainStory')}`}
+                    value={formatHours(completionTimes.mainStoryMinutes, language)}
+                  />
+                )}
+                {completionAvailable && completionTimes.mainExtraMinutes && (
+                  <FocusStat
+                    icon={<Sparkles size={14} />}
+                    label={`HLTB · ${t('details.mainExtra')}`}
+                    value={formatHours(completionTimes.mainExtraMinutes, language)}
+                  />
+                )}
+                {completionAvailable && completionTimes.completionistMinutes && (
+                  <FocusStat
+                    icon={<Sparkles size={14} />}
+                    label={`HLTB · ${t('details.completionist')}`}
+                    value={formatHours(completionTimes.completionistMinutes, language)}
+                  />
+                )}
+              </div>
+            </motion.div>
           )}
-          {completionAvailable && completionTimes.mainExtraMinutes && (
-            <FocusStat
-              icon={<Sparkles size={14} />}
-              label={`HLTB · ${t('details.mainExtra')}`}
-              value={formatHours(completionTimes.mainExtraMinutes, language)}
-            />
-          )}
-          {completionAvailable && completionTimes.completionistMinutes && (
-            <FocusStat
-              icon={<Sparkles size={14} />}
-              label={`HLTB · ${t('details.completionist')}`}
-              value={formatHours(completionTimes.completionistMinutes, language)}
-            />
-          )}
+        </AnimatePresence>
+      </motion.div>
+    </motion.section>
+  )
+}
+
+function HomeAchievementSummary({
+  game,
+  snapshot,
+  progressDuration,
+  t
+}: {
+  game: LibraryGame
+  snapshot: GameAchievementsSnapshot
+  progressDuration: number
+  t: TFunction
+}): JSX.Element {
+  const achievements = [...snapshot.achievements]
+    .sort(
+      (a, b) =>
+        Number(b.unlocked) - Number(a.unlocked) || (b.unlockedAt ?? 0) - (a.unlockedAt ?? 0)
+    )
+    .slice(0, 3)
+  const percent = snapshot.total ? Math.round((snapshot.unlocked / snapshot.total) * 100) : 0
+
+  return (
+    <>
+      <div className="home-focus-identity flex min-w-0 items-center gap-[clamp(0.9rem,1.8vw,1.4rem)]">
+        <div className="home-focus-icon flex h-[clamp(4.5rem,7vw,6.5rem)] w-[clamp(4.5rem,7vw,6.5rem)] shrink-0 items-center justify-center rounded-[25%] border border-accent/25 bg-accent/10 text-accent shadow-2xl">
+          <Trophy size={34} strokeWidth={1.8} />
+        </div>
+        <div className="min-w-0">
+          <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-accent">
+            {t('achievements.title')}
+          </p>
+          <h2 className="mt-1 line-clamp-1 text-[clamp(1.2rem,2.25vw,2rem)] font-bold leading-tight tracking-[-0.025em] text-white">
+            {game.name}
+          </h2>
+          <p className="mt-2 text-xs font-semibold text-white/60">
+            {t('achievements.progress', {
+              unlocked: snapshot.unlocked,
+              total: snapshot.total
+            })}
+          </p>
         </div>
       </div>
-    </motion.section>
+
+      <div className="home-focus-stats mt-[clamp(1rem,2.5vh,1.6rem)] flex flex-wrap gap-2.5">
+        <div className="home-achievement-progress home-focus-stat min-w-[8.5rem] rounded-xl2 border border-accent/20 bg-accent/[0.08] px-3.5 py-3 backdrop-blur-md">
+          <p className="flex items-center gap-1.5 text-[10px] font-medium text-white/50">
+            <Trophy size={14} className="text-accent" />
+            {t('achievements.title')}
+          </p>
+          <p className="mt-1 text-lg font-bold text-white">{percent}%</p>
+          <div className="mt-2 h-1 overflow-hidden rounded-full bg-white/10">
+            <motion.div
+              initial={{ width: 0 }}
+              animate={{ width: `${percent}%` }}
+              transition={{
+                duration: progressDuration,
+                ease: [0.22, 1, 0.36, 1]
+              }}
+              className="h-full rounded-full bg-gradient-to-r from-accent to-accent-2"
+            />
+          </div>
+        </div>
+        {achievements.map((achievement) => (
+          <HomeAchievementCard key={achievement.id} achievement={achievement} t={t} />
+        ))}
+      </div>
+    </>
+  )
+}
+
+function HomeAchievementCard({
+  achievement,
+  t
+}: {
+  achievement: GameAchievementsSnapshot['achievements'][number]
+  t: TFunction
+}): JSX.Element {
+  const imageUrl = achievement.unlocked ? achievement.iconUrl : achievement.lockedIconUrl
+
+  return (
+    <div
+      className={`home-achievement-card home-focus-stat flex min-w-[10.5rem] items-center gap-2.5 rounded-xl2 border px-2.5 py-3 backdrop-blur-md ${
+        achievement.unlocked
+          ? 'border-accent/20 bg-accent/[0.08]'
+          : 'border-white/[0.07] bg-black/30 opacity-60'
+      }`}
+    >
+      <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-black/40 text-white/30">
+        {imageUrl ? (
+          <img
+            src={imageUrl}
+            alt=""
+            loading="lazy"
+            decoding="async"
+            className={`h-full w-full object-cover ${achievement.unlocked ? '' : 'grayscale'}`}
+          />
+        ) : (
+          <Trophy size={18} />
+        )}
+      </div>
+      <div className="min-w-0">
+        <p className="line-clamp-2 text-xs font-semibold leading-snug text-white/90">
+          {achievement.name}
+        </p>
+        <p className="mt-1 text-[10px] text-white/45">
+          {achievement.unlocked ? t('achievements.unlocked') : t('achievements.locked')}
+        </p>
+      </div>
+    </div>
   )
 }
 

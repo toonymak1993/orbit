@@ -82,6 +82,15 @@ function steamExecutable(game: LibraryGame): string | undefined {
 
 /** Delegates launch/install actions to the owning local store client. */
 export async function launchGame(game: LibraryGame): Promise<void> {
+  if (game.provider === 'local' && game.installed) {
+    const executable = game.local?.executablePath?.trim()
+    if (!executable || !executable.toLocaleLowerCase('en-US').endsWith('.exe') || !existsSync(executable)) {
+      throw new Error('The custom game executable is no longer available')
+    }
+    await launchDetached(executable, [])
+    return
+  }
+
   if (game.provider === 'steam' && game.appId) {
     if (game.installed) {
       const executable = steamExecutable(game)

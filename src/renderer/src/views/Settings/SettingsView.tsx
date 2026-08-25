@@ -2,9 +2,13 @@ import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
   AppWindow,
+  BellRing,
   Check,
+  CheckCircle2,
+  CircleAlert,
   AudioLines,
   Globe2,
+  Gamepad2,
   Eye,
   ImageIcon,
   Layers3,
@@ -13,7 +17,9 @@ import {
   Loader2,
   LogOut,
   Palette,
+  RefreshCw,
   RotateCcw,
+  ShieldCheck,
   SlidersHorizontal,
   Trophy
 } from 'lucide-react'
@@ -22,6 +28,8 @@ import {
   usePreferencesStore,
   THEME_OPTIONS,
   HOME_LAYOUT_OPTIONS,
+  GAME_CARD_SIZE_OPTIONS,
+  BACKDROP_INTENSITY_OPTIONS,
   LANGUAGE_OPTIONS
 } from '@renderer/state/preferencesStore'
 import { useAuthStore } from '@renderer/state/authStore'
@@ -34,10 +42,32 @@ import {
 } from '@renderer/state/settingsNavigationStore'
 import { FocusableButton } from '@renderer/components/FocusableButton'
 import { ApiKeyField } from '@renderer/components/ApiKeyField'
+import {
+  HardwareControlPanel,
+  HARDWARE_CONTROL_BUTTON_LABEL_KEYS
+} from '@renderer/components/HardwareControlPanel'
+import { OrbitBackgroundServicePanel } from '@renderer/components/OrbitBackgroundServicePanel'
 import { useT } from '@renderer/i18n/useT'
 import { focusElement } from '@renderer/lib/spatialNavigation'
+import { notify } from '@renderer/state/notificationStore'
 import type { TranslationKey } from '@renderer/i18n/translations'
-import type { AudioPreset, OrbitSettings, StoreRegionId, UiDensity } from '@shared/ipc'
+import type {
+  AudioPreset,
+  BackdropIntensity,
+  GameCardSize,
+  LibraryDetectionMethod,
+  LibraryGame,
+  LibraryProviderConnection,
+  LibraryProviderIssue,
+  LibraryProviderState,
+  LibraryProviderStatus,
+  LibraryStatusProvider,
+  NotificationMotion,
+  NotificationPosition,
+  OrbitSettings,
+  StoreRegionId,
+  UiDensity
+} from '@shared/ipc'
 
 const themeSwatch: Record<string, string> = {
   midnight: 'from-[#3fd0ff] to-[#8b5cf6]',
@@ -61,6 +91,42 @@ const DENSITY_OPTIONS: {
   { id: 'standard', labelKey: 'settings.density.standard' },
   { id: 'compact', labelKey: 'settings.density.compact' }
 ]
+
+const GAME_CARD_SIZE_COPY: Record<
+  GameCardSize,
+  { labelKey: TranslationKey; bodyKey: TranslationKey }
+> = {
+  compact: {
+    labelKey: 'settings.cardSize.compact',
+    bodyKey: 'settings.cardSize.compactBody'
+  },
+  standard: {
+    labelKey: 'settings.cardSize.standard',
+    bodyKey: 'settings.cardSize.standardBody'
+  },
+  large: {
+    labelKey: 'settings.cardSize.large',
+    bodyKey: 'settings.cardSize.largeBody'
+  }
+}
+
+const BACKDROP_INTENSITY_COPY: Record<
+  BackdropIntensity,
+  { labelKey: TranslationKey; bodyKey: TranslationKey }
+> = {
+  subtle: {
+    labelKey: 'settings.backdrop.subtle',
+    bodyKey: 'settings.backdrop.subtleBody'
+  },
+  balanced: {
+    labelKey: 'settings.backdrop.balanced',
+    bodyKey: 'settings.backdrop.balancedBody'
+  },
+  vivid: {
+    labelKey: 'settings.backdrop.vivid',
+    bodyKey: 'settings.backdrop.vividBody'
+  }
+}
 
 const AUDIO_PRESET_OPTIONS: Array<{
   id: AudioPreset
@@ -100,12 +166,86 @@ const STORE_REGION_OPTIONS: Array<{ id: StoreRegionId; labelKey: TranslationKey 
 const SETTINGS_PAGES: {
   id: SettingsPage
   labelKey: TranslationKey
+  bodyKey: TranslationKey
   icon: typeof Palette
 }[] = [
-  { id: 'interface', labelKey: 'settings.page.interface', icon: Palette },
-  { id: 'libraries', labelKey: 'settings.page.libraries', icon: LibraryBig },
-  { id: 'advanced', labelKey: 'settings.page.advanced', icon: SlidersHorizontal }
+  {
+    id: 'appearance',
+    labelKey: 'settings.page.appearance',
+    bodyKey: 'settings.page.appearanceBody',
+    icon: Palette
+  },
+  {
+    id: 'experience',
+    labelKey: 'settings.page.experience',
+    bodyKey: 'settings.page.experienceBody',
+    icon: SlidersHorizontal
+  },
+  {
+    id: 'libraries',
+    labelKey: 'settings.page.libraries',
+    bodyKey: 'settings.page.librariesBody',
+    icon: LibraryBig
+  },
+  {
+    id: 'hardware',
+    labelKey: 'settings.page.hardware',
+    bodyKey: 'settings.page.hardwareBody',
+    icon: Gamepad2
+  },
+  {
+    id: 'system',
+    labelKey: 'settings.page.system',
+    bodyKey: 'settings.page.systemBody',
+    icon: AppWindow
+  }
 ]
+
+const NOTIFICATION_POSITION_OPTIONS: Array<{
+  id: NotificationPosition
+  labelKey: TranslationKey
+}> = [
+  { id: 'top-right', labelKey: 'settings.notifications.position.topRight' },
+  { id: 'top-center', labelKey: 'settings.notifications.position.topCenter' },
+  { id: 'bottom-right', labelKey: 'settings.notifications.position.bottomRight' }
+]
+
+const NOTIFICATION_MOTION_OPTIONS: Array<{
+  id: NotificationMotion
+  labelKey: TranslationKey
+}> = [
+  { id: 'slide', labelKey: 'settings.notifications.motion.slide' },
+  { id: 'lift', labelKey: 'settings.notifications.motion.lift' },
+  { id: 'scale', labelKey: 'settings.notifications.motion.scale' }
+]
+
+const LIBRARY_STATE_KEYS: Record<LibraryProviderState, TranslationKey> = {
+  idle: 'settings.libraryStatus.state.idle',
+  scanning: 'settings.libraryStatus.state.scanning',
+  ready: 'settings.libraryStatus.state.ready',
+  partial: 'settings.libraryStatus.state.partial',
+  'local-only': 'settings.libraryStatus.state.localOnly',
+  error: 'settings.libraryStatus.state.error'
+}
+
+const LIBRARY_METHOD_KEYS: Record<LibraryDetectionMethod, TranslationKey> = {
+  'local-manifests': 'settings.libraryStatus.method.localManifests',
+  'account-api': 'settings.libraryStatus.method.accountApi',
+  'community-profile': 'settings.libraryStatus.method.communityProfile',
+  'launcher-session': 'settings.libraryStatus.method.launcherSession',
+  'epic-catalog': 'settings.libraryStatus.method.epicCatalog',
+  'xbox-app-cache': 'settings.libraryStatus.method.xboxAppCache',
+  'windows-packages': 'settings.libraryStatus.method.windowsPackages',
+  'cached-data': 'settings.libraryStatus.method.cachedData'
+}
+
+const LIBRARY_ISSUE_KEYS: Record<LibraryProviderIssue, TranslationKey> = {
+  'not-connected': 'settings.libraryStatus.issue.notConnected',
+  'online-library-unavailable': 'settings.libraryStatus.issue.onlineUnavailable',
+  'metadata-pending': 'settings.libraryStatus.issue.metadataPending',
+  'source-unavailable': 'settings.libraryStatus.issue.sourceUnavailable',
+  'no-games-found': 'settings.libraryStatus.issue.noGames'
+}
 
 const pageVariants = {
   enter: (direction: 1 | -1) => ({ x: direction * 72, opacity: 0, scale: 0.985 }),
@@ -121,6 +261,8 @@ export function SettingsView(): JSX.Element {
   const {
     theme,
     homeLayout,
+    gameCardSize,
+    backdropIntensity,
     uiDensity,
     language,
     audioPreset,
@@ -128,15 +270,26 @@ export function SettingsView(): JSX.Element {
     showHomeBanners,
     showAchievements,
     closeLaunchersAfterGame,
+    notificationsEnabled,
+    notificationPosition,
+    notificationMotion,
+    hardwareControlEnabled,
+    hardwareControlButton,
+    hardwareControlHoldSeconds,
     setTheme,
     setHomeLayout,
+    setGameCardSize,
+    setBackdropIntensity,
     setDensity,
     setLanguage,
     setAudioPreset,
     setShowStoreTab,
     setShowHomeBanners,
     setShowAchievements,
-    setCloseLaunchersAfterGame
+    setCloseLaunchersAfterGame,
+    setNotificationsEnabled,
+    setNotificationPosition,
+    setNotificationMotion
   } = usePreferencesStore()
   const page = useSettingsNavigationStore((s) => s.page)
   const direction = useSettingsNavigationStore((s) => s.direction)
@@ -150,16 +303,119 @@ export function SettingsView(): JSX.Element {
   const startEpicLogin = useEpicAuthStore((s) => s.startLogin)
   const logoutEpic = useEpicAuthStore((s) => s.logout)
   const refreshLibrary = useLibraryStore((s) => s.refresh)
-  const xboxGameCount = useLibraryStore(
-    (s) => s.snapshot.providerGames.filter((game) => game.provider === 'xbox').length
+  const librarySnapshot = useLibraryStore((s) => s.snapshot)
+  const isRefreshingLibrary = useLibraryStore((s) => s.isRefreshing)
+  const libraryGameCount = librarySnapshot.games.length
+  const steamLibraryStatus = providerStatusOrFallback(
+    librarySnapshot.providerStatuses,
+    librarySnapshot.providerGames,
+    'steam',
+    account ? 'connected' : 'not-connected'
   )
-  const xboxInstalledCount = useLibraryStore(
-    (s) => s.snapshot.providerGames.filter((game) => game.provider === 'xbox' && game.installed).length
+  const epicLibraryStatus = providerStatusOrFallback(
+    librarySnapshot.providerStatuses,
+    librarySnapshot.providerGames,
+    'epic',
+    epicAccount ? 'connected' : 'not-connected'
   )
+  const xboxLibraryStatus = providerStatusOrFallback(
+    librarySnapshot.providerStatuses,
+    librarySnapshot.providerGames,
+    'xbox',
+    'automatic'
+  )
+  const readyLibraryCount = [steamLibraryStatus, epicLibraryStatus, xboxLibraryStatus].filter(
+    (status) => status.state === 'ready'
+  ).length
   const accountSignature = `${account?.steamId ?? ''}:${epicAccount?.accountId ?? ''}`
   const previousAccountSignature = useRef(accountSignature)
   const [version, setVersion] = useState('')
   const [settings, setSettings] = useState<OrbitSettings | null>(null)
+  const [regionSaveState, setRegionSaveState] = useState<'idle' | 'saving' | 'error'>('idle')
+  const activePage = SETTINGS_PAGES.find((item) => item.id === page) ?? SETTINGS_PAGES[0]
+  const activePageIndex = SETTINGS_PAGES.indexOf(activePage)
+  const pageHighlights =
+    page === 'appearance'
+      ? [
+          {
+            label: t('settings.summary.theme'),
+            value: THEME_OPTIONS.find((item) => item.id === theme)?.label ?? theme
+          },
+          { label: t('settings.summary.home'), value: homeLayout.toUpperCase() },
+          {
+            label: t('settings.summary.cards'),
+            value: t(GAME_CARD_SIZE_COPY[gameCardSize].labelKey)
+          }
+        ]
+      : page === 'experience'
+        ? [
+            {
+              label: t('settings.summary.sound'),
+              value:
+                t(
+                  AUDIO_PRESET_OPTIONS.find((item) => item.id === audioPreset)?.labelKey ??
+                    'settings.audio.orbit'
+                )
+            },
+            {
+              label: t('settings.summary.language'),
+              value: LANGUAGE_OPTIONS.find((item) => item.id === language)?.label ?? language
+            },
+            {
+              label: t('settings.summary.notifications'),
+              value: t(notificationsEnabled ? 'settings.summary.on' : 'settings.summary.off')
+            }
+          ]
+        : page === 'libraries'
+          ? [
+              {
+                label: t('settings.summary.sources'),
+                value: t('settings.summary.sourcesValue', {
+                  count: readyLibraryCount
+                })
+              },
+              {
+                label: t('settings.summary.games'),
+                value: t('settings.summary.gamesValue', { count: libraryGameCount })
+              },
+              {
+                label: t('settings.summary.region'),
+                value: t(
+                  STORE_REGION_OPTIONS.find(
+                    (item) => item.id === (settings?.storeRegion ?? 'eu')
+                  )?.labelKey ?? 'store.region.eu'
+                )
+              }
+            ]
+          : page === 'hardware'
+            ? [
+                {
+                  label: t('settings.summary.hardwareControl'),
+                  value: t(
+                    hardwareControlEnabled ? 'settings.summary.on' : 'settings.summary.off'
+                  )
+                },
+                {
+                  label: t('settings.summary.trigger'),
+                  value: t(HARDWARE_CONTROL_BUTTON_LABEL_KEYS[hardwareControlButton])
+                },
+                {
+                  label: t('settings.summary.hold'),
+                  value: t('settings.hardwareControl.seconds', {
+                    seconds: hardwareControlHoldSeconds
+                  })
+                }
+              ]
+            : [
+              {
+                label: t('settings.summary.version'),
+                value: version || '0.1.0-beta.3'
+              },
+              {
+                label: t('settings.summary.setup'),
+                value: t('settings.summary.available')
+              }
+            ]
 
   useEffect(() => {
     void window.api.app.getVersion().then(setVersion)
@@ -182,6 +438,20 @@ export function SettingsView(): JSX.Element {
     return () => cancelAnimationFrame(frame)
   }, [containerRef, page])
 
+  async function updateStoreRegion(storeRegion: StoreRegionId): Promise<void> {
+    if (regionSaveState === 'saving' || settings?.storeRegion === storeRegion) return
+    setRegionSaveState('saving')
+    try {
+      const snapshot = await window.api.store.setRegion(storeRegion)
+      setSettings((current) =>
+        current ? { ...current, storeRegion: snapshot.region } : current
+      )
+      setRegionSaveState('idle')
+    } catch {
+      setRegionSaveState('error')
+    }
+  }
+
   return (
     <div ref={containerRef} className="flex h-full flex-col gap-5 overflow-hidden px-8 pb-8 pt-[6.5rem]">
       <div className="flex shrink-0 items-center justify-center">
@@ -201,6 +471,7 @@ export function SettingsView(): JSX.Element {
                 data-focusable
                 data-settings-page={item.id}
                 aria-pressed={active}
+                aria-current={active ? 'page' : undefined}
                 onClick={() => setPage(item.id)}
                 animate={{ scale: active ? 1.025 : 1 }}
                 whileHover={{ scale: 1.025 }}
@@ -241,9 +512,19 @@ export function SettingsView(): JSX.Element {
             className="scrollbar-none absolute inset-0 overflow-y-auto overscroll-contain pb-[clamp(3rem,8vh,5rem)] pt-2"
             style={{ scrollPaddingBlock: 'clamp(1.5rem, 6vh, 4rem)' }}
           >
-            {page === 'interface' && (
-              <div className="space-y-5">
-                <SettingsSection icon={Palette} title={t('settings.theme.title')}>
+            <SettingsPageLead
+              icon={activePage.icon}
+              title={t(activePage.labelKey)}
+              description={t(activePage.bodyKey)}
+              index={activePageIndex + 1}
+              total={SETTINGS_PAGES.length}
+              highlights={pageHighlights}
+              autoSaveLabel={t('settings.autoSave')}
+            />
+
+            {page === 'appearance' && (
+              <div className="mt-5 space-y-5">
+                <SettingsSection index="01" icon={Palette} title={t('settings.theme.title')}>
                   <div className="grid grid-cols-4 gap-2 sm:grid-cols-6 xl:grid-cols-12">
                     {THEME_OPTIONS.map((option) => (
                       <motion.button
@@ -286,7 +567,66 @@ export function SettingsView(): JSX.Element {
                   </div>
                 </SettingsSection>
 
-                <SettingsSection icon={LayoutTemplate} title={t('settings.homeLayout.title')}>
+                <SettingsSection index="02" icon={Layers3} title={t('settings.presentation.title')}>
+                  <p className="mb-4 max-w-3xl text-xs leading-relaxed text-muted">
+                    {t('settings.presentation.body')}
+                  </p>
+                  <div className="grid grid-cols-1 gap-3 xl:grid-cols-3">
+                    <PresentationGroup
+                      eyebrow={t('settings.cardSize.title')}
+                      description={t('settings.cardSize.body')}
+                    >
+                      {GAME_CARD_SIZE_OPTIONS.map((option) => (
+                        <PresentationChoice
+                          key={option}
+                          active={gameCardSize === option}
+                          title={t(GAME_CARD_SIZE_COPY[option].labelKey)}
+                          description={t(GAME_CARD_SIZE_COPY[option].bodyKey)}
+                          onClick={() => void setGameCardSize(option)}
+                          preview={<CardSizePreview size={option} />}
+                        />
+                      ))}
+                    </PresentationGroup>
+
+                    <PresentationGroup
+                      eyebrow={t('settings.backdrop.title')}
+                      description={t('settings.backdrop.body')}
+                    >
+                      {BACKDROP_INTENSITY_OPTIONS.map((option) => (
+                        <PresentationChoice
+                          key={option}
+                          active={backdropIntensity === option}
+                          title={t(BACKDROP_INTENSITY_COPY[option].labelKey)}
+                          description={t(BACKDROP_INTENSITY_COPY[option].bodyKey)}
+                          onClick={() => void setBackdropIntensity(option)}
+                          preview={<BackdropPreview intensity={option} />}
+                        />
+                      ))}
+                    </PresentationGroup>
+
+                    <PresentationGroup
+                      eyebrow={t('settings.density.title')}
+                      description={t('settings.density.body')}
+                    >
+                      {DENSITY_OPTIONS.map((option) => (
+                        <PresentationChoice
+                          key={option.id}
+                          active={uiDensity === option.id}
+                          title={t(option.labelKey)}
+                          description={t(
+                            option.id === 'compact'
+                              ? 'settings.density.compactBody'
+                              : 'settings.density.standardBody'
+                          )}
+                          onClick={() => void setDensity(option.id)}
+                          preview={<DensityPreview density={option.id} />}
+                        />
+                      ))}
+                    </PresentationGroup>
+                  </div>
+                </SettingsSection>
+
+                <SettingsSection index="03" icon={LayoutTemplate} title={t('settings.homeLayout.title')}>
                   <p className="mb-4 text-xs leading-relaxed text-muted">
                     {t('settings.homeLayout.body')}
                   </p>
@@ -370,7 +710,12 @@ export function SettingsView(): JSX.Element {
                   </div>
                 </SettingsSection>
 
-                <SettingsSection icon={Eye} title={t('settings.visibility.title')}>
+              </div>
+            )}
+
+            {page === 'experience' && (
+              <div className="mt-5 space-y-5">
+                <SettingsSection index="01" icon={Eye} title={t('settings.visibility.title')}>
                   <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
                     <SettingsToggle
                       id="showStoreTab"
@@ -398,7 +743,7 @@ export function SettingsView(): JSX.Element {
                   </div>
                 </SettingsSection>
 
-                <SettingsSection icon={AudioLines} title={t('settings.audio.title')}>
+                <SettingsSection index="02" icon={AudioLines} title={t('settings.audio.title')}>
                   <p className="mb-3 text-xs text-muted">{t('settings.audio.body')}</p>
                   <div className="grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-8">
                     {AUDIO_PRESET_OPTIONS.map((option, index) => {
@@ -445,90 +790,95 @@ export function SettingsView(): JSX.Element {
                   </div>
                 </SettingsSection>
 
-                <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
-                  <SettingsSection icon={Layers3} title={t('settings.density.title')}>
-                    <div className="flex gap-3">
-                      {DENSITY_OPTIONS.map((option) => (
-                        <OptionPill
-                          key={option.id}
-                          active={uiDensity === option.id}
-                          onClick={() => void setDensity(option.id)}
-                        >
-                          {t(option.labelKey)}
-                        </OptionPill>
-                      ))}
+                <SettingsSection index="03" icon={BellRing} title={t('settings.notifications.title')}>
+                  <div className="space-y-4">
+                    <SettingsToggle
+                      id="notificationsEnabled"
+                      active={notificationsEnabled}
+                      title={t('settings.notifications.enabled')}
+                      description={t('settings.notifications.enabledBody')}
+                      defaultActive
+                      onChange={(active) => void setNotificationsEnabled(active)}
+                      t={t}
+                    />
+
+                    <div className="grid gap-4 rounded-2xl border border-white/[0.06] bg-black/15 p-4 xl:grid-cols-2">
+                      <div>
+                        <p className="mb-2 text-[10px] font-bold uppercase tracking-[0.16em] text-white/38">
+                          {t('settings.notifications.position')}
+                        </p>
+                        <div className="flex flex-wrap gap-2">
+                          {NOTIFICATION_POSITION_OPTIONS.map((option) => (
+                            <OptionPill
+                              key={option.id}
+                              active={notificationPosition === option.id}
+                              onClick={() => void setNotificationPosition(option.id)}
+                            >
+                              {t(option.labelKey)}
+                            </OptionPill>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div>
+                        <p className="mb-2 text-[10px] font-bold uppercase tracking-[0.16em] text-white/38">
+                          {t('settings.notifications.motion')}
+                        </p>
+                        <div className="flex flex-wrap gap-2">
+                          {NOTIFICATION_MOTION_OPTIONS.map((option) => (
+                            <OptionPill
+                              key={option.id}
+                              active={notificationMotion === option.id}
+                              onClick={() => void setNotificationMotion(option.id)}
+                            >
+                              {t(option.labelKey)}
+                            </OptionPill>
+                          ))}
+                        </div>
+                      </div>
                     </div>
-                  </SettingsSection>
 
-                  <SettingsSection icon={SlidersHorizontal} title={t('settings.language.title')}>
-                    <div className="flex gap-3">
-                      {LANGUAGE_OPTIONS.map((option) => (
-                        <OptionPill
-                          key={option.id}
-                          active={language === option.id}
-                          onClick={() => void setLanguage(option.id)}
-                        >
-                          {option.label}
-                        </OptionPill>
-                      ))}
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <p className="max-w-2xl text-xs leading-relaxed text-muted">
+                        {t('settings.notifications.testBody')}
+                      </p>
+                      <FocusableButton
+                        variant="ghost"
+                        onClick={() =>
+                          notify({
+                            tone: 'price',
+                            titleKey: 'notification.test.title',
+                            messageKey: 'notification.test.body',
+                            force: true,
+                            replace: true
+                          })
+                        }
+                        className="shrink-0"
+                      >
+                        <span className="flex items-center gap-2">
+                          <BellRing size={14} />
+                          {t('settings.notifications.test')}
+                        </span>
+                      </FocusableButton>
                     </div>
-                  </SettingsSection>
-                </div>
-              </div>
-            )}
+                  </div>
+                </SettingsSection>
 
-            {page === 'libraries' && (
-              <SettingsSection icon={LibraryBig} title={t('settings.account.title')}>
-                <div className="grid grid-cols-1 gap-3 xl:grid-cols-3">
-                  <StoreAccountCard
-                    store="Steam"
-                    badge="S"
-                    badgeClass="bg-[#1b2838]"
-                    description={
-                      account
-                        ? t('settings.account.connectedName', { name: account.accountName })
-                        : t('settings.account.notConnected')
-                    }
-                    connected={Boolean(account)}
-                    waiting={steamStatus.state === 'waiting-for-browser'}
-                    connectLabel={t('settings.account.connectSteam')}
-                    signOutLabel={t('settings.account.signOut')}
-                    onConnect={() => void startSteamLogin()}
-                    onLogout={() => void logout()}
-                  />
-                  <StoreAccountCard
-                    store="Epic Games"
-                    badge="E"
-                    badgeClass="bg-[#2a2a2a]"
-                    description={
-                      epicAccount
-                        ? t('settings.account.connectedName', { name: epicAccount.displayName })
-                        : t('settings.account.epicNotConnected')
-                    }
-                    connected={Boolean(epicAccount)}
-                    waiting={epicStatus.state === 'waiting-for-browser'}
-                    connectLabel={t('settings.account.connectEpic')}
-                    signOutLabel={t('settings.account.signOut')}
-                    onConnect={() => void startEpicLogin()}
-                    onLogout={() => void logoutEpic()}
-                  />
-                  <LocalLibraryCard
-                    store={t('settings.account.xboxTitle')}
-                    badge="X"
-                    badgeClass="bg-[#107c10]"
-                    description={t('settings.account.xboxLocal', {
-                      count: xboxGameCount,
-                      installed: xboxInstalledCount
-                    })}
-                    status={t('settings.account.localDetection')}
-                  />
-                </div>
-              </SettingsSection>
-            )}
+                <SettingsSection index="04" icon={SlidersHorizontal} title={t('settings.language.title')}>
+                  <div className="flex gap-3">
+                    {LANGUAGE_OPTIONS.map((option) => (
+                      <OptionPill
+                        key={option.id}
+                        active={language === option.id}
+                        onClick={() => void setLanguage(option.id)}
+                      >
+                        {option.label}
+                      </OptionPill>
+                    ))}
+                  </div>
+                </SettingsSection>
 
-            {page === 'advanced' && (
-              <div className="space-y-5">
-                <SettingsSection icon={Trophy} title={t('settings.integrations.title')}>
+                <SettingsSection index="05" icon={Trophy} title={t('settings.integrations.title')}>
                   <SettingsToggle
                     id="showAchievements"
                     active={showAchievements}
@@ -539,7 +889,8 @@ export function SettingsView(): JSX.Element {
                     t={t}
                   />
                 </SettingsSection>
-                <SettingsSection icon={AppWindow} title={t('settings.launchBehavior.title')}>
+
+                <SettingsSection index="06" icon={AppWindow} title={t('settings.launchBehavior.title')}>
                   <SettingsToggle
                     id="closeLaunchersAfterGame"
                     active={closeLaunchersAfterGame}
@@ -550,27 +901,144 @@ export function SettingsView(): JSX.Element {
                     t={t}
                   />
                 </SettingsSection>
-                <SettingsSection icon={Globe2} title={t('settings.storeRegion.title')}>
+              </div>
+            )}
+
+            {page === 'libraries' && (
+              <div className="mt-5 space-y-5">
+                <SettingsSection index="01" icon={LibraryBig} title={t('settings.account.title')}>
+                  <div className="mb-4 flex flex-wrap items-center justify-between gap-4">
+                    <p className="max-w-3xl text-xs leading-relaxed text-muted">
+                      {t('settings.libraryStatus.body')}
+                    </p>
+                    <FocusableButton
+                      variant="ghost"
+                      aria-disabled={isRefreshingLibrary}
+                      data-disabled={isRefreshingLibrary ? 'true' : undefined}
+                      onClick={() => {
+                        if (!isRefreshingLibrary) void refreshLibrary()
+                      }}
+                      className={`shrink-0 ${
+                        isRefreshingLibrary ? 'cursor-wait opacity-50' : ''
+                      }`}
+                    >
+                      <span className="flex items-center gap-2">
+                        <RefreshCw
+                          size={14}
+                          className={isRefreshingLibrary ? 'animate-spin' : ''}
+                        />
+                        {t(
+                          isRefreshingLibrary
+                            ? 'settings.libraryStatus.refreshing'
+                            : 'settings.libraryStatus.refresh'
+                        )}
+                      </span>
+                    </FocusableButton>
+                  </div>
+                  <div className="grid grid-cols-1 gap-3 2xl:grid-cols-3">
+                    <LibraryProviderCard
+                      store="Steam"
+                      badge="S"
+                      badgeClass="bg-[#1b2838]"
+                      status={steamLibraryStatus}
+                      description={
+                        account
+                          ? t('settings.account.connectedName', { name: account.accountName })
+                          : steamStatus.state === 'error'
+                            ? t('settings.account.connectionFailed')
+                            : t('settings.account.notConnected')
+                      }
+                      connected={Boolean(account)}
+                      waiting={steamStatus.state === 'waiting-for-browser'}
+                      error={steamStatus.state === 'error'}
+                      connectLabel={t(
+                        steamStatus.state === 'waiting-for-browser'
+                          ? 'settings.account.connecting'
+                          : steamStatus.state === 'error'
+                            ? 'settings.account.retry'
+                            : 'settings.account.connectSteam'
+                      )}
+                      signOutLabel={t('settings.account.signOut')}
+                      onConnect={() => void startSteamLogin()}
+                      onLogout={() => void logout()}
+                      language={language}
+                      t={t}
+                    />
+                    <LibraryProviderCard
+                      store="Epic Games"
+                      badge="E"
+                      badgeClass="bg-[#2a2a2a]"
+                      status={epicLibraryStatus}
+                      description={
+                        epicAccount
+                          ? t('settings.account.connectedName', { name: epicAccount.displayName })
+                          : epicStatus.state === 'error'
+                            ? t('settings.account.connectionFailed')
+                            : t('settings.account.epicNotConnected')
+                      }
+                      connected={Boolean(epicAccount)}
+                      waiting={epicStatus.state === 'waiting-for-browser'}
+                      error={epicStatus.state === 'error'}
+                      connectLabel={t(
+                        epicStatus.state === 'waiting-for-browser'
+                          ? 'settings.account.connecting'
+                          : epicStatus.state === 'error'
+                            ? 'settings.account.retry'
+                            : 'settings.account.connectEpic'
+                      )}
+                      signOutLabel={t('settings.account.signOut')}
+                      onConnect={() => void startEpicLogin()}
+                      onLogout={() => void logoutEpic()}
+                      language={language}
+                      t={t}
+                    />
+                    <LibraryProviderCard
+                      store={t('settings.account.xboxTitle')}
+                      badge="X"
+                      badgeClass="bg-[#107c10]"
+                      status={xboxLibraryStatus}
+                      description={t('settings.libraryStatus.xboxAutomatic')}
+                      connected
+                      automatic
+                      waiting={false}
+                      error={false}
+                      connectLabel=""
+                      signOutLabel=""
+                      language={language}
+                      t={t}
+                    />
+                  </div>
+                </SettingsSection>
+
+                <SettingsSection index="02" icon={Globe2} title={t('settings.storeRegion.title')}>
                   <p className="mb-4 text-sm text-muted">{t('settings.storeRegion.body')}</p>
                   <div className="flex flex-wrap gap-3">
                     {STORE_REGION_OPTIONS.map((option) => (
                       <OptionPill
                         key={option.id}
                         active={(settings?.storeRegion ?? 'eu') === option.id}
-                        onClick={() => {
-                          void window.api.store.setRegion(option.id)
-                          setSettings((current) =>
-                            current ? { ...current, storeRegion: option.id } : current
-                          )
-                        }}
+                        disabled={!settings || regionSaveState === 'saving'}
+                        onClick={() => void updateStoreRegion(option.id)}
                       >
                         {t(option.labelKey)}
                       </OptionPill>
                     ))}
+                    {regionSaveState === 'saving' && (
+                      <span className="flex items-center gap-2 px-2 text-xs text-muted">
+                        <Loader2 size={13} className="animate-spin" />
+                        {t('settings.saving')}
+                      </span>
+                    )}
+                    {regionSaveState === 'error' && (
+                      <span className="flex items-center gap-2 px-2 text-xs text-amber-300">
+                        <CircleAlert size={13} />
+                        {t('settings.saveFailed')}
+                      </span>
+                    )}
                   </div>
                 </SettingsSection>
 
-                <SettingsSection icon={ImageIcon} title={t('settings.images.title')}>
+                <SettingsSection index="03" icon={ImageIcon} title={t('settings.images.title')}>
                   <p className="mb-4 max-w-4xl text-sm leading-relaxed text-muted">
                     {t('settings.images.body')}
                   </p>
@@ -591,11 +1059,37 @@ export function SettingsView(): JSX.Element {
                       }}
                     />
                   ) : (
-                    <Loader2 size={18} className="animate-spin text-muted" />
+                    <div className="flex items-center gap-2 text-sm text-muted">
+                      <Loader2 size={16} className="animate-spin" />
+                      {t('settings.loading')}
+                    </div>
                   )}
                 </SettingsSection>
+              </div>
+            )}
 
-                <SettingsSection icon={RotateCcw} title={t('settings.onboarding.title')}>
+            {page === 'hardware' && (
+              <div className="mt-5 space-y-5">
+                <SettingsSection
+                  index="01"
+                  icon={ShieldCheck}
+                  title={t('settings.backgroundService.title')}
+                >
+                  <OrbitBackgroundServicePanel />
+                </SettingsSection>
+                <SettingsSection
+                  index="02"
+                  icon={Gamepad2}
+                  title={t('settings.hardwareControl.title')}
+                >
+                  <HardwareControlPanel />
+                </SettingsSection>
+              </div>
+            )}
+
+            {page === 'system' && (
+              <div className="mt-5 space-y-5">
+                <SettingsSection index="01" icon={RotateCcw} title={t('settings.onboarding.title')}>
                   <div className="flex flex-wrap items-center justify-between gap-4">
                     <p className="max-w-3xl text-sm leading-relaxed text-muted">
                       {t('settings.onboarding.body')}
@@ -620,7 +1114,7 @@ export function SettingsView(): JSX.Element {
                   </div>
                 </SettingsSection>
 
-                <SettingsSection icon={SlidersHorizontal} title={t('settings.about.title')}>
+                <SettingsSection index="02" icon={AppWindow} title={t('settings.about.title')}>
                   <p className="text-sm text-muted">
                     {t('settings.about.version', { version: version || '0.1.0-beta.3' })}
                   </p>
@@ -631,6 +1125,184 @@ export function SettingsView(): JSX.Element {
         </AnimatePresence>
       </div>
     </div>
+  )
+}
+
+function SettingsPageLead({
+  icon: Icon,
+  title,
+  description,
+  index,
+  total,
+  highlights,
+  autoSaveLabel
+}: {
+  icon: typeof Palette
+  title: string
+  description: string
+  index: number
+  total: number
+  highlights: Array<{ label: string; value: string }>
+  autoSaveLabel: string
+}): JSX.Element {
+  return (
+    <section className="settings-page-lead relative overflow-hidden border-y border-white/[0.08] bg-[linear-gradient(90deg,rgb(var(--color-accent)/0.08),transparent_42%)] px-5 py-4">
+      <div className="absolute inset-y-0 left-0 w-px bg-accent/75" />
+      <div className="grid gap-4 lg:grid-cols-[minmax(18rem,1fr)_auto] lg:items-end">
+        <div className="min-w-0">
+          <div className="mb-2 flex items-center gap-2 text-[9px] font-bold uppercase tracking-[0.2em] text-accent">
+            <Icon size={13} />
+            <span>
+              SET / {String(index).padStart(2, '0')} — {String(total).padStart(2, '0')}
+            </span>
+          </div>
+          <h1 className="text-[clamp(1.55rem,2.4vw,2.3rem)] font-bold leading-none tracking-tight text-white">
+            {title}
+          </h1>
+          <p className="mt-2 max-w-3xl text-xs leading-relaxed text-white/48">{description}</p>
+        </div>
+
+        <div className="flex flex-wrap items-stretch gap-2 lg:justify-end">
+          {highlights.map((item) => (
+            <div
+              key={item.label}
+              className="min-w-[7.5rem] border-l border-white/10 bg-black/20 px-3 py-2"
+            >
+              <p className="text-[8px] font-bold uppercase tracking-[0.15em] text-white/28">
+                {item.label}
+              </p>
+              <p className="mt-1 max-w-40 truncate text-xs font-semibold text-white/78">
+                {item.value}
+              </p>
+            </div>
+          ))}
+          <div className="flex items-center gap-2 px-2 text-[10px] font-medium text-white/40">
+            <CheckCircle2 size={13} className="text-emerald-400" />
+            {autoSaveLabel}
+          </div>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function PresentationGroup({
+  eyebrow,
+  description,
+  children
+}: {
+  eyebrow: string
+  description: string
+  children: React.ReactNode
+}): JSX.Element {
+  return (
+    <div className="rounded-2xl border border-white/[0.07] bg-black/20 p-3">
+      <div className="mb-3 px-1">
+        <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-accent">
+          {eyebrow}
+        </p>
+        <p className="mt-1 text-[11px] leading-relaxed text-white/42">{description}</p>
+      </div>
+      <div className="space-y-2">{children}</div>
+    </div>
+  )
+}
+
+function PresentationChoice({
+  active,
+  title,
+  description,
+  preview,
+  onClick
+}: {
+  active: boolean
+  title: string
+  description: string
+  preview: React.ReactNode
+  onClick: () => void
+}): JSX.Element {
+  return (
+    <motion.button
+      data-focusable
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+      whileHover={{ x: 2 }}
+      whileTap={{ scale: 0.985 }}
+      className={`flex min-h-[4.65rem] w-full items-center gap-3 rounded-xl border p-2.5 text-left transition-colors ${
+        active
+          ? 'border-accent/65 bg-accent/12'
+          : 'border-white/[0.06] bg-white/[0.025] hover:bg-white/[0.05]'
+      }`}
+    >
+      <span className="flex h-12 w-[4.25rem] shrink-0 items-center justify-center overflow-hidden rounded-lg border border-white/[0.07] bg-black/35">
+        {preview}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className={`block text-xs font-bold ${active ? 'text-white' : 'text-white/70'}`}>
+          {title}
+        </span>
+        <span className="mt-1 block text-[10px] leading-snug text-white/38">{description}</span>
+      </span>
+      <span
+        className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${
+          active ? 'border-accent bg-accent text-black' : 'border-white/15 text-transparent'
+        }`}
+      >
+        <Check size={11} strokeWidth={3} />
+      </span>
+    </motion.button>
+  )
+}
+
+function CardSizePreview({ size }: { size: GameCardSize }): JSX.Element {
+  const cardWidth = size === 'compact' ? 'w-2.5' : size === 'large' ? 'w-4' : 'w-3'
+  const cardCount = size === 'compact' ? 4 : size === 'large' ? 2 : 3
+  return (
+    <span className="flex h-9 items-end justify-center gap-1">
+      {Array.from({ length: cardCount }, (_, index) => (
+        <span
+          key={index}
+          className={`${cardWidth} block h-full rounded-[3px] border ${
+            index === 0
+              ? 'border-accent/75 bg-gradient-to-b from-accent/80 to-accent-2/45'
+              : 'border-white/10 bg-white/10'
+          }`}
+        />
+      ))}
+    </span>
+  )
+}
+
+function BackdropPreview({ intensity }: { intensity: BackdropIntensity }): JSX.Element {
+  const opacity =
+    intensity === 'subtle'
+      ? 'opacity-35'
+      : intensity === 'vivid'
+        ? 'opacity-100'
+        : 'opacity-65'
+  return (
+    <span className="relative block h-full w-full overflow-hidden">
+      <span
+        className={`absolute inset-0 bg-[radial-gradient(circle_at_25%_25%,rgb(var(--color-accent)/0.95),transparent_48%),linear-gradient(135deg,rgb(var(--color-accent-2)/0.7),transparent_70%)] ${opacity}`}
+      />
+      <span className="absolute inset-x-0 bottom-0 h-7 bg-gradient-to-t from-black/90 to-transparent" />
+      <span className="absolute bottom-1.5 left-2 h-1.5 w-7 rounded-full bg-white/70" />
+    </span>
+  )
+}
+
+function DensityPreview({ density }: { density: UiDensity }): JSX.Element {
+  const gap = density === 'compact' ? 'gap-1' : 'gap-1.5'
+  return (
+    <span className={`flex w-12 flex-col ${gap}`}>
+      {[0, 1, 2].map((index) => (
+        <span key={index} className="flex items-center gap-1.5">
+          <span className="h-1.5 w-1.5 rounded-full bg-accent/75" />
+          <span className={`h-1 rounded-full bg-white/25 ${index === 1 ? 'w-7' : 'w-9'}`} />
+        </span>
+      ))}
+    </span>
   )
 }
 
@@ -658,6 +1330,7 @@ function SettingsToggle({
   return (
     <motion.button
       data-focusable
+      type="button"
       data-disabled={disabled ? 'true' : undefined}
       disabled={disabled}
       data-setting-toggle={id}
@@ -702,19 +1375,27 @@ function SettingsToggle({
 }
 
 function SettingsSection({
+  index,
   icon: Icon,
   title,
   children
 }: {
+  index: string
   icon: typeof Palette
   title: string
   children: React.ReactNode
 }): JSX.Element {
   return (
-    <section className="rounded-xl2 border border-white/[0.07] bg-white/[0.035] p-5 shadow-card backdrop-blur-xl">
-      <h3 className="mb-4 flex items-center gap-2 text-sm font-semibold text-muted">
-        <Icon size={15} />
-        {title}
+    <section className="settings-section relative overflow-hidden rounded-xl2 border border-white/[0.07] bg-[linear-gradient(135deg,rgb(255_255_255/0.045),rgb(255_255_255/0.018))] p-5 shadow-card backdrop-blur-xl">
+      <div className="pointer-events-none absolute left-0 top-5 h-8 w-px bg-accent/80" />
+      <h3 className="mb-4 flex items-center gap-3">
+        <span className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/[0.07] bg-black/25 text-accent">
+          <Icon size={15} />
+        </span>
+        <span className="text-sm font-semibold text-white/78">{title}</span>
+        <span className="ml-auto text-[9px] font-bold tracking-[0.18em] text-white/22">
+          {index}
+        </span>
       </h3>
       {children}
     </section>
@@ -723,21 +1404,29 @@ function SettingsSection({
 
 function OptionPill({
   active,
+  disabled = false,
   onClick,
   children
 }: {
   active: boolean
+  disabled?: boolean
   onClick: () => void
   children: React.ReactNode
 }): JSX.Element {
   return (
     <motion.button
       data-focusable
+      type="button"
+      aria-pressed={active}
+      data-disabled={disabled ? 'true' : undefined}
+      disabled={disabled}
       onClick={onClick}
       whileHover={{ scale: 1.03 }}
       whileTap={{ scale: 0.97 }}
       className={`flex items-center gap-2 rounded-full px-5 py-2.5 text-sm ${
         active ? 'bg-accent font-semibold text-black' : 'bg-white/5 text-muted'
+      } ${
+        disabled ? 'cursor-not-allowed opacity-45' : ''
       }`}
     >
       {active && <Check size={14} />}
@@ -746,91 +1435,191 @@ function OptionPill({
   )
 }
 
-function StoreAccountCard({
+function providerStatusOrFallback(
+  statuses: LibraryProviderStatus[] | undefined,
+  games: LibraryGame[],
+  provider: LibraryStatusProvider,
+  connection: LibraryProviderConnection
+): LibraryProviderStatus {
+  const status = statuses?.find((candidate) => candidate.provider === provider)
+  if (status) return status
+  const providerGames = games.filter((game) => game.provider === provider)
+  return {
+    provider,
+    state: 'idle',
+    connection,
+    methods: [],
+    gameCount: providerGames.length,
+    installedCount: providerGames.filter((game) => game.installed).length,
+    installableCount: 0
+  }
+}
+
+function libraryStateClass(state: LibraryProviderState): string {
+  if (state === 'ready') return 'border-emerald-400/25 bg-emerald-400/10 text-emerald-300'
+  if (state === 'partial' || state === 'local-only') {
+    return 'border-amber-300/25 bg-amber-300/10 text-amber-200'
+  }
+  if (state === 'error') return 'border-rose-300/25 bg-rose-300/10 text-rose-200'
+  if (state === 'scanning') return 'border-accent/25 bg-accent/10 text-accent'
+  return 'border-white/10 bg-white/[0.05] text-muted'
+}
+
+function formatLibraryCheck(
+  timestamp: number | undefined,
+  language: OrbitSettings['language'],
+  t: ReturnType<typeof useT>
+): string {
+  if (!timestamp) return t('settings.libraryStatus.neverChecked')
+  return new Intl.DateTimeFormat(language === 'de' ? 'de-DE' : 'en-US', {
+    hour: '2-digit',
+    minute: '2-digit'
+  }).format(timestamp)
+}
+
+function LibraryProviderCard({
   store,
   badge,
   badgeClass,
+  status,
   description,
   connected,
+  automatic = false,
   waiting,
+  error,
   connectLabel,
   signOutLabel,
   onConnect,
-  onLogout
+  onLogout,
+  language,
+  t
 }: {
   store: string
   badge: string
   badgeClass: string
+  status: LibraryProviderStatus
   description: string
   connected: boolean
+  automatic?: boolean
   waiting: boolean
+  error: boolean
   connectLabel: string
   signOutLabel: string
-  onConnect: () => void
-  onLogout: () => void
+  onConnect?: () => void
+  onLogout?: () => void
+  language: OrbitSettings['language']
+  t: ReturnType<typeof useT>
 }): JSX.Element {
-  return (
-    <div className="flex items-center justify-between gap-4 rounded-2xl border border-white/[0.06] bg-black/20 p-5">
-      <div className="flex min-w-0 items-center gap-3">
-        <div
-          className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full ${badgeClass}`}
-        >
-          <span className="text-sm font-bold text-white">{badge}</span>
-        </div>
-        <div className="min-w-0">
-          <p className="font-medium">{store}</p>
-          <p className="truncate text-xs text-muted">{description}</p>
-        </div>
-      </div>
-      {connected ? (
-        <FocusableButton variant="ghost" onClick={onLogout} className="shrink-0">
-          <span className="flex items-center gap-2">
-            <LogOut size={14} />
-            {signOutLabel}
-          </span>
-        </FocusableButton>
-      ) : (
-        <FocusableButton onClick={onConnect} className="shrink-0">
-          <span className="flex items-center gap-2">
-            {waiting && <Loader2 size={14} className="animate-spin" />}
-            {connectLabel}
-          </span>
-        </FocusableButton>
-      )}
-    </div>
-  )
-}
+  const methods = status.methods.map((method) => t(LIBRARY_METHOD_KEYS[method]))
+  const issue = status.issue
+    ? t(LIBRARY_ISSUE_KEYS[status.issue], { count: status.pendingCount ?? 0 })
+    : undefined
+  const stateIsBusy = status.state === 'scanning'
 
-function LocalLibraryCard({
-  store,
-  badge,
-  badgeClass,
-  description,
-  status
-}: {
-  store: string
-  badge: string
-  badgeClass: string
-  description: string
-  status: string
-}): JSX.Element {
   return (
-    <div className="flex items-center justify-between gap-4 rounded-2xl border border-white/[0.06] bg-black/20 p-5">
-      <div className="flex min-w-0 items-center gap-3">
-        <div
-          className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full ${badgeClass}`}
-        >
-          <span className="text-sm font-bold text-white">{badge}</span>
+    <article className="flex min-h-full flex-col rounded-2xl border border-white/[0.07] bg-black/25 p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-3">
+          <div
+            className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full ${badgeClass}`}
+          >
+            <span className="text-sm font-bold text-white">{badge}</span>
+          </div>
+          <div className="min-w-0">
+            <p className="flex items-center gap-2 font-semibold text-white/90">
+              {store}
+              {error && <CircleAlert size={13} className="text-amber-300" />}
+            </p>
+            <p className={`truncate text-xs ${error ? 'text-amber-200/75' : 'text-muted'}`}>
+              {description}
+            </p>
+          </div>
         </div>
-        <div className="min-w-0">
-          <p className="font-medium">{store}</p>
-          <p className="line-clamp-2 text-xs text-muted">{description}</p>
+        <div
+          className={`flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[9px] font-bold uppercase tracking-wider ${libraryStateClass(status.state)}`}
+          role="status"
+        >
+          {stateIsBusy ? (
+            <Loader2 size={11} className="animate-spin" />
+          ) : status.state === 'ready' ? (
+            <CheckCircle2 size={11} />
+          ) : (
+            <CircleAlert size={11} />
+          )}
+          {t(LIBRARY_STATE_KEYS[status.state])}
         </div>
       </div>
-      <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-[#107c10]/20 px-3 py-2 text-xs font-semibold text-[#6ee7a0]">
-        <Check size={13} />
-        {status}
-      </span>
-    </div>
+
+      <div className="mt-4 grid grid-cols-3 divide-x divide-white/[0.06] border-y border-white/[0.06] py-3">
+        {[
+          [t('settings.libraryStatus.recognized'), status.gameCount],
+          [t('settings.libraryStatus.installed'), status.installedCount],
+          [t('settings.libraryStatus.installable'), status.installableCount]
+        ].map(([label, value]) => (
+          <div key={String(label)} className="px-2 first:pl-0 last:pr-0">
+            <p className="text-lg font-bold leading-none text-white">{value}</p>
+            <p className="mt-1 text-[9px] uppercase tracking-wider text-white/32">{label}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-3 flex-1 rounded-xl border border-white/[0.05] bg-white/[0.025] p-3">
+        <p className="text-[9px] font-bold uppercase tracking-[0.16em] text-white/30">
+          {t('settings.libraryStatus.detection')}
+        </p>
+        <p className="mt-1.5 text-xs leading-relaxed text-white/68">
+          {methods.length > 0 ? methods.join(' + ') : t('settings.libraryStatus.method.pending')}
+        </p>
+        {status.pendingCount ? (
+          <p className="mt-2 text-[10px] text-accent">
+            {t('settings.libraryStatus.pending', { count: status.pendingCount })}
+          </p>
+        ) : null}
+      </div>
+
+      {issue && (
+        <p
+          className={`mt-3 flex items-start gap-2 text-[10px] leading-relaxed ${
+            status.state === 'error' ? 'text-rose-200/80' : 'text-amber-200/75'
+          }`}
+        >
+          <CircleAlert size={12} className="mt-0.5 shrink-0" />
+          {issue}
+        </p>
+      )}
+
+      <div className="mt-4 flex min-h-9 items-center justify-between gap-3 border-t border-white/[0.06] pt-3">
+        <p className="text-[10px] text-white/32">
+          {t('settings.libraryStatus.lastChecked')}{' '}
+          <span className="text-white/55">
+            {formatLibraryCheck(status.lastCheckedAt, language, t)}
+          </span>
+        </p>
+        {automatic ? (
+          <span className="rounded-full bg-[#107c10]/15 px-2.5 py-1 text-[9px] font-semibold text-[#6ee7a0]">
+            {t('settings.libraryStatus.automatic')}
+          </span>
+        ) : connected && onLogout ? (
+          <FocusableButton variant="ghost" onClick={onLogout} className="shrink-0">
+            <span className="flex items-center gap-2">
+              <LogOut size={14} />
+              {signOutLabel}
+            </span>
+          </FocusableButton>
+        ) : onConnect ? (
+          <FocusableButton
+            data-disabled={waiting ? 'true' : undefined}
+            disabled={waiting}
+            onClick={onConnect}
+            className="shrink-0 disabled:cursor-wait disabled:opacity-50"
+          >
+            <span className="flex items-center gap-2">
+              {waiting && <Loader2 size={14} className="animate-spin" />}
+              {connectLabel}
+            </span>
+          </FocusableButton>
+        ) : null}
+      </div>
+    </article>
   )
 }

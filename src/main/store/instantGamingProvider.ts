@@ -1,5 +1,6 @@
 import type { StoreOffer } from '@shared/ipc'
 import { formatStorePrice, type StoreRegionConfig } from './storeRegions'
+import { fetchWithElectronNet } from '../networkFetch'
 import {
   normalizeStoreTitle,
   type StoreSearchCandidate,
@@ -28,7 +29,7 @@ async function queryInstantGaming(
   region: StoreRegionConfig
 ): Promise<InstantGamingProduct[]> {
   const url = `https://www.instant-gaming.com/en/search/?query=${encodeURIComponent(name)}`
-  const response = await fetch(url, {
+  const response = await fetchWithElectronNet(url, {
     headers: storeHeaders(region),
     signal: AbortSignal.timeout(STORE_REQUEST_TIMEOUT_MS)
   })

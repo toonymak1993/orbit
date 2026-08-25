@@ -7,10 +7,12 @@ export interface InstalledSteamApp {
   appId: number
   name: string
   installDir: string
+  updateAvailable: boolean
   lastPlayedTimestamp?: number
 }
 
 const FULLY_INSTALLED_FLAG = 4
+const UPDATE_REQUIRED_FLAG = 2
 const STEAM_REDISTRIBUTABLES_APP_ID = 228980
 const STEAM_ID64_BASE = 76561197960265728n
 
@@ -47,10 +49,22 @@ function getLibraryFolders(steamPath: string): string[] {
         if (path) paths.add(path)
       }
     }
-    return [...paths]
+    const uniquePaths = new Map<string, string>()
+    for (const libraryPath of paths) {
+      uniquePaths.set(libraryPath.replace(/\//g, '\\').toLocaleLowerCase('en'), libraryPath)
+    }
+    return [...uniquePaths.values()]
   } catch {
     return [steamPath]
   }
+}
+
+export function getSteamAppsDirectories(): string[] {
+  const steamPath = getSteamInstallPath()
+  if (!steamPath) return []
+  return getLibraryFolders(steamPath)
+    .map((libraryPath) => join(libraryPath, 'steamapps'))
+    .filter((steamappsDir) => existsSync(steamappsDir))
 }
 
 function getLocalLastPlayed(steamPath: string, steamId?: string): Map<number, number> {
@@ -121,6 +135,8 @@ export function scanInstalledSteamApps(steamId?: string): Map<number, InstalledS
         const manifest = manifestRoot(readFileSync(join(steamappsDir, file), 'utf8'))
         const appId = Number(vdfString(getVdfValue(manifest, 'appid')))
         const stateFlags = Number(vdfString(getVdfValue(manifest, 'StateFlags')))
+        const bytesToDownload = Number(vdfString(getVdfValue(manifest, 'BytesToDownload')))
+        const bytesDownloaded = Number(vdfString(getVdfValue(manifest, 'BytesDownloaded')))
         const userConfig = vdfObject(getVdfValue(manifest, 'UserConfig'))
         const name =
           vdfString(getVdfValue(manifest, 'name')) ?? vdfString(getVdfValue(userConfig, 'name'))
@@ -140,11 +156,17 @@ export function scanInstalledSteamApps(steamId?: string): Map<number, InstalledS
 
         const installDir = join(steamappsDir, 'common', installDirName)
         if (!existsSync(installDir)) continue
+        const hasPendingDownload =
+          Number.isFinite(bytesToDownload) &&
+          Number.isFinite(bytesDownloaded) &&
+          bytesToDownload > 0 &&
+          bytesDownloaded < bytesToDownload
 
         result.set(appId, {
           appId,
           name: name.trim(),
           installDir,
+          updateAvailable: (stateFlags & UPDATE_REQUIRED_FLAG) !== 0 || hasPendingDownload,
           lastPlayedTimestamp: lastPlayed.get(appId)
         })
       } catch {

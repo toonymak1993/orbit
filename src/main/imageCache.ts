@@ -3,17 +3,24 @@ import { createHash } from 'node:crypto'
 import { app, nativeImage } from 'electron'
 import { existsSync, mkdirSync } from 'node:fs'
 import { readdirSync } from 'node:fs'
-import { readFile, writeFile } from 'node:fs/promises'
+import { readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { extname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import Store from 'electron-store'
 import type { ImageOrientation, ImageUpdate, LibraryGame, ResolvedImage } from '@shared/ipc'
 import { settingsStore } from './settingsStore'
 import { fetchSteamGridDbImage } from './steamGridDb'
+import { fetchWithElectronNet } from './networkFetch'
+import {
+  isTransientArtworkStatus,
+  runArtworkNetworkAttempt,
+  type ArtworkNetworkAttempt
+} from './artworkNetworkPolicy'
 import { resolveLocalIconDataUrl } from './localIcon'
 import { getBuiltinSteamGridDbKey } from './builtinKeys'
 import { getSteamInstallPath } from './steam/steamInstall'
 import { syncCoordinator } from './sync/syncCoordinator'
+import { customArtworkService } from './customArtwork'
 
 const CACHE_DIR = join(app.getPath('userData'), 'artwork-v2')
 const CDN_HOSTS = ['cdn.akamai.steamstatic.com', 'cdn.cloudflare.steamstatic.com']
@@ -21,11 +28,17 @@ const HIGH_QUALITY_TTL_MS = 60 * 24 * 60 * 60 * 1000
 const LOW_QUALITY_TTL_MS = 24 * 60 * 60 * 1000
 const NEGATIVE_TTL_MS = 24 * 60 * 60 * 1000
 const MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
+const ASSET_TIMEOUT_MS = 8_000
+const TRANSIENT_RETRY_BASE_MS = 2 * 60 * 1000
+const TRANSIENT_RETRY_MAX_MS = 6 * 60 * 60 * 1000
+const ORPHAN_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
+const MAX_ORPHAN_DELETIONS_PER_RUN = 25
+const GENERATED_CACHE_FILE = /-(?:vertical|horizontal|icon)-[a-f0-9]{16}\.(?:jpg|png|webp)$/i
 // Keep background artwork decoding below the point where it competes with the
 // controller UI on handheld CPUs. Delta sync is continuous, so latency matters
 // less here than stable frame times.
 const MAX_CONCURRENCY = 3
-const PIPELINE_VERSION = 4
+const PIPELINE_VERSION = 5
 
 type ArtworkSource =
   | 'steam-local'
@@ -48,11 +61,14 @@ interface ManifestEntry {
   pipelineVersion: number
   metadataRevision?: number
   artworkFingerprint?: string
+  retryAt?: number
+  failureCount?: number
 }
 
 interface QueueItem {
   game: LibraryGame
   orientation: ImageOrientation
+  generation: number
 }
 
 interface ValidatedImage {
@@ -69,6 +85,12 @@ const manifestStore = new Store<{ schemaVersion: number; entries: Record<string,
 })
 const manifestEntries: Record<string, ManifestEntry> = { ...manifestStore.get('entries') }
 let manifestPersistTimer: ReturnType<typeof setTimeout> | undefined
+let lastRevision = Date.now()
+
+function nextRevision(): number {
+  lastRevision = Math.max(Date.now(), lastRevision + 1)
+  return lastRevision
+}
 
 function persistManifestEntries(): void {
   if (manifestPersistTimer) clearTimeout(manifestPersistTimer)
@@ -95,15 +117,61 @@ function artworkKey(gameId: string, orientation: ImageOrientation): string {
   return `${gameId}:${orientation}`
 }
 
+function cachedFileName(entry: ManifestEntry): string | null {
+  try {
+    if (!entry.url.startsWith('orbit-image://')) return null
+    const fileName = decodeURIComponent(entry.url.slice('orbit-image://'.length))
+    return fileName.includes('/') || fileName.includes('\\') ? null : fileName
+  } catch {
+    return null
+  }
+}
+
+async function cleanupOrphanedCacheFiles(): Promise<void> {
+  try {
+    ensureCacheDir()
+    const referenced = new Set(
+      Object.values(manifestEntries)
+        .map(cachedFileName)
+        .filter((fileName): fileName is string => Boolean(fileName))
+    )
+    const cutoff = Date.now() - ORPHAN_RETENTION_MS
+    const files = await readdir(CACHE_DIR, { withFileTypes: true })
+    let deleted = 0
+    for (const file of files) {
+      if (deleted >= MAX_ORPHAN_DELETIONS_PER_RUN) break
+      if (
+        !file.isFile() ||
+        referenced.has(file.name) ||
+        (!GENERATED_CACHE_FILE.test(file.name) && !file.name.endsWith('.tmp'))
+      ) continue
+      const filePath = join(CACHE_DIR, file.name)
+      const fileStat = await stat(filePath).catch(() => null)
+      const nowReferenced = Object.values(manifestEntries).some(
+        (entry) => cachedFileName(entry) === file.name
+      )
+      if (fileStat && fileStat.mtimeMs < cutoff && !nowReferenced) {
+        await unlink(filePath).catch(() => undefined)
+        deleted++
+      }
+    }
+  } catch {
+    // Cache maintenance must never delay or prevent launcher startup.
+  }
+}
+
+const cacheCleanupTimer = setTimeout(() => void cleanupOrphanedCacheFiles(), 60_000)
+cacheCleanupTimer.unref()
+
 function isEntryUsable(entry: ManifestEntry): boolean {
   if (entry.source === 'none') return false
   if (entry.url.startsWith('data:')) return true
-  if (!entry.url.startsWith('orbit-image://')) return false
-  const fileName = decodeURIComponent(entry.url.slice('orbit-image://'.length))
-  return !fileName.includes('/') && !fileName.includes('\\') && existsSync(join(CACHE_DIR, fileName))
+  const fileName = cachedFileName(entry)
+  return Boolean(fileName && existsSync(join(CACHE_DIR, fileName)))
 }
 
 function isEntryFresh(entry: ManifestEntry): boolean {
+  if (entry.retryAt !== undefined) return Date.now() < entry.retryAt
   const ttl =
     entry.quality === 'high'
       ? HIGH_QUALITY_TTL_MS
@@ -182,23 +250,71 @@ async function validateLocalFile(
   }
 }
 
+async function readBoundedResponse(response: Response): Promise<Buffer | null> {
+  if (!response.body) return null
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let byteLength = 0
+  try {
+    while (true) {
+      const chunk = await reader.read()
+      if (chunk.done) break
+      byteLength += chunk.value.byteLength
+      if (byteLength > MAX_DOWNLOAD_BYTES) {
+        await reader.cancel().catch(() => undefined)
+        return null
+      }
+      chunks.push(chunk.value)
+    }
+    return Buffer.concat(chunks, byteLength)
+  } finally {
+    reader.releaseLock()
+  }
+}
+
+async function discardResponse(response: Response): Promise<void> {
+  await response.body?.cancel().catch(() => undefined)
+}
+
 async function downloadValidated(
   remoteUrl: string,
   orientation: ImageOrientation
-): Promise<ValidatedImage | null> {
+): Promise<ArtworkNetworkAttempt<ValidatedImage>> {
   try {
-    const response = await fetch(remoteUrl, { signal: AbortSignal.timeout(20_000) })
-    if (!response.ok) return null
-    const announcedSize = Number(response.headers.get('content-length'))
-    if (Number.isFinite(announcedSize) && announcedSize > MAX_DOWNLOAD_BYTES) return null
-    const buffer = Buffer.from(await response.arrayBuffer())
-    return validateImage(
-      buffer,
-      orientation,
-      extensionFromType(response.headers.get('content-type'), remoteUrl)
-    )
+    const parsedUrl = new URL(remoteUrl)
+    if (parsedUrl.protocol !== 'https:' || parsedUrl.username || parsedUrl.password) {
+      return { state: 'missing' }
+    }
+    const scope = `artwork:${parsedUrl.hostname.toLowerCase()}`
+    return runArtworkNetworkAttempt<ValidatedImage>(scope, async () => {
+      const response = await fetchWithElectronNet(parsedUrl, {
+        signal: AbortSignal.timeout(ASSET_TIMEOUT_MS)
+      })
+      if (!response.ok) {
+        await discardResponse(response)
+        return { state: isTransientArtworkStatus(response.status) ? 'unavailable' : 'missing' }
+      }
+      const contentType = response.headers.get('content-type')
+      if (contentType && !contentType.toLowerCase().startsWith('image/')) {
+        await discardResponse(response)
+        return { state: 'missing' }
+      }
+      const announcedSize = Number(response.headers.get('content-length'))
+      if (Number.isFinite(announcedSize) && announcedSize > MAX_DOWNLOAD_BYTES) {
+        await discardResponse(response)
+        return { state: 'missing' }
+      }
+      const buffer = await readBoundedResponse(response)
+      if (!buffer) return { state: 'missing' }
+      const validated = validateImage(
+        buffer,
+        orientation,
+        extensionFromType(contentType, remoteUrl)
+      )
+      return validated ? { state: 'success', value: validated } : { state: 'missing' }
+    })
   } catch {
-    return null
+    return { state: 'missing' }
   }
 }
 
@@ -210,22 +326,35 @@ async function persistImage(
 ): Promise<ManifestEntry> {
   ensureCacheDir()
   const hash = createHash('sha256').update(validated.buffer).digest('hex').slice(0, 16)
-  const safeId = game.id.replace(/[^a-z0-9_-]/gi, '-')
-  const fileName = `${safeId}-${orientation}-${hash}.${validated.extension}`
+  const safeId = game.id.replace(/[^a-z0-9_-]/gi, '-').slice(0, 64) || 'game'
+  const gameHash = createHash('sha256').update(game.id).digest('hex').slice(0, 8)
+  const fileName = `${safeId}-${gameHash}-${orientation}-${hash}.${validated.extension}`
   const outputPath = join(CACHE_DIR, fileName)
-  if (!existsSync(outputPath)) await writeFile(outputPath, validated.buffer)
+  if (!existsSync(outputPath)) {
+    const temporaryPath = `${outputPath}.${process.pid}-${Date.now()}.tmp`
+    try {
+      await writeFile(temporaryPath, validated.buffer, { flag: 'wx' })
+      await rename(temporaryPath, outputPath)
+    } catch (error) {
+      if (!existsSync(outputPath)) throw error
+    } finally {
+      await unlink(temporaryPath).catch(() => undefined)
+    }
+  }
   return {
     url: `orbit-image://${fileName}`,
     contain: orientation === 'icon',
     width: validated.width,
     height: validated.height,
     resolvedAt: Date.now(),
-    revision: Date.now(),
+    revision: nextRevision(),
     source,
     quality: validated.quality,
     pipelineVersion: PIPELINE_VERSION,
     metadataRevision: game.metadataRevision,
-    artworkFingerprint: artworkFingerprint(game, orientation)
+    artworkFingerprint: artworkFingerprint(game, orientation),
+    retryAt: undefined,
+    failureCount: undefined
   }
 }
 
@@ -293,6 +422,40 @@ function artworkFingerprint(game: LibraryGame, orientation: ImageOrientation): s
     )
     .digest('hex')
     .slice(0, 16)
+}
+
+function adoptArtworkFingerprint(
+  entry: ManifestEntry | undefined,
+  fingerprint: string
+): void {
+  if (!entry || entry.artworkFingerprint) return
+  entry.artworkFingerprint = fingerprint
+  scheduleManifestPersist()
+}
+
+function needsRefresh(
+  entry: ManifestEntry | undefined,
+  fingerprint: string
+): boolean {
+  if (!entry) return true
+  return (
+    !isEntryFresh(entry) ||
+    (entry.source !== 'none' && !isEntryUsable(entry)) ||
+    entry.pipelineVersion !== PIPELINE_VERSION ||
+    entry.artworkFingerprint !== fingerprint
+  )
+}
+
+function transientRetryState(previous: ManifestEntry | undefined): {
+  failureCount: number
+  retryAt: number
+} {
+  const failureCount = (previous?.failureCount ?? 0) + 1
+  const delay = Math.min(
+    TRANSIENT_RETRY_BASE_MS * 2 ** Math.max(0, failureCount - 1),
+    TRANSIENT_RETRY_MAX_MS
+  )
+  return { failureCount, retryAt: Date.now() + delay }
 }
 
 function localProviderMetadataCandidates(
@@ -367,19 +530,8 @@ class ArtworkService extends EventEmitter {
       const currentArtworkFingerprint = artworkFingerprint(game, orientation)
       // Older manifests only tracked the broad metadata revision. Adopt their
       // currently cached result without forcing another full network sweep.
-      if (entry && !entry.artworkFingerprint) {
-        entry.artworkFingerprint = currentArtworkFingerprint
-        scheduleManifestPersist()
-      }
-      const cachedFileMissing = Boolean(entry && entry.source !== 'none' && !isEntryUsable(entry))
-      const needsUpgrade = Boolean(
-        !entry ||
-          !isEntryFresh(entry) ||
-          cachedFileMissing ||
-          entry.pipelineVersion !== PIPELINE_VERSION ||
-          entry.artworkFingerprint !== currentArtworkFingerprint
-      )
-      if (needsUpgrade) this.schedule(game, orientation)
+      adoptArtworkFingerprint(entry, currentArtworkFingerprint)
+      if (needsRefresh(entry, currentArtworkFingerprint)) this.schedule(game, orientation)
       else this.markSyncComplete(key)
     }
   }
@@ -387,21 +539,42 @@ class ArtworkService extends EventEmitter {
   resolve(game: LibraryGame, orientation: ImageOrientation): ResolvedImage | null {
     const key = artworkKey(game.id, orientation)
     const entry = manifestEntries[key]
-    const cachedFileMissing = Boolean(entry && entry.source !== 'none' && !isEntryUsable(entry))
-    if (!entry || !isEntryFresh(entry) || cachedFileMissing || entry.pipelineVersion !== PIPELINE_VERSION) {
+    const currentArtworkFingerprint = artworkFingerprint(game, orientation)
+    adoptArtworkFingerprint(entry, currentArtworkFingerprint)
+    if (needsRefresh(entry, currentArtworkFingerprint)) {
       this.schedule(game, orientation)
     }
     return entry && isEntryUsable(entry) ? toResolved(entry) : null
   }
 
-  private schedule(game: LibraryGame, orientation: ImageOrientation): void {
+  reportFailure(game: LibraryGame, orientation: ImageOrientation, revision: number): void {
+    const key = artworkKey(game.id, orientation)
+    const entry = manifestEntries[key]
+    if (!entry || entry.revision !== revision) return
+
+    const fileName = cachedFileName(entry)
+    delete manifestEntries[key]
+    scheduleManifestPersist()
+    this.emit('updated', { gameId: game.id, orientation, image: null } satisfies ImageUpdate)
+    if (fileName) void unlink(join(CACHE_DIR, fileName)).catch(() => undefined)
+    this.schedule(game, orientation, true)
+  }
+
+  private schedule(
+    game: LibraryGame,
+    orientation: ImageOrientation,
+    force = false
+  ): void {
     const key = artworkKey(game.id, orientation)
     const existing = this.pending.get(key)
     if (existing) {
+      const changed =
+        artworkFingerprint(existing.game, orientation) !== artworkFingerprint(game, orientation)
       existing.game = game
+      if (changed || force) existing.generation++
       return
     }
-    const item = { game, orientation }
+    const item: QueueItem = { game, orientation, generation: 0 }
     this.pending.set(key, item)
     if (game.metadataSource === 'orbit-store') {
       const firstBackgroundItem = this.queue.findIndex(
@@ -419,21 +592,31 @@ class ArtworkService extends EventEmitter {
     while (this.active < MAX_CONCURRENCY && this.queue.length > 0) {
       const item = this.queue.shift() as QueueItem
       const key = artworkKey(item.game.id, item.orientation)
+      const generation = item.generation
       this.active++
-      void this.refresh(item)
+      void this.refresh(item.game, item.orientation, () => item.generation === generation)
         .catch(() => undefined)
         .finally(() => {
           this.active--
-          this.pending.delete(key)
-          this.markSyncComplete(key)
+          if (item.generation !== generation) {
+            this.queue.push(item)
+          } else {
+            this.pending.delete(key)
+            this.markSyncComplete(key)
+          }
           this.pump()
         })
     }
   }
 
-  private async refresh({ game, orientation }: QueueItem): Promise<void> {
+  private async refresh(
+    game: LibraryGame,
+    orientation: ImageOrientation,
+    isCurrent: () => boolean
+  ): Promise<void> {
     const key = artworkKey(game.id, orientation)
     const previous = manifestEntries[key]
+    let transientFailure = false
     let bestFallback =
       previous &&
       isEntryUsable(previous) &&
@@ -445,7 +628,9 @@ class ArtworkService extends EventEmitter {
       validated: ValidatedImage,
       source: ArtworkSource
     ): Promise<boolean> => {
+      if (!isCurrent()) return true
       const entry = await persistImage(game, orientation, validated, source)
+      if (!isCurrent()) return true
       if (entry.quality === 'high') {
         this.rememberAndEmit(key, game.id, orientation, entry)
         return true
@@ -470,9 +655,13 @@ class ArtworkService extends EventEmitter {
       }
 
       for (const remoteUrl of steamCdnCandidates(game.appId, orientation)) {
-        const validated = await downloadValidated(remoteUrl, orientation)
-        if (!validated) continue
-        if (await acceptValidated(validated, 'steam-cdn')) return
+        const result = await downloadValidated(remoteUrl, orientation)
+        if (result.state === 'unavailable') {
+          transientFailure = true
+          continue
+        }
+        if (result.state === 'missing') continue
+        if (await acceptValidated(result.value, 'steam-cdn')) return
       }
     }
 
@@ -490,20 +679,32 @@ class ArtworkService extends EventEmitter {
     }
 
     for (const remoteUrl of remoteProviderMetadataCandidates(game, orientation)) {
-      const validated = await downloadValidated(remoteUrl, orientation)
-      if (!validated) continue
-      if (await acceptValidated(validated, 'provider-metadata')) return
+      const result = await downloadValidated(remoteUrl, orientation)
+      if (result.state === 'unavailable') {
+        transientFailure = true
+        continue
+      }
+      if (result.state === 'missing') continue
+      if (await acceptValidated(result.value, 'provider-metadata')) return
     }
 
     if (orientation !== 'icon') {
       const gridDbKey = settingsStore.get('steamGridDbApiKey') || getBuiltinSteamGridDbKey()
       if (gridDbKey) {
         const steamAppId = game.provider === 'steam' ? game.appId : undefined
-        const gridUrl = await fetchSteamGridDbImage(steamAppId, gridDbKey, orientation, game.name)
-        if (gridUrl) {
-          const validated = await downloadValidated(gridUrl, orientation)
-          if (validated) {
-            if (await acceptValidated(validated, 'steamgriddb')) return
+        const gridResult = await fetchSteamGridDbImage(
+          steamAppId,
+          gridDbKey,
+          orientation,
+          game.name
+        )
+        if (gridResult.state === 'unavailable') {
+          transientFailure = true
+        } else if (gridResult.state === 'success') {
+          const result = await downloadValidated(gridResult.value, orientation)
+          if (result.state === 'unavailable') transientFailure = true
+          else if (result.state === 'success') {
+            if (await acceptValidated(result.value, 'steamgriddb')) return
           }
         }
       }
@@ -520,43 +721,55 @@ class ArtworkService extends EventEmitter {
           width,
           height,
           resolvedAt: Date.now(),
-          revision: Date.now(),
+          revision: nextRevision(),
           source: 'local-icon',
           quality: 'low',
           pipelineVersion: PIPELINE_VERSION,
           metadataRevision: game.metadataRevision,
-          artworkFingerprint: artworkFingerprint(game, orientation)
+          artworkFingerprint: artworkFingerprint(game, orientation),
+          retryAt: undefined,
+          failureCount: undefined
         }
+        if (!isCurrent()) return
         this.rememberAndEmit(key, game.id, orientation, entry)
         return
       }
     }
 
+    if (!isCurrent()) return
+
     // Preserve a stale/low-quality image if all upgrades fail. A negative delta
-    // is stored only when there was no usable image at all.
+    // is stored only when there was no usable image at all. Provider outages use
+    // a shorter exponential retry while the last good file remains available.
     if (bestFallback && isEntryUsable(bestFallback)) {
+      const retry = transientFailure ? transientRetryState(previous) : undefined
       this.rememberAndEmit(key, game.id, orientation, {
         ...bestFallback,
-        resolvedAt: Date.now(),
+        resolvedAt: transientFailure ? bestFallback.resolvedAt : Date.now(),
         pipelineVersion: PIPELINE_VERSION,
         metadataRevision: game.metadataRevision,
-        artworkFingerprint: artworkFingerprint(game, orientation)
+        artworkFingerprint: artworkFingerprint(game, orientation),
+        retryAt: retry?.retryAt,
+        failureCount: retry?.failureCount
       })
       return
     }
 
+    const retry = transientFailure ? transientRetryState(previous) : undefined
     const missing: ManifestEntry = {
       url: '',
       contain: false,
       width: 0,
       height: 0,
       resolvedAt: Date.now(),
-      revision: Date.now(),
+      revision: nextRevision(),
       source: 'none',
       quality: 'none',
       pipelineVersion: PIPELINE_VERSION,
       metadataRevision: game.metadataRevision,
-      artworkFingerprint: artworkFingerprint(game, orientation)
+      artworkFingerprint: artworkFingerprint(game, orientation),
+      retryAt: retry?.retryAt,
+      failureCount: retry?.failureCount
     }
     this.rememberAndEmit(key, game.id, orientation, missing)
   }
@@ -594,5 +807,9 @@ export const artworkService = new ArtworkService()
 // Kept as a function for the IPC boundary; resolution is instant and any stale
 // or missing asset is upgraded by ArtworkService's bounded background queue.
 export function resolveImage(game: LibraryGame, orientation: ImageOrientation): ResolvedImage | null {
+  if (orientation === 'vertical') {
+    const customArtwork = customArtworkService.resolve(game.id)
+    if (customArtwork) return customArtwork
+  }
   return artworkService.resolve(game, orientation)
 }

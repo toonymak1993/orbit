@@ -74,21 +74,23 @@ NORMAL WINDOWS INSTALLATION
 1. Right-click Install-OrbitDevelopmentCertificate.ps1 and run it with PowerShell as administrator.
 2. Run $standardInstaller.
 
-XBOX MODE / FULL SCREEN EXPERIENCE
-1. Run $xboxInstaller as administrator.
-2. The setup trusts the same ORBIT certificate, enables Developer Mode for the Gaming Home capability,
-   installs the signed AppX, verifies the Gaming Home registration, and opens Windows FSE settings.
-3. Under Settings > Gaming > Full screen experience > Choose home app, select ORBIT.
-4. Optionally enable startup into Full screen experience.
+XBOX MODE
+1. Run $xboxInstaller from the Windows account that should own ORBIT and approve its administrator prompt.
+2. Before changing Windows, setup validates the certificate, signature, package identity, Gaming Home contract,
+   registration metadata, packaged release metadata, and supported Windows baseline.
+3. Setup trusts the same ORBIT certificate, enables Developer Mode for the beta capability, installs the signed
+   AppX for that account, verifies registration, and opens Xbox Mode settings.
+4. Under Settings > Gaming > Xbox mode > Choose home app, select ORBIT.
+5. Optionally enable startup into Xbox Mode.
 
-Windows 11 build 26100.7019 or newer is required. Native builds such as 26100.8328+ and 26200.8328+
-do not need a display-size override. On older or non-enabled systems, prepare FSE separately with the current
-Xbox Full Screen Experience Tool: https://github.com/8bit2qubit/XboxFullScreenExperienceTool
+Windows 11 version 24H2 (build 26100.0) or newer is required. Availability depends on Microsoft's supported
+markets, device policy, and phased Windows feature rollout. Keep Windows, Xbox, and Game Bar current. ORBIT does
+not impose an Xbox app version allow-list, apply device-form overrides, or use third-party preparation tools.
 
 The installer does not silently replace another Gaming Home app. This prevents broken Task View/FSE state if
 the previous home app is later uninstalled. The selected home app is changed only in Windows Settings.
 
-Diagnostics after Xbox installation:
+Diagnostics after Xbox installation attempts (success or failure):
   C:\ProgramData\ORBIT\Logs\xbox-mode-diagnostics.json
 
 Integrity hashes are listed in BETA-SHA256SUMS.txt.

@@ -5,9 +5,10 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleAlert,
-  Gamepad2,
   Globe2,
+  Gamepad2,
   ImageIcon,
+  Layers3,
   LayoutTemplate,
   LibraryBig,
   Loader2,
@@ -19,15 +20,20 @@ import {
 } from 'lucide-react'
 import type {
   AudioPreset,
+  BackdropIntensity,
+  GameCardSize,
   HomeLayoutId,
   LibraryGame,
   LibraryStats,
   StoreRegionId,
   SyncPipelineProgress,
-  ThemeId
+  ThemeId,
+  UiDensity
 } from '@shared/ipc'
 import { FocusableButton } from '@renderer/components/FocusableButton'
 import { GameImage } from '@renderer/components/GameImage'
+import { HardwareControlPanel } from '@renderer/components/HardwareControlPanel'
+import { OrbitBackgroundServicePanel } from '@renderer/components/OrbitBackgroundServicePanel'
 import { useAutoFocus } from '@renderer/hooks/useAutoFocus'
 import { useBackHandler } from '@renderer/hooks/useBackHandler'
 import { useT } from '@renderer/i18n/useT'
@@ -38,13 +44,16 @@ import { useEpicAuthStore } from '@renderer/state/epicAuthStore'
 import { useLibraryStore } from '@renderer/state/libraryStore'
 import {
   LANGUAGE_OPTIONS,
+  BACKDROP_INTENSITY_OPTIONS,
+  GAME_CARD_SIZE_OPTIONS,
   HOME_LAYOUT_OPTIONS,
   THEME_OPTIONS,
   usePreferencesStore
 } from '@renderer/state/preferencesStore'
 import { useSyncStore } from '@renderer/state/syncStore'
+import { OnboardingBackdrop, OrbitMark } from './OnboardingChrome'
 
-type SetupPage = 'libraries' | 'personalize' | 'ready'
+type SetupPage = 'libraries' | 'personalize' | 'hardware' | 'ready'
 
 interface Props {
   syncBaselineStartedAt?: number
@@ -52,7 +61,7 @@ interface Props {
   onFinish: () => void
 }
 
-const PAGE_ORDER: SetupPage[] = ['libraries', 'personalize', 'ready']
+const PAGE_ORDER: SetupPage[] = ['libraries', 'personalize', 'hardware', 'ready']
 
 const THEME_SWATCH: Record<ThemeId, string> = {
   midnight: 'from-[#3fd0ff] to-[#8b5cf6]',
@@ -88,6 +97,18 @@ const REGION_OPTIONS: Array<{ id: StoreRegionId; labelKey: TranslationKey }> = [
   { id: 'au', labelKey: 'store.region.au' }
 ]
 
+const CARD_SIZE_LABELS: Record<GameCardSize, TranslationKey> = {
+  compact: 'settings.cardSize.compact',
+  standard: 'settings.cardSize.standard',
+  large: 'settings.cardSize.large'
+}
+
+const BACKDROP_LABELS: Record<BackdropIntensity, TranslationKey> = {
+  subtle: 'settings.backdrop.subtle',
+  balanced: 'settings.backdrop.balanced',
+  vivid: 'settings.backdrop.vivid'
+}
+
 const EMPTY_STATS: LibraryStats = {
   gameCount: 0,
   installedCount: 0,
@@ -110,6 +131,19 @@ function hours(minutes: number, language: 'en' | 'de'): string {
   }).format(minutes / 60)
 }
 
+function focusOnboardingPage(container: HTMLElement | null, page: SetupPage): void {
+  const pageRoot = container?.querySelector<HTMLElement>(
+    `[data-onboarding-page-content="${page}"]`
+  )
+  const first =
+    pageRoot?.querySelector<HTMLElement>(
+      '[data-onboarding-primary]:not([data-disabled="true"])'
+    ) ??
+    pageRoot?.querySelector<HTMLElement>('[data-focusable]:not([data-disabled="true"])') ??
+    container?.querySelector<HTMLElement>('footer [data-focusable]')
+  focusElement(first ?? null)
+}
+
 export function OnboardingSuccess({
   syncBaselineStartedAt,
   onBack,
@@ -124,6 +158,7 @@ export function OnboardingSuccess({
   const [stats, setStats] = useState<LibraryStats>(EMPTY_STATS)
   const [entryUnlocked, setEntryUnlocked] = useState(false)
   const [entryUnlockedWithError, setEntryUnlockedWithError] = useState(false)
+  const hasFocusedInitialPage = useRef(false)
 
   const account = useAuthStore((state) => state.account)
   const steamStatus = useAuthStore((state) => state.status)
@@ -137,10 +172,16 @@ export function OnboardingSuccess({
   const {
     theme,
     homeLayout,
+    gameCardSize,
+    backdropIntensity,
+    uiDensity,
     language,
     audioPreset,
     setTheme,
     setHomeLayout,
+    setGameCardSize,
+    setBackdropIntensity,
+    setDensity,
     setLanguage,
     setAudioPreset
   } = usePreferencesStore()
@@ -150,6 +191,10 @@ export function OnboardingSuccess({
   const pageIndex = PAGE_ORDER.indexOf(page)
   const xboxGames = snapshot.providerGames.filter((game) => game.provider === 'xbox')
   const xboxInstalled = xboxGames.filter((game) => game.installed).length
+  const steamGames = snapshot.providerGames.filter((game) => game.provider === 'steam')
+  const steamInstalled = steamGames.filter((game) => game.installed).length
+  const epicGames = snapshot.providerGames.filter((game) => game.provider === 'epic')
+  const epicInstalled = epicGames.filter((game) => game.installed).length
 
   const backgroundGames = useMemo(
     () =>
@@ -276,18 +321,20 @@ export function OnboardingSuccess({
   }, [statMessages.length])
 
   useEffect(() => {
-    const frame = requestAnimationFrame(() => {
-      const pageRoot = containerRef.current?.querySelector<HTMLElement>(
-        `[data-onboarding-page-content="${page}"]`
-      )
-      const first =
-        pageRoot?.querySelector<HTMLElement>('[data-onboarding-primary]') ??
-        pageRoot?.querySelector<HTMLElement>('[data-focusable]:not([data-disabled="true"])') ??
-        containerRef.current?.querySelector<HTMLElement>('footer [data-focusable]')
-      focusElement(first ?? null)
-    })
-    return () => cancelAnimationFrame(frame)
+    if (hasFocusedInitialPage.current) return
+    hasFocusedInitialPage.current = true
+    // The setup shell itself fades in on first mount, so its inner page does
+    // not emit a page-transition completion. Later pages use the precise
+    // onAnimationComplete hook below.
+    const timer = setTimeout(() => focusOnboardingPage(containerRef.current, page), 280)
+    return () => clearTimeout(timer)
   }, [containerRef, page])
+
+  useEffect(() => {
+    if (page !== 'ready' || !entryUnlocked) return
+    const frame = requestAnimationFrame(() => focusOnboardingPage(containerRef.current, page))
+    return () => cancelAnimationFrame(frame)
+  }, [containerRef, entryUnlocked, page])
 
   useBackHandler(() => {
     if (pageIndex > 0) setPage(PAGE_ORDER[pageIndex - 1])
@@ -298,7 +345,8 @@ export function OnboardingSuccess({
   const displayName = account?.accountName ?? epicAccount?.displayName
 
   return (
-    <div ref={containerRef} className="relative h-full overflow-hidden bg-base">
+    <div ref={containerRef} className="onboarding-setup relative h-full overflow-hidden bg-base">
+      <OnboardingBackdrop />
       <div className="pointer-events-none absolute inset-0">
         <AnimatePresence mode="sync">
           {activeBackground && (
@@ -324,14 +372,13 @@ export function OnboardingSuccess({
         <div className="absolute inset-0 bg-[linear-gradient(90deg,rgb(var(--color-base)/0.98)_0%,rgb(var(--color-base)/0.88)_48%,rgb(var(--color-base)/0.78)_100%)]" />
         <div className="absolute inset-0 bg-[linear-gradient(180deg,rgb(var(--color-base)/0.78)_0%,transparent_30%,rgb(var(--color-base)/0.94)_100%)]" />
         <div className="absolute inset-0" style={{ backgroundImage: 'var(--theme-ambient)' }} />
+        <div className="onboarding-setup-grid" />
       </div>
 
       <div className="relative z-10 flex h-full flex-col px-[clamp(1.5rem,4vw,4.5rem)] py-[clamp(1rem,2.5vh,2rem)]">
         <header className="flex shrink-0 items-center justify-between gap-6">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-gradient-to-br from-accent to-accent-2 text-black shadow-glow">
-              <Gamepad2 size={20} />
-            </div>
+            <OrbitMark />
             <div>
               <div className="text-sm font-black tracking-[0.24em]">ORBIT</div>
               <div className="text-[10px] uppercase tracking-[0.16em] text-white/40">
@@ -340,7 +387,7 @@ export function OnboardingSuccess({
             </div>
           </div>
 
-          <nav className="flex items-center rounded-full border border-white/10 bg-black/35 p-1.5 shadow-card">
+          <nav className="onboarding-step-rail border-y border-white/[0.08] bg-black/25 shadow-card">
             {PAGE_ORDER.map((item, index) => {
               const active = item === page
               const labelKey = `onboarding.setup.page.${item}` as TranslationKey
@@ -350,14 +397,14 @@ export function OnboardingSuccess({
                   data-focusable
                   type="button"
                   onClick={() => setPage(item)}
-                  className={`relative flex items-center gap-2 rounded-full px-4 py-2 text-xs font-semibold transition-colors ${
-                    active ? 'text-black' : 'text-white/50 hover:text-white'
+                  className={`onboarding-step text-xs font-semibold transition-colors ${
+                    active ? 'text-white' : 'text-white/50 hover:text-white'
                   }`}
                 >
                   {active && (
                     <motion.span
                       layoutId="onboarding-active-page"
-                      className="absolute inset-0 rounded-full bg-accent"
+                      className="onboarding-step__active"
                       transition={{ type: 'spring', stiffness: 420, damping: 34 }}
                     />
                   )}
@@ -389,14 +436,19 @@ export function OnboardingSuccess({
               animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: -24 }}
               transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+              onAnimationComplete={() => focusOnboardingPage(containerRef.current, page)}
               className="mx-auto w-full max-w-[92rem] pb-3"
             >
               {page === 'libraries' && (
                 <LibrariesPage
                   steamConnectedName={account?.accountName}
                   steamState={steamStatus.state}
+                  steamGameCount={steamGames.length}
+                  steamInstalledCount={steamInstalled}
                   epicConnectedName={epicAccount?.displayName}
                   epicState={epicStatus.state}
+                  epicGameCount={epicGames.length}
+                  epicInstalledCount={epicInstalled}
                   xboxGameCount={xboxGames.length}
                   xboxInstalledCount={xboxInstalled}
                   syncStatus={syncStatus.pipelines}
@@ -414,11 +466,17 @@ export function OnboardingSuccess({
                   games={backgroundGames}
                   theme={theme}
                   homeLayout={homeLayout}
+                  gameCardSize={gameCardSize}
+                  backdropIntensity={backdropIntensity}
+                  uiDensity={uiDensity}
                   language={language}
                   region={region}
                   audioPreset={audioPreset}
                   onTheme={(value) => void setTheme(value)}
                   onHomeLayout={(value) => void setHomeLayout(value)}
+                  onGameCardSize={(value) => void setGameCardSize(value)}
+                  onBackdropIntensity={(value) => void setBackdropIntensity(value)}
+                  onDensity={(value) => void setDensity(value)}
                   onLanguage={(value) => void setLanguage(value)}
                   onRegion={(value) => {
                     setRegion(value)
@@ -427,6 +485,8 @@ export function OnboardingSuccess({
                   onAudio={(value) => void setAudioPreset(value)}
                 />
               )}
+
+              {page === 'hardware' && <HardwarePage />}
 
               {page === 'ready' && (
                 <ReadyPage
@@ -444,12 +504,12 @@ export function OnboardingSuccess({
           </AnimatePresence>
         </main>
 
-        <footer className="flex shrink-0 items-center justify-between border-t border-white/[0.07] pt-4">
+        <footer className="onboarding-footer-rule flex shrink-0 items-center justify-between pt-4">
           <button
             data-focusable
             type="button"
             onClick={() => (pageIndex > 0 ? setPage(PAGE_ORDER[pageIndex - 1]) : onBack())}
-            className="flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold text-white/55 transition-colors hover:bg-white/[0.06] hover:text-white"
+            className="flex items-center gap-2 rounded-md px-4 py-2 text-sm font-semibold text-white/55 transition-colors hover:bg-white/[0.06] hover:text-white"
           >
             <ChevronLeft size={16} />
             {t('onboarding.setup.back')}
@@ -465,7 +525,7 @@ export function OnboardingSuccess({
             <FocusableButton
               data-onboarding-primary
               onClick={() => setPage(PAGE_ORDER[pageIndex + 1])}
-              className="flex items-center gap-2 px-7"
+              className="onboarding-footer-action flex items-center gap-2 px-7"
             >
               {t('onboarding.setup.next')}
               <ChevronRight size={16} />
@@ -476,7 +536,7 @@ export function OnboardingSuccess({
               disabled={!entryUnlocked}
               data-disabled={!entryUnlocked ? 'true' : undefined}
               onClick={onFinish}
-              className={`flex items-center gap-2 px-8 ${
+              className={`onboarding-footer-action flex items-center gap-2 px-8 ${
                 entryUnlocked ? '' : 'cursor-not-allowed opacity-45'
               }`}
             >
@@ -497,8 +557,12 @@ export function OnboardingSuccess({
 interface LibrariesPageProps {
   steamConnectedName?: string
   steamState: 'idle' | 'waiting-for-browser' | 'success' | 'error'
+  steamGameCount: number
+  steamInstalledCount: number
   epicConnectedName?: string
   epicState: 'idle' | 'waiting-for-browser' | 'success' | 'error'
+  epicGameCount: number
+  epicInstalledCount: number
   xboxGameCount: number
   xboxInstalledCount: number
   syncStatus: Record<string, SyncPipelineProgress>
@@ -513,8 +577,12 @@ interface LibrariesPageProps {
 function LibrariesPage({
   steamConnectedName,
   steamState,
+  steamGameCount,
+  steamInstalledCount,
   epicConnectedName,
   epicState,
+  epicGameCount,
+  epicInstalledCount,
   xboxGameCount,
   xboxInstalledCount,
   syncStatus,
@@ -528,7 +596,7 @@ function LibrariesPage({
   const t = useT()
   return (
     <div className="space-y-[clamp(1rem,2.2vh,1.75rem)]">
-      <div>
+      <div className="onboarding-section-title">
         <div className="text-xs font-bold uppercase tracking-[0.2em] text-accent">
           {t('onboarding.setup.libraries.eyebrow')}
         </div>
@@ -546,6 +614,14 @@ function LibrariesPage({
           name="Steam"
           connectedName={steamConnectedName}
           state={steamState}
+          detail={
+            steamGameCount > 0
+              ? t('onboarding.setup.providerGames', {
+                  count: steamGameCount,
+                  installed: steamInstalledCount
+                })
+              : undefined
+          }
           onConnect={onConnectSteam}
           primary
         />
@@ -554,6 +630,14 @@ function LibrariesPage({
           name="Epic Games"
           connectedName={epicConnectedName}
           state={epicState}
+          detail={
+            epicGameCount > 0
+              ? t('onboarding.setup.providerGames', {
+                  count: epicGameCount,
+                  installed: epicInstalledCount
+                })
+              : undefined
+          }
           onConnect={onConnectEpic}
         />
         <ProviderCard
@@ -562,17 +646,19 @@ function LibrariesPage({
           state="success"
           detail={
             xboxGameCount > 0
-              ? t('onboarding.setup.xboxGames', {
+              ? t('onboarding.setup.providerGames', {
                   count: xboxGameCount,
                   installed: xboxInstalledCount
                 })
-              : t('onboarding.setup.xboxScanning')
+              : syncStatus.library.state === 'running' || syncStatus.library.state === 'idle'
+                ? t('onboarding.setup.xboxScanning')
+                : t('onboarding.setup.xboxEmpty')
           }
         />
       </div>
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.25fr_0.75fr]">
-        <section className="rounded-[var(--radius-card)] border border-white/[0.08] bg-black/50 p-5 shadow-card">
+        <section className="onboarding-panel border border-white/[0.08] bg-black/50 p-5 shadow-card">
           <div className="mb-4 flex items-center justify-between gap-4">
             <div>
               <h2 className="font-semibold">{t('onboarding.setup.syncTitle')}</h2>
@@ -595,7 +681,7 @@ function LibrariesPage({
           </div>
         </section>
 
-        <section className="flex min-h-44 flex-col justify-between rounded-[var(--radius-card)] border border-white/[0.08] bg-surface/90 p-5 shadow-card">
+        <section className="onboarding-panel flex min-h-44 flex-col justify-between border border-white/[0.08] bg-surface/90 p-5 shadow-card">
           <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.16em] text-accent">
             <Sparkles size={15} />
             {t('onboarding.setup.yourOrbit')}
@@ -644,8 +730,8 @@ function ProviderCard({
   const waiting = state === 'waiting-for-browser'
   const failed = state === 'error'
   return (
-    <div className="flex min-h-32 items-center gap-4 rounded-[var(--radius-card)] border border-white/[0.08] bg-surface/90 p-4 shadow-card">
-      <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-white/[0.07] text-lg font-black text-white/80">
+    <div className="onboarding-provider flex min-h-32 items-center gap-4 border border-white/[0.08] bg-surface/90 p-4 shadow-card">
+      <div className="onboarding-provider__mark flex h-12 w-12 shrink-0 items-center justify-center text-lg font-black text-white/80">
         {mark}
       </div>
       <div className="min-w-0 flex-1">
@@ -672,7 +758,7 @@ function ProviderCard({
           disabled={waiting}
           type="button"
           onClick={onConnect}
-          className={`shrink-0 rounded-full px-4 py-2 text-xs font-bold transition-colors ${
+          className={`shrink-0 rounded-md px-4 py-2 text-xs font-bold transition-colors ${
             waiting
               ? 'bg-white/[0.05] text-white/30'
               : 'bg-accent text-black hover:brightness-110'
@@ -693,11 +779,17 @@ interface PersonalizePageProps {
   games: LibraryGame[]
   theme: ThemeId
   homeLayout: HomeLayoutId
+  gameCardSize: GameCardSize
+  backdropIntensity: BackdropIntensity
+  uiDensity: UiDensity
   language: 'en' | 'de'
   region: StoreRegionId
   audioPreset: AudioPreset
   onTheme: (value: ThemeId) => void
   onHomeLayout: (value: HomeLayoutId) => void
+  onGameCardSize: (value: GameCardSize) => void
+  onBackdropIntensity: (value: BackdropIntensity) => void
+  onDensity: (value: UiDensity) => void
   onLanguage: (value: 'en' | 'de') => void
   onRegion: (value: StoreRegionId) => void
   onAudio: (value: AudioPreset) => void
@@ -707,11 +799,17 @@ function PersonalizePage({
   games,
   theme,
   homeLayout,
+  gameCardSize,
+  backdropIntensity,
+  uiDensity,
   language,
   region,
   audioPreset,
   onTheme,
   onHomeLayout,
+  onGameCardSize,
+  onBackdropIntensity,
+  onDensity,
   onLanguage,
   onRegion,
   onAudio
@@ -719,7 +817,7 @@ function PersonalizePage({
   const t = useT()
   return (
     <div className="space-y-4">
-      <div>
+      <div className="onboarding-section-title">
         <div className="text-xs font-bold uppercase tracking-[0.2em] text-accent">
           {t('onboarding.setup.personalize.eyebrow')}
         </div>
@@ -800,6 +898,59 @@ function PersonalizePage({
             </div>
           </SetupPanel>
 
+          <SetupPanel icon={<Layers3 size={16} />} title={t('settings.presentation.title')}>
+            <div className="space-y-3">
+              <PersonalizeAxis
+                label={t('settings.cardSize.title')}
+                hint={t('settings.cardSize.body')}
+              >
+                {GAME_CARD_SIZE_OPTIONS.map((option) => (
+                  <ChoicePill
+                    key={option}
+                    active={gameCardSize === option}
+                    onClick={() => onGameCardSize(option)}
+                  >
+                    {t(CARD_SIZE_LABELS[option])}
+                  </ChoicePill>
+                ))}
+              </PersonalizeAxis>
+
+              <PersonalizeAxis
+                label={t('settings.backdrop.title')}
+                hint={t('settings.backdrop.body')}
+              >
+                {BACKDROP_INTENSITY_OPTIONS.map((option) => (
+                  <ChoicePill
+                    key={option}
+                    active={backdropIntensity === option}
+                    onClick={() => onBackdropIntensity(option)}
+                  >
+                    {t(BACKDROP_LABELS[option])}
+                  </ChoicePill>
+                ))}
+              </PersonalizeAxis>
+
+              <PersonalizeAxis
+                label={t('settings.density.title')}
+                hint={t('settings.density.body')}
+              >
+                {(['standard', 'compact'] as UiDensity[]).map((option) => (
+                  <ChoicePill
+                    key={option}
+                    active={uiDensity === option}
+                    onClick={() => onDensity(option)}
+                  >
+                    {t(
+                      option === 'compact'
+                        ? 'settings.density.compact'
+                        : 'settings.density.standard'
+                    )}
+                  </ChoicePill>
+                ))}
+              </PersonalizeAxis>
+            </div>
+          </SetupPanel>
+
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <SetupPanel icon={<Globe2 size={16} />} title={t('settings.language.title')}>
               <div className="flex gap-2">
@@ -835,6 +986,9 @@ function PersonalizePage({
             <HomePreview
               games={games}
               homeLayout={homeLayout}
+              gameCardSize={gameCardSize}
+              backdropIntensity={backdropIntensity}
+              uiDensity={uiDensity}
               themeName={THEME_OPTIONS.find((item) => item.id === theme)?.label ?? theme}
             />
           </SetupPanel>
@@ -876,14 +1030,27 @@ function PersonalizePage({
 function HomePreview({
   games,
   homeLayout,
+  gameCardSize,
+  backdropIntensity,
+  uiDensity,
   themeName
 }: {
   games: LibraryGame[]
   homeLayout: HomeLayoutId
+  gameCardSize: GameCardSize
+  backdropIntensity: BackdropIntensity
+  uiDensity: UiDensity
   themeName: string
 }): JSX.Element {
   const featured = games[0]
-  const cards = games.slice(0, 5)
+  const cardCount = gameCardSize === 'compact' ? 6 : gameCardSize === 'large' ? 4 : 5
+  const cards = games.slice(0, cardCount)
+  const backdropClass =
+    backdropIntensity === 'subtle'
+      ? 'opacity-30 saturate-50 brightness-75'
+      : backdropIntensity === 'vivid'
+        ? 'opacity-70 saturate-125 brightness-110'
+        : 'opacity-45 saturate-100 brightness-95'
   return (
     <div className="relative aspect-video overflow-hidden rounded-[var(--radius-card)] border border-white/10 bg-base shadow-card">
       {featured && (
@@ -893,11 +1060,11 @@ function HomePreview({
           orientation="horizontal"
           previewUrl={previewUrl(featured)}
           fit="cover"
-          className="absolute inset-0 h-full w-full object-cover opacity-45"
+          className={`absolute inset-0 h-full w-full object-cover transition-[filter,opacity] ${backdropClass}`}
         />
       )}
       <div className="absolute inset-0 bg-gradient-to-t from-base via-base/55 to-base/25" />
-      <div className="absolute inset-0 p-[4%]">
+      <div className={`absolute inset-0 ${uiDensity === 'compact' ? 'p-[3%]' : 'p-[4%]'}`}>
         <div className="mx-auto flex w-fit items-center gap-3 rounded-full bg-black/45 px-4 py-1.5 text-[7px] text-white/50">
           <span className="rounded-full bg-accent px-2 py-0.5 font-bold text-black">Home</span>
           <span>Library</span>
@@ -925,8 +1092,13 @@ function HomePreview({
             </div>
           </div>
         )}
-        <div className={`${homeLayout === 'float' ? 'mt-[4%]' : 'mt-[5%]'} grid grid-cols-5 gap-2`}>
-          {Array.from({ length: 5 }, (_, index) => {
+        <div
+          className={`${homeLayout === 'float' ? 'mt-[4%]' : 'mt-[5%]'} grid ${
+            uiDensity === 'compact' ? 'gap-1.5' : 'gap-2'
+          }`}
+          style={{ gridTemplateColumns: `repeat(${cardCount}, minmax(0, 1fr))` }}
+        >
+          {Array.from({ length: cardCount }, (_, index) => {
             const game = cards[index]
             return (
               <div
@@ -950,6 +1122,34 @@ function HomePreview({
           })}
         </div>
       </div>
+    </div>
+  )
+}
+
+function HardwarePage(): JSX.Element {
+  const t = useT()
+  return (
+    <div className="mx-auto w-full max-w-6xl">
+      <div className="mb-5 flex items-start gap-4">
+        <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-accent/20 bg-accent/12 text-accent">
+          <Gamepad2 size={23} />
+        </span>
+        <div>
+          <div className="text-[10px] font-bold uppercase tracking-[0.2em] text-accent">
+            {t('onboarding.setup.page.hardware')}
+          </div>
+          <h1 className="mt-1 text-[clamp(1.8rem,3vw,3rem)] font-bold leading-tight tracking-tight">
+            {t('onboarding.setup.hardware.title')}
+          </h1>
+          <p className="mt-2 max-w-3xl text-sm leading-relaxed text-white/48">
+            {t('onboarding.setup.hardware.body')}
+          </p>
+        </div>
+      </div>
+      <section className="onboarding-panel space-y-4 border border-white/[0.08] bg-black/52 p-4 shadow-card">
+        <OrbitBackgroundServicePanel />
+        <HardwareControlPanel />
+      </section>
     </div>
   )
 }
@@ -979,9 +1179,10 @@ function ReadyPage({
       <motion.div
         initial={{ scale: 0.86, opacity: 0 }}
         animate={{ scale: 1, opacity: 1 }}
-        className="flex h-16 w-16 items-center justify-center rounded-3xl bg-gradient-to-br from-accent to-accent-2 text-black shadow-glow"
       >
-        {failed ? <CircleAlert size={27} /> : canFinish ? <Check size={29} /> : <Loader2 size={27} className="animate-spin" />}
+        <span className="onboarding-ready-mark">
+          {failed ? <CircleAlert size={27} /> : canFinish ? <Check size={29} /> : <Loader2 size={27} className="animate-spin" />}
+        </span>
       </motion.div>
       <div className="mt-5 text-xs font-bold uppercase tracking-[0.2em] text-accent">
         {canFinish
@@ -1013,7 +1214,7 @@ function ReadyPage({
         <LargeMetric icon={<Trophy size={18} />} value={playtime} label={t('onboarding.setup.hoursPlayed')} />
       </div>
 
-      <section className="mt-5 w-full rounded-[var(--radius-card)] border border-white/[0.08] bg-black/55 p-5 text-left shadow-card">
+      <section className="onboarding-panel mt-5 w-full border border-white/[0.08] bg-black/55 p-5 text-left shadow-card">
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
           <PipelineRow progress={syncStatus.library} required />
           <PipelineRow progress={syncStatus.artwork} required />
@@ -1052,7 +1253,7 @@ function PipelineRow({
           ? `${progress.completed}/${progress.total}`
           : t('sync.waiting')
   return (
-    <div className="rounded-xl border border-white/[0.06] bg-white/[0.035] px-3 py-2.5">
+    <div className="rounded-md border border-white/[0.06] bg-white/[0.035] px-3 py-2.5">
       <div className="flex items-center gap-2">
         {progress.state === 'complete' ? (
           <Check size={14} className="shrink-0 text-emerald-400" />
@@ -1091,13 +1292,35 @@ function SetupPanel({
   children: ReactNode
 }): JSX.Element {
   return (
-    <section className="rounded-[var(--radius-card)] border border-white/[0.08] bg-black/52 p-4 shadow-card">
+    <section className="onboarding-panel border border-white/[0.08] bg-black/52 p-4 shadow-card">
       <div className="mb-3 flex items-center gap-2 text-sm font-semibold">
         <span className="text-accent">{icon}</span>
         {title}
       </div>
       {children}
     </section>
+  )
+}
+
+function PersonalizeAxis({
+  label,
+  hint,
+  children
+}: {
+  label: string
+  hint: string
+  children: ReactNode
+}): JSX.Element {
+  return (
+    <div className="grid grid-cols-1 gap-2 rounded-xl border border-white/[0.06] bg-white/[0.025] p-3 sm:grid-cols-[minmax(8rem,0.8fr)_minmax(0,1.2fr)] sm:items-center">
+      <div className="min-w-0">
+        <p className="text-xs font-bold text-white/75">{label}</p>
+        <p className="mt-0.5 text-[9px] leading-snug text-white/35">{hint}</p>
+      </div>
+      <div className="scrollbar-none flex min-w-0 gap-1.5 overflow-x-auto pb-0.5 sm:justify-end">
+        {children}
+      </div>
+    </div>
   )
 }
 
@@ -1146,7 +1369,7 @@ function LargeMetric({
   label: string
 }): JSX.Element {
   return (
-    <div className="flex items-center gap-3 rounded-[var(--radius-card)] border border-white/[0.08] bg-surface/85 p-4 text-left shadow-card">
+    <div className="onboarding-metric flex items-center gap-3 border border-white/[0.08] bg-surface/85 p-4 text-left shadow-card">
       <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-accent/12 text-accent">
         {icon}
       </div>

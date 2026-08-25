@@ -1,5 +1,6 @@
 import type { StoreOffer, StoreOfferSource } from '@shared/ipc'
 import type { StoreRegionConfig } from './storeRegions'
+import { fetchWithElectronNet } from '../networkFetch'
 
 export const STORE_REQUEST_TIMEOUT_MS = 15_000
 export const STORE_USER_AGENT =
@@ -38,7 +39,7 @@ export async function hasRemoteArtwork(url?: string): Promise<boolean> {
   if (!url?.startsWith('https://')) return false
   for (const method of ['HEAD', 'GET'] as const) {
     try {
-      const response = await fetch(url, {
+      const response = await fetchWithElectronNet(url, {
         method,
         headers: {
           'User-Agent': STORE_USER_AGENT,

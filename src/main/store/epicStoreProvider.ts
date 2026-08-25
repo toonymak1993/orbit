@@ -1,5 +1,6 @@
 import type { StoreOffer } from '@shared/ipc'
 import { formatStorePrice, type StoreRegionConfig } from './storeRegions'
+import { fetchWithElectronNet } from '../networkFetch'
 import {
   hasRemoteArtwork,
   normalizeStoreTitle,
@@ -33,7 +34,7 @@ async function queryEpic(
   region: StoreRegionConfig,
   limit: number
 ): Promise<EpicSearchOffer[]> {
-  const response = await fetch(
+  const response = await fetchWithElectronNet(
     `https://api.egdata.app/search/v2/search?country=${encodeURIComponent(region.countryCode)}`,
     {
       method: 'POST',

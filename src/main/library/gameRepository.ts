@@ -4,10 +4,13 @@ import type {
   GameMetadata,
   GameProvider,
   LibraryGame,
-  LibrarySnapshot
+  LibrarySnapshot,
+  LocalGameBackupResult,
+  LocalGameConfig
 } from '@shared/ipc'
+import type { LocalGameRecordInput } from '../customLibrary'
 
-const DATABASE_VERSION = 4
+const DATABASE_VERSION = 5
 const DEFAULT_PROFILE_ID = 'orbit-default'
 const STEAM_PROVIDER = 'steam' as const
 const LEGACY_APP_NAME = /^App\s+\d+$/i
@@ -72,6 +75,7 @@ export interface ProviderInstalledDelta {
   name: string
   appId?: number
   installDir: string
+  updateAvailable?: boolean
   metadata?: GameMetadata
   lastPlayedTimestamp?: number
 }
@@ -116,6 +120,7 @@ export interface SteamInstalledDelta {
   appId: number
   name: string
   installDir: string
+  updateAvailable?: boolean
   lastPlayedTimestamp?: number
 }
 
@@ -165,6 +170,31 @@ function hasUsableName(name: unknown): name is string {
   return typeof name === 'string' && name.trim().length > 0 && !LEGACY_APP_NAME.test(name.trim())
 }
 
+function sanitizeLocalConfig(value: unknown): LocalGameConfig | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const candidate = value as Partial<LocalGameConfig>
+  if (typeof candidate.executablePath !== 'string' || !candidate.executablePath.trim()) {
+    return undefined
+  }
+  const lastBackupState =
+    candidate.lastBackupState === 'success' || candidate.lastBackupState === 'failed'
+      ? candidate.lastBackupState
+      : 'never'
+  return {
+    executablePath: candidate.executablePath,
+    savePath:
+      typeof candidate.savePath === 'string' && candidate.savePath.trim()
+        ? candidate.savePath
+        : undefined,
+    backupEnabled: Boolean(candidate.backupEnabled && candidate.savePath),
+    lastBackupAt:
+      typeof candidate.lastBackupAt === 'number' && Number.isFinite(candidate.lastBackupAt)
+        ? candidate.lastBackupAt
+        : undefined,
+    lastBackupState
+  }
+}
+
 function migrateMetadata(candidate: StoredGameCandidate): GameMetadata {
   const legacy: GameMetadata = {
     summary: candidate.shortDescription,
@@ -198,6 +228,9 @@ function canonicalName(name: string): string {
 
 function preferDisplayGame(current: StoredGame, candidate: StoredGame): StoredGame {
   if (candidate.installed !== current.installed) return candidate.installed ? candidate : current
+  if (candidate.updateAvailable !== current.updateAvailable) {
+    return candidate.updateAvailable ? candidate : current
+  }
   const candidatePlayed = candidate.lastStartedAt ?? candidate.lastPlayedTimestamp ?? 0
   const currentPlayed = current.lastStartedAt ?? current.lastPlayedTimestamp ?? 0
   if (candidatePlayed !== currentPlayed) return candidatePlayed > currentPlayed ? candidate : current
@@ -307,6 +340,7 @@ export class GameRepository {
       if (game.provider === provider) {
         game.installed = false
         game.installDir = undefined
+        game.updateAvailable = false
       }
     }
 
@@ -330,6 +364,7 @@ export class GameRepository {
         metadataUpdatedAt: metadataChanged ? now : existing?.metadataUpdatedAt,
         installed: true,
         installDir: installed.installDir,
+        updateAvailable: Boolean(installed.updateAvailable),
         owned: existing?.owned ?? false,
         lastPlayedTimestamp: installed.lastPlayedTimestamp ?? existing?.lastPlayedTimestamp,
         addedAt: existing?.addedAt ?? now,
@@ -465,6 +500,7 @@ export class GameRepository {
         appId: game.appId,
         name: game.name,
         installDir: game.installDir,
+        updateAvailable: game.updateAvailable,
         lastPlayedTimestamp: game.lastPlayedTimestamp
       }))
     )
@@ -562,6 +598,75 @@ export class GameRepository {
     return true
   }
 
+  upsertLocalGame(input: LocalGameRecordInput): LibraryGame {
+    this.ensureOpen()
+    const now = Date.now()
+    const id = providerGameId('local', input.providerGameId)
+    const existing = this.account.games[id]
+    const currentMetadata = existing?.metadata ?? {}
+    const metadata = mergeDefinedMetadata(currentMetadata, {
+      ...input.metadata,
+      artwork: input.metadata.artwork
+        ? { ...currentMetadata.artwork, ...input.metadata.artwork }
+        : undefined
+    })
+    const metadataChanged = !metadataEquals(currentMetadata, metadata)
+    const sameSavePath = existing?.local?.savePath === input.savePath
+    const local: LocalGameConfig = {
+      executablePath: input.executablePath,
+      savePath: input.savePath,
+      backupEnabled: Boolean(input.savePath),
+      lastBackupAt: sameSavePath ? existing?.local?.lastBackupAt : undefined,
+      lastBackupState: sameSavePath ? (existing?.local?.lastBackupState ?? 'never') : 'never'
+    }
+    this.account.games[id] = {
+      ...existing,
+      id,
+      provider: 'local',
+      providerGameId: input.providerGameId,
+      appId: undefined,
+      name: input.name,
+      metadata,
+      metadataRevision: (existing?.metadataRevision ?? 0) + (metadataChanged ? 1 : 0),
+      metadataUpdatedAt: metadataChanged ? now : existing?.metadataUpdatedAt,
+      metadataSource: 'orbit-custom-library',
+      installed: true,
+      installDir: input.installDir,
+      local,
+      owned: true,
+      addedAt: existing?.addedAt ?? now,
+      updatedAt: now,
+      lastSeenInstalledAt: now
+    }
+    this.commit(now)
+    return this.getGame(id) as LibraryGame
+  }
+
+  removeLocalGame(gameId: string): boolean {
+    this.ensureOpen()
+    const game = this.account.games[gameId]
+    if (!game || game.provider !== 'local') return false
+    delete this.account.games[gameId]
+    this.rebuildRecentIds()
+    this.commit(Date.now())
+    return true
+  }
+
+  recordLocalBackup(gameId: string, result: LocalGameBackupResult): boolean {
+    this.ensureOpen()
+    const game = this.account.games[gameId]
+    if (!game?.local || result.state === 'skipped') return false
+    const now = Date.now()
+    game.local = {
+      ...game.local,
+      lastBackupAt: result.completedAt,
+      lastBackupState: result.state
+    }
+    game.updatedAt = now
+    this.commit(now)
+    return true
+  }
+
   getGame(id: string): LibraryGame | undefined {
     this.ensureOpen()
     const game = this.account.games[id]
@@ -572,6 +677,22 @@ export class GameRepository {
 
   getGamesByProvider(provider: GameProvider): LibraryGame[] {
     return this.getSnapshot().games.filter((game) => game.provider === provider)
+  }
+
+  getProviderCounts(provider: GameProvider): {
+    gameCount: number
+    installedCount: number
+    installableCount: number
+  } {
+    this.ensureOpen()
+    const games = Object.values(this.account.games).filter(
+      (game) => game.provider === provider && hasUsableName(game.name) && (game.owned || game.installed)
+    )
+    return {
+      gameCount: games.length,
+      installedCount: games.filter((game) => game.installed).length,
+      installableCount: games.filter((game) => game.owned && !game.installed).length
+    }
   }
 
   private rebuildRecentIds(): void {
@@ -621,6 +742,8 @@ export class GameRepository {
         metadataRevision:
           candidate.metadataRevision ?? (Object.keys(migratedMetadata).length > 0 ? 1 : 0),
         installed: Boolean(candidate.installed),
+        updateAvailable: Boolean(candidate.installed && candidate.updateAvailable),
+        local: provider === 'local' ? sanitizeLocalConfig(candidate.local) : undefined,
         owned: Boolean(candidate.owned),
         addedAt: candidate.addedAt || now,
         updatedAt: candidate.updatedAt || now

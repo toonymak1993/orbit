@@ -38,8 +38,8 @@ import type {
 const STORE_PAGES: Array<{ id: StorePage; key: TranslationKey; icon: typeof Sparkles }> = [
   { id: 'discover', key: 'store.page.discover', icon: Sparkles },
   { id: 'deals', key: 'store.page.deals', icon: Percent },
-  { id: 'wishlist', key: 'store.page.wishlist', icon: Heart }
-  ,{ id: 'alerts', key: 'store.page.alerts', icon: Bell }
+  { id: 'wishlist', key: 'store.page.wishlist', icon: Heart },
+  { id: 'alerts', key: 'store.page.alerts', icon: Bell }
 ]
 
 const REGIONS: Array<{ id: StoreRegionId; key: TranslationKey; currency: string }> = [
@@ -49,13 +49,6 @@ const REGIONS: Array<{ id: StoreRegionId; key: TranslationKey; currency: string 
   { id: 'ca', key: 'store.region.ca', currency: 'CAD' },
   { id: 'au', key: 'store.region.au', currency: 'AUD' }
 ]
-
-interface DiscoverSection {
-  id: string
-  eyebrow: string
-  title: string
-  products: StoreProduct[]
-}
 
 function canonicalGenre(value: string): string {
   const genre = value.normalize('NFKD').toLocaleLowerCase('en')
@@ -113,62 +106,6 @@ function personalizedProductScore(product: StoreProduct, profile: Map<string, nu
   return affinity + product.recommendationScore * 0.35 + discount * 0.18 + wishlistAffinity
 }
 
-function genresOverlap(product: StoreProduct, game: LibraryGame): boolean {
-  const gameGenres = new Set((game.metadata.genres ?? []).map(canonicalGenre))
-  return (product.genres ?? []).some((genre) => gameGenres.has(canonicalGenre(genre)))
-}
-
-function genreSimilarity(left: string[] = [], right: string[] = []): number {
-  const leftGenres = new Set(left.map(canonicalGenre))
-  const rightGenres = new Set(right.map(canonicalGenre))
-  if (leftGenres.size === 0 || rightGenres.size === 0) return 0
-  const overlap = [...leftGenres].filter((genre) => rightGenres.has(genre)).length
-  const union = new Set([...leftGenres, ...rightGenres]).size
-  return union > 0 ? overlap / union : 0
-}
-
-function diversifyProducts(candidates: StoreProduct[], limit: number): StoreProduct[] {
-  const remaining = [...candidates]
-  const selected: StoreProduct[] = []
-  while (remaining.length > 0 && selected.length < limit) {
-    let bestIndex = 0
-    let bestScore = -Infinity
-    for (let index = 0; index < remaining.length; index++) {
-      const candidate = remaining[index]
-      const relevance = 100 - index * 1.4
-      const closestGenreMatch = selected.reduce(
-        (similarity, product) =>
-          Math.max(similarity, genreSimilarity(candidate.genres, product.genres)),
-        0
-      )
-      const candidatePrefix = candidate.name.split(/\s+/)[0]?.toLocaleLowerCase('en')
-      const sameFranchise = selected.some(
-        (product) => product.name.split(/\s+/)[0]?.toLocaleLowerCase('en') === candidatePrefix
-      )
-      const score = relevance - closestGenreMatch * 34 - (sameFranchise ? 24 : 0)
-      if (score > bestScore) {
-        bestScore = score
-        bestIndex = index
-      }
-    }
-    selected.push(remaining.splice(bestIndex, 1)[0])
-  }
-  return selected
-}
-
-function selectDistinctAnchorGames(games: LibraryGame[], limit: number): LibraryGame[] {
-  const selected: LibraryGame[] = []
-  for (const game of games) {
-    const tooSimilar = selected.some(
-      (anchor) => genreSimilarity(game.metadata.genres, anchor.metadata.genres) >= 0.4
-    )
-    if (tooSimilar) continue
-    selected.push(game)
-    if (selected.length >= limit) break
-  }
-  return selected
-}
-
 export function StoreView(): JSX.Element {
   const containerRef = useAutoFocus<HTMLDivElement>()
   const searchRef = useRef<HTMLInputElement>(null)
@@ -190,16 +127,32 @@ export function StoreView(): JSX.Element {
   const setPage = useStoreNavigationStore((state) => state.setPage)
   const [query, setQuery] = useState('')
   const [selectedProductId, setSelectedProductId] = useState<string | null>(null)
+  const lastOpenedProductId = useRef<string | null>(null)
   const libraryGames = useLibraryStore((state) => state.snapshot.games)
   const isActive = useNavigationStore((state) => state.mainView === 'store')
   const identityProfile = useMemo(
     () => genreProfile(libraryGames, snapshot.products),
     [libraryGames, snapshot.products]
   )
+  const activeQuery = query.trim().length >= 2 ? query.trim() : ''
 
   const openProduct = (productId: string): void => {
+    lastOpenedProductId.current = productId
     setSelectedProductId(productId)
     void compareProduct(productId)
+  }
+
+  const closeProduct = (): void => {
+    const productId = lastOpenedProductId.current
+    setSelectedProductId(null)
+    window.requestAnimationFrame(() => {
+      if (!productId) return
+      focusElement(
+        containerRef.current?.querySelector<HTMLElement>(
+          `[data-store-product-id="${CSS.escape(productId)}"]`
+        ) ?? null
+      )
+    })
   }
 
   const selectedProduct = selectedProductId
@@ -230,7 +183,7 @@ export function StoreView(): JSX.Element {
   }, [isActive])
 
   const products = useMemo(() => {
-    const normalizedQuery = query.trim().toLocaleLowerCase()
+    const normalizedQuery = activeQuery.toLocaleLowerCase()
     const ownedSteamAppIds = new Set(
       libraryGames
         .map((game) => game.appId)
@@ -246,7 +199,11 @@ export function StoreView(): JSX.Element {
     )
     if (normalizedQuery) {
       return matches
-        .filter((product) => product.artworkStatus === 'available' && Boolean(product.portraitUrl))
+        .filter(
+          (product) =>
+            product.artworkStatus === 'available' &&
+            Boolean(product.heroUrl ?? product.headerUrl ?? product.portraitUrl)
+        )
         .sort((left, right) => right.recommendationScore - left.recommendationScore)
     }
     if (page === 'wishlist') {
@@ -255,7 +212,7 @@ export function StoreView(): JSX.Element {
           (product) =>
             (product.steamWishlisted || product.orbitWishlisted) &&
             product.artworkStatus === 'available' &&
-            Boolean(product.portraitUrl)
+            Boolean(product.heroUrl ?? product.headerUrl ?? product.portraitUrl)
         )
         .sort(
           (left, right) =>
@@ -283,7 +240,12 @@ export function StoreView(): JSX.Element {
         if (normalizedQuery) return true
         if (ownedSteamAppIds.has(product.steamAppId ?? -1)) return false
         if (product.steamWishlisted || product.orbitWishlisted) return true
-        if (product.searchOnly || product.artworkStatus !== 'available' || !product.portraitUrl) return false
+        if (
+          product.searchOnly ||
+          product.artworkStatus !== 'available' ||
+          !Boolean(product.heroUrl ?? product.headerUrl ?? product.portraitUrl)
+        )
+          return false
         if (!product.detailsUpdatedAt || !product.summary || !product.genres?.length) return false
         if (product.discoverEligible === false) return false
         return !/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/u.test(product.name)
@@ -295,102 +257,7 @@ export function StoreView(): JSX.Element {
           (right.bestOffer?.discountPercent ?? 0) - (left.bestOffer?.discountPercent ?? 0)
       )
       .slice(0, 72)
-  }, [identityProfile, libraryGames, page, query, searchResults, snapshot.products])
-
-  const discoverSections = useMemo<DiscoverSection[]>(() => {
-    if (page !== 'discover' || query.trim()) return []
-    const ranked = products
-    const sections: DiscoverSection[] = []
-    const usedProductIds = new Set(ranked.slice(0, 5).map((product) => product.id))
-    const reserve = (candidates: StoreProduct[], limit: number, minimum = 1): StoreProduct[] => {
-      const selected = diversifyProducts(
-        candidates.filter((product) => !usedProductIds.has(product.id)),
-        limit
-      )
-      if (selected.length < minimum) return []
-      for (const product of selected) usedProductIds.add(product.id)
-      return selected
-    }
-
-    const identityMatches = reserve(ranked, 11)
-    if (identityMatches.length > 0) {
-      sections.push({
-        id: 'identity',
-        eyebrow: t('store.section.forYou'),
-        title: t('store.heading.identity'),
-        products: identityMatches
-      })
-    }
-    const anchors = selectDistinctAnchorGames(
-      libraryGames
-        .filter(
-          (game) =>
-            (game.playtimeMinutes ?? 0) > 30 &&
-            Boolean(game.metadata.genres?.length) &&
-            !/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/u.test(game.name)
-        )
-        .sort((left, right) => gameIdentityWeight(right) - gameIdentityWeight(left)),
-      2
-    )
-    for (const game of anchors) {
-      const recommendations = reserve(
-        ranked
-          .filter((product) => genresOverlap(product, game))
-          .sort(
-            (left, right) =>
-              genreSimilarity(right.genres, game.metadata.genres) -
-                genreSimilarity(left.genres, game.metadata.genres) ||
-              personalizedProductScore(right, identityProfile) -
-                personalizedProductScore(left, identityProfile)
-          ),
-        10,
-        4
-      )
-      if (recommendations.length < 4) continue
-      sections.push({
-        id: `because:${game.id}`,
-        eyebrow: t('store.section.becausePlayed'),
-        title: t('store.heading.becauseGame', { game: game.name }),
-        products: recommendations
-      })
-    }
-    const installedGames = libraryGames.filter(
-      (game) => game.installed && Boolean(game.metadata.genres?.length)
-    )
-    const installedMatches = reserve(
-      ranked.filter((product) => installedGames.some((game) => genresOverlap(product, game))),
-      11,
-      4
-    )
-    if (installedMatches.length >= 4) {
-      sections.push({
-        id: 'installed',
-        eyebrow: t('store.section.readyProfile'),
-        title: t('store.heading.installedTaste'),
-        products: installedMatches
-      })
-    }
-    const personalDeals = reserve(
-      ranked
-        .filter((product) => (product.bestOffer?.discountPercent ?? 0) >= 20)
-        .sort(
-          (left, right) =>
-            personalizedProductScore(right, identityProfile) -
-            personalizedProductScore(left, identityProfile)
-        ),
-      12,
-      4
-    )
-    if (personalDeals.length >= 4) {
-      sections.push({
-        id: 'personal-deals',
-        eyebrow: t('store.section.smartDeals'),
-        title: t('store.heading.dealsForYou'),
-        products: personalDeals
-      })
-    }
-    return sections
-  }, [identityProfile, libraryGames, page, products, query, t])
+  }, [activeQuery, identityProfile, libraryGames, page, searchResults, snapshot.products])
 
   const matchScores = useMemo(() => {
     const rawScores = products.map((product) => personalizedProductScore(product, identityProfile))
@@ -417,19 +284,40 @@ export function StoreView(): JSX.Element {
     void setRegion(next.id)
   }
 
-  const featured = products[0]
+  const contentEyebrow = activeQuery
+    ? t('store.section.allStores')
+    : page === 'discover'
+      ? t('store.section.forYou')
+      : page === 'deals'
+        ? t('store.section.deals')
+        : page === 'wishlist'
+          ? t('store.section.wishlist')
+          : t('store.page.alerts')
+  const contentHeading = activeQuery
+    ? t('store.heading.searchResults', { query: activeQuery })
+    : page === 'discover'
+      ? t('store.heading.discover')
+      : page === 'deals'
+        ? t('store.heading.deals')
+        : page === 'wishlist'
+          ? t('store.heading.wishlist')
+          : t('store.alert.heading')
+  const visibleItemCount = page === 'alerts' && !activeQuery ? snapshot.priceAlerts.length : products.length
 
   return (
-    <div ref={containerRef} className="relative flex h-full flex-col overflow-hidden px-[clamp(1.5rem,3vw,3.5rem)] pb-[clamp(1.5rem,3vh,3rem)] pt-[calc(5rem+clamp(1.25rem,2.5vh,2.5rem))]">
+    <div
+      ref={containerRef}
+      className="relative flex h-full flex-col overflow-hidden px-[clamp(1.25rem,3vw,3.5rem)] pb-[clamp(0.75rem,2vh,1.5rem)] pt-[calc(5rem+clamp(0.65rem,1.8vh,1.15rem))]"
+    >
       <div
         onFocusCapture={() => {
           containerRef.current
             ?.querySelector<HTMLElement>('[data-store-scroll]')
             ?.scrollTo({ top: 0, behavior: 'smooth' })
         }}
-        className="mb-5 grid shrink-0 grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center 2xl:grid-cols-[auto_minmax(16rem,1fr)_auto_auto] 2xl:gap-4"
+        className="store-toolbar mb-[clamp(0.75rem,1.8vh,1.15rem)] shrink-0"
       >
-        <div className="scrollbar-none flex max-w-full items-center gap-1 overflow-x-auto rounded-full border border-white/10 bg-black/25 p-1 lg:col-span-2 2xl:col-span-1">
+        <div className="scrollbar-none flex max-w-full items-center gap-1 overflow-x-auto rounded-full border border-white/10 bg-black/25 p-1">
           <span className="mx-1 rounded-md border border-white/15 px-1.5 py-0.5 text-[10px] font-bold text-muted">
             LT
           </span>
@@ -465,7 +353,7 @@ export function StoreView(): JSX.Element {
           </span>
         </div>
 
-        <label className="flex min-w-0 items-center gap-2 rounded-full bg-white/5 px-4 py-2.5">
+        <label className="store-search-shell flex min-w-0 items-center gap-2 rounded-full border border-white/[0.07] bg-white/5 px-4 py-2.5">
           {isSearching ? (
             <Loader2 size={15} className="shrink-0 animate-spin text-accent" />
           ) : (
@@ -474,7 +362,6 @@ export function StoreView(): JSX.Element {
           <input
             ref={searchRef}
             data-focusable
-            data-navigation-horizontal-only
             data-store-search
             type="search"
             inputMode="search"
@@ -490,11 +377,11 @@ export function StoreView(): JSX.Element {
           </span>
         </label>
 
-        <div className="flex items-center gap-3 lg:col-start-2 lg:row-start-2 2xl:contents">
+        <div className="flex items-center justify-end gap-2">
         <button
           data-focusable
           onClick={cycleRegion}
-          className="flex shrink-0 items-center gap-2 rounded-full border border-white/10 bg-white/5 px-4 py-2.5 text-xs"
+          className="flex shrink-0 items-center gap-2 rounded-full border border-white/10 bg-white/5 px-4 py-2.5 text-xs font-semibold"
         >
           <Globe2 size={14} className="text-accent" />
           {t(REGIONS.find((region) => region.id === snapshot.region)?.key ?? 'store.region.eu')}
@@ -523,10 +410,28 @@ export function StoreView(): JSX.Element {
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: direction * -30 }}
             transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
-            className="scrollbar-none absolute inset-0 overflow-y-auto px-[clamp(0.75rem,1.5vw,1.5rem)] pb-[clamp(5rem,14vh,8rem)] pt-[clamp(0.75rem,2vh,1.25rem)]"
-            style={{ scrollPaddingBlock: 'clamp(1.5rem, 7vh, 4rem)' }}
+            className="scrollbar-none absolute inset-0 overflow-y-auto px-[clamp(0.35rem,0.8vw,0.75rem)] pb-[clamp(4rem,10vh,6rem)] pt-1"
+            style={{ scrollPaddingBlock: 'clamp(1rem, 5vh, 3rem)' }}
           >
-            {page === 'alerts' ? (
+            <div className="mb-[clamp(0.75rem,1.6vh,1rem)] flex min-h-12 items-end justify-between gap-4 px-1">
+              <div className="min-w-0">
+                <p className="truncate text-[10px] font-bold uppercase tracking-[0.2em] text-accent">
+                  {contentEyebrow}
+                </p>
+                <h1 className="mt-0.5 truncate text-[clamp(1.25rem,2.2vw,1.75rem)] font-black tracking-tight">
+                  {contentHeading}
+                </h1>
+              </div>
+              <p className="shrink-0 pb-0.5 text-xs font-medium text-muted">
+                {isSearching || snapshot.isRefreshing
+                  ? t('store.updating')
+                  : page === 'alerts' && !activeQuery
+                    ? t('store.alert.count', { count: visibleItemCount })
+                    : t('store.productsCount', { count: visibleItemCount })}
+              </p>
+            </div>
+
+            {page === 'alerts' && !activeQuery ? (
               <PriceAlerts
                 alerts={snapshot.priceAlerts}
                 products={snapshot.products}
@@ -534,69 +439,13 @@ export function StoreView(): JSX.Element {
                 onRemove={(productId) => void removePriceAlert(productId)}
                 t={t}
               />
-            ) : featured ? (
-              page === 'discover' && !query.trim() ? (
-                <>
-                  <StoreHighlightCarousel
-                    products={products.slice(0, 5)}
-                    onOpen={openProduct}
-                    t={t}
-                  />
-                  <div className="space-y-[clamp(2rem,5vh,3.75rem)] pb-10">
-                    {discoverSections.map((section, shelfIndex) => (
-                      <DiscoverShelf
-                        key={section.id}
-                        section={section}
-                        shelfIndex={shelfIndex}
-                        matchScores={matchScores}
-                        onOpen={openProduct}
-                        t={t}
-                      />
-                    ))}
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div className="mb-3 mt-2 flex items-end justify-between gap-4">
-                    <div>
-                      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">
-                        {query.trim()
-                          ? t('store.section.allStores')
-                          : page === 'deals'
-                            ? t('store.section.deals')
-                            : t('store.section.wishlist')}
-                      </p>
-                      <h2 className="mt-1 text-xl font-bold">
-                        {query.trim()
-                          ? t('store.heading.searchResults', { query: query.trim() })
-                          : page === 'deals'
-                            ? t('store.heading.deals')
-                            : t('store.heading.wishlist')}
-                      </h2>
-                    </div>
-                    <p className="text-xs text-muted">
-                      {isSearching || snapshot.isRefreshing
-                        ? t('store.updating')
-                        : t('store.productsCount', { count: products.length })}
-                    </p>
-                  </div>
-                  <div
-                    data-navigation-grid
-                    data-grid-columns={6}
-                    className="grid grid-cols-6 gap-[clamp(0.9rem,1.8vw,1.5rem)] px-1 pb-8 pt-2"
-                  >
-                    {products.map((product, index) => (
-                      <StoreCard
-                        key={product.id}
-                        product={product}
-                        navigationIndex={index}
-                        onOpen={() => openProduct(product.id)}
-                        t={t}
-                      />
-                    ))}
-                  </div>
-                </>
-              )
+            ) : products.length > 0 ? (
+              <StoreProductGrid
+                products={products}
+                matchScores={page === 'discover' && !activeQuery ? matchScores : undefined}
+                onOpen={openProduct}
+                t={t}
+              />
             ) : (
               <div className="flex h-full min-h-72 flex-col items-center justify-center gap-3 text-center">
                 <ShoppingBag size={30} className="text-accent" />
@@ -617,10 +466,10 @@ export function StoreView(): JSX.Element {
             product={selectedProduct}
             alert={snapshot.priceAlerts.find((item) => item.productId === selectedProduct.id)}
             history={snapshot.priceHistory[selectedProduct.id] ?? []}
-            onClose={() => setSelectedProductId(null)}
             onToggleWishlist={() => void toggleWishlist(selectedProduct.id)}
             onSetPriceAlert={(target) => void setPriceAlert(selectedProduct.id, target)}
             onRemovePriceAlert={() => void removePriceAlert(selectedProduct.id)}
+            onClose={closeProduct}
             t={t}
           />
         )}
@@ -629,162 +478,69 @@ export function StoreView(): JSX.Element {
   )
 }
 
-function StoreHighlightCarousel({
-  products,
-  onOpen,
-  t
-}: {
-  products: StoreProduct[]
-  onOpen: (productId: string) => void
-  t: ReturnType<typeof useT>
-}): JSX.Element {
-  const [activeIndex, setActiveIndex] = useState(0)
-  useEffect(() => setActiveIndex(0), [products.map((product) => product.id).join('|')])
-  useEffect(() => {
-    if (products.length < 2) return
-    const timer = window.setInterval(
-      () => setActiveIndex((current) => (current + 1) % products.length),
-      8_000
-    )
-    return () => window.clearInterval(timer)
-  }, [products.length])
-  const product = products[activeIndex] ?? products[0]
-  if (!product) return <></>
-  return (
-    <div className="relative">
-      <AnimatePresence initial={false} mode="wait">
-        <StoreHero
-          key={product.id}
-          product={product}
-          onOpen={() => onOpen(product.id)}
-          t={t}
-        />
-      </AnimatePresence>
-      {products.length > 1 && (
-        <div className="pointer-events-none absolute bottom-[clamp(2rem,4vh,2.75rem)] right-6 flex gap-1.5">
-          {products.map((item, index) => (
-            <span
-              key={item.id}
-              className={`h-1 rounded-full transition-all duration-500 ${
-                index === activeIndex ? 'w-7 bg-accent' : 'w-2 bg-white/35'
-              }`}
-            />
-          ))}
-        </div>
-      )}
-    </div>
-  )
+function storeGridColumnsFor(width: number): number {
+  if (width < 720) return 2
+  if (width < 1020) return 3
+  if (width < 1380) return 4
+  if (width < 1700) return 5
+  return 6
 }
 
-function DiscoverShelf({
-  section,
-  shelfIndex,
+function StoreProductGrid({
+  products,
   matchScores,
   onOpen,
   t
 }: {
-  section: DiscoverSection
-  shelfIndex: number
-  matchScores: Map<string, number>
+  products: StoreProduct[]
+  matchScores?: Map<string, number>
   onOpen: (productId: string) => void
   t: ReturnType<typeof useT>
 }): JSX.Element {
-  return (
-    <section>
-      <div className="mb-4 flex items-end justify-between gap-4 px-1">
-        <div>
-          <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-accent">
-            {section.eyebrow}
-          </p>
-          <h2 className="mt-1 text-[clamp(1.15rem,2vw,1.55rem)] font-bold tracking-tight">
-            {section.title}
-          </h2>
-        </div>
-        <p className="text-xs text-muted">{t('store.productsCount', { count: section.products.length })}</p>
-      </div>
-      <div
-        data-navigation-grid
-        data-grid-columns={section.products.length}
-        className="scrollbar-none grid grid-flow-col auto-cols-[clamp(10.5rem,15vw,14rem)] gap-[clamp(0.9rem,1.5vw,1.35rem)] overflow-x-auto px-3 pb-6 pt-4"
-        style={{ scrollPaddingInline: '0.75rem' }}
-      >
-        {section.products.map((product, index) => (
-          <StoreCard
-            key={product.id}
-            product={product}
-            navigationIndex={index}
-            shelfRow={shelfIndex}
-            shelfColumn={index}
-            matchScore={matchScores.get(product.id)}
-            onOpen={() => onOpen(product.id)}
-            t={t}
-          />
-        ))}
-      </div>
-    </section>
-  )
-}
+  const gridRef = useRef<HTMLDivElement>(null)
+  const [columns, setColumns] = useState(() => storeGridColumnsFor(window.innerWidth))
 
-function StoreHero({
-  product,
-  onOpen,
-  t
-}: {
-  product: StoreProduct
-  onOpen: () => void
-  t: ReturnType<typeof useT>
-}): JSX.Element {
+  useEffect(() => {
+    const grid = gridRef.current
+    if (!grid) return
+    const updateColumns = (): void => setColumns(storeGridColumnsFor(grid.clientWidth))
+    updateColumns()
+    const observer = new ResizeObserver(updateColumns)
+    observer.observe(grid)
+    return () => observer.disconnect()
+  }, [])
+
   return (
-    <motion.button
-      data-focusable
-      onClick={onOpen}
-      initial={{ opacity: 0, x: 34 }}
-      animate={{ opacity: 1, x: 0 }}
-      exit={{ opacity: 0, x: -24 }}
-      whileHover={{ height: 224 }}
-      whileFocus={{ height: 224 }}
-      transition={{ type: 'spring', stiffness: 300, damping: 30, mass: 0.85 }}
-      className="group relative mb-[clamp(1.5rem,4vh,2.75rem)] h-[clamp(8.5rem,22vh,10rem)] w-full scroll-m-[clamp(1rem,4vh,2.5rem)] overflow-hidden rounded-3xl border border-white/15 bg-white/[0.035] text-left shadow-[0_18px_60px_rgba(0,0,0,0.28)] backdrop-blur-xl"
+    <div
+      ref={gridRef}
+      data-navigation-grid
+      data-grid-columns={columns}
+      className="store-product-grid grid px-1 pb-8 pt-1"
+      style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}
     >
-      <div className="absolute inset-0 opacity-75 transition-opacity duration-500 group-hover:opacity-90 group-focus:opacity-90">
-        <StoreArtwork product={product} orientation="hero" />
-      </div>
-      <div className="absolute inset-0 bg-gradient-to-r from-black/80 via-black/40 to-transparent" />
-      <div className="absolute inset-0 bg-gradient-to-t from-black/45 via-transparent to-white/[0.04]" />
-      <div className="absolute inset-0 flex items-end justify-between gap-6 p-6">
-        <div className="max-w-2xl">
-          <p className="mb-1 text-xs font-semibold uppercase tracking-[0.18em] text-accent">
-            {product.recommendationReason
-              ? t('store.becauseGenre', { genre: product.recommendationReason })
-              : t('store.recommended')}
-          </p>
-          <h1 className="line-clamp-1 text-3xl font-bold">{product.name}</h1>
-          {product.summary && <p className="mt-1 line-clamp-1 text-sm text-white/65">{product.summary}</p>}
-        </div>
-        <div className="flex items-center gap-3">
-          <div className="rounded-2xl bg-accent px-5 py-3 text-right text-black">
-            <p className="text-[10px] font-bold uppercase tracking-wider">{t('store.bestPrice')}</p>
-            <p className="text-xl font-black">{product.bestOffer?.formattedPrice ?? t('store.checkPrice')}</p>
-          </div>
-        </div>
-      </div>
-    </motion.button>
+      {products.map((product, index) => (
+        <StoreCard
+          key={product.id}
+          product={product}
+          navigationIndex={index}
+          matchScore={matchScores?.get(product.id)}
+          onOpen={() => onOpen(product.id)}
+          t={t}
+        />
+      ))}
+    </div>
   )
 }
 
 function StoreCard({
   product,
   navigationIndex,
-  shelfRow,
-  shelfColumn,
   matchScore,
   onOpen,
   t
 }: {
   product: StoreProduct
-  navigationIndex?: number
-  shelfRow?: number
-  shelfColumn?: number
+  navigationIndex: number
   matchScore?: number
   onOpen: () => void
   t: ReturnType<typeof useT>
@@ -793,52 +549,52 @@ function StoreCard({
     <motion.button
       data-focusable
       data-grid-index={navigationIndex}
-      data-store-shelf-row={shelfRow}
-      data-store-shelf-column={shelfColumn}
+      data-store-product-id={product.id}
       onClick={onOpen}
-      whileHover={{ y: -4, scale: 1.025 }}
-      whileFocus={{ y: -4, scale: 1.025 }}
+      whileHover={{ y: -3, scale: 1.012 }}
+      whileFocus={{ y: -3, scale: 1.012 }}
       transition={{ type: 'spring', stiffness: 360, damping: 28 }}
-      className="group relative aspect-[2/3] scroll-m-[clamp(1rem,4vh,2.5rem)] overflow-hidden rounded-2xl border border-white/[0.09] bg-white/5 text-left shadow-[0_14px_35px_rgba(0,0,0,0.25)] outline-none transition-[border-color,box-shadow] focus:border-accent/70 focus:shadow-[0_16px_45px_rgba(0,0,0,0.38)]"
+      className="store-product-card group relative scroll-m-[clamp(1rem,4vh,2.5rem)] overflow-hidden text-left outline-none"
     >
-      <StoreArtwork product={product} orientation="portrait" />
-      <div className="absolute inset-0 bg-gradient-to-t from-black via-black/10 to-black/20" />
-      {(product.bestOffer?.discountPercent ?? 0) > 0 && (
-        <span className="absolute left-2 top-2 rounded-lg bg-emerald-400 px-2 py-1 text-[10px] font-black text-black">
-          -{product.bestOffer?.discountPercent}%
-        </span>
-      )}
-      {matchScore && (
-        <span className="absolute right-2 top-2 rounded-lg border border-white/10 bg-black/60 px-2 py-1 text-[9px] font-bold text-white/90 backdrop-blur-md">
-          {t('store.match', { score: matchScore })}
-        </span>
-      )}
-      <div className="absolute inset-x-0 bottom-0 p-3">
-        <p className="line-clamp-2 text-sm font-bold">{product.name}</p>
-        <div className="mt-2 flex items-end justify-between gap-2">
+      <div className="relative aspect-[16/9] overflow-hidden bg-black/20">
+        <StoreArtwork product={product} orientation="tile" />
+        <div className="absolute inset-0 bg-gradient-to-t from-black/55 via-transparent to-black/25" />
+        {(product.bestOffer?.discountPercent ?? 0) > 0 && (
+          <span className="absolute left-2.5 top-2.5 rounded-lg bg-emerald-400 px-2 py-1 text-[10px] font-black text-black shadow-lg">
+            -{product.bestOffer?.discountPercent}%
+          </span>
+        )}
+        {matchScore && (
+          <span className="absolute right-2.5 top-2.5 rounded-lg border border-white/10 bg-black/65 px-2 py-1 text-[9px] font-bold text-white/90 backdrop-blur-md">
+            {t('store.match', { score: matchScore })}
+          </span>
+        )}
+      </div>
+      <div className="flex min-h-[4.6rem] items-end justify-between gap-3 px-3.5 py-3">
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-bold tracking-tight">{product.name}</p>
+          <div className="mt-1.5 flex items-center justify-between gap-2">
           <div className="min-w-0">
             <p className="truncate text-[10px] text-muted">
               {product.recommendationReason
                 ? t('store.becauseGenreShort', { genre: product.recommendationReason })
                 : product.bestOffer?.sourceLabel ?? 'Steam'}
             </p>
-            <p className="text-base font-black text-white">
+          </div>
+            <p className="shrink-0 text-sm font-black text-white">
               {product.bestOffer?.formattedPrice ?? t('store.checkPrice')}
             </p>
           </div>
-          {(product.steamWishlisted || product.orbitWishlisted) && (
-            <div className="flex gap-1">
-              {product.steamWishlisted && <span className="rounded bg-[#1b2838] px-1.5 py-1 text-[9px]">S</span>}
-              {product.orbitWishlisted && <span className="rounded bg-accent px-1.5 py-1 text-[9px] font-bold text-black">O</span>}
-            </div>
-          )}
         </div>
+        {(product.steamWishlisted || product.orbitWishlisted) && (
+          <Heart size={15} className="mb-0.5 shrink-0 fill-accent text-accent" />
+        )}
       </div>
     </motion.button>
   )
 }
 
-function StoreArtwork({ product, orientation }: { product: StoreProduct; orientation: 'hero' | 'portrait' }): JSX.Element {
+function StoreArtwork({ product, orientation }: { product: StoreProduct; orientation: 'hero' | 'tile' }): JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   const [shouldResolve, setShouldResolve] = useState(orientation === 'hero')
 
@@ -867,12 +623,12 @@ function StoreArtwork({ product, orientation }: { product: StoreProduct; orienta
         <GameImage
           gameId={product.id}
           name={product.name}
-          orientation={orientation === 'hero' ? 'horizontal' : 'vertical'}
+          orientation="horizontal"
           fit="cover"
           previewUrl={
             orientation === 'hero'
               ? product.heroUrl ?? product.headerUrl
-              : product.portraitUrl ?? product.headerUrl
+              : product.headerUrl ?? product.heroUrl ?? product.portraitUrl
           }
           className="h-full w-full object-cover"
         />
@@ -1044,8 +800,84 @@ function PriceAlerts({
   onRemove: (productId: string) => void
   t: ReturnType<typeof useT>
 }): JSX.Element {
-  if (alerts.length === 0) return <div className="flex h-full min-h-72 flex-col items-center justify-center gap-3 text-center"><Bell size={32} className="text-accent" /><h2 className="text-xl font-bold">{t('store.alert.empty')}</h2><p className="max-w-lg text-sm text-muted">{t('store.alert.emptyBody')}</p></div>
-  return <div className="space-y-4 pb-8"><div className="mb-6"><p className="text-xs font-semibold uppercase tracking-[0.18em] text-accent">{t('store.page.alerts')}</p><h2 className="mt-1 text-2xl font-bold">{t('store.alert.heading')}</h2></div>{alerts.map((alert) => { const product = products.find((item) => item.id === alert.productId); const points = history[alert.productId] ?? []; return <section key={alert.id} className="flex flex-wrap items-center gap-5 rounded-3xl border border-white/[0.08] bg-white/[0.04] p-5"><div className="min-w-48 flex-1"><h3 className="font-bold">{product?.name ?? alert.productId}</h3><p className="mt-1 text-xs text-muted">{t('store.alert.startedAt')} {alert.startPriceMinor === undefined ? '—' : formatMinor(alert.startPriceMinor, alert.currency)} · {t('store.alert.points', { count: points.length })}</p></div><div><p className="text-[10px] uppercase tracking-wider text-muted">{t('store.alert.current')}</p><p className="text-xl font-black">{alert.currentPriceMinor === undefined ? '—' : formatMinor(alert.currentPriceMinor, alert.currency)}</p></div><div><p className="text-[10px] uppercase tracking-wider text-muted">{t('store.alert.target')}</p><p className="text-xl font-black text-accent">{formatMinor(alert.targetPriceMinor, alert.currency)}</p></div>{alert.triggeredAt && <span className="rounded-full bg-emerald-400/15 px-4 py-2 text-xs font-bold text-emerald-300">{t('store.alert.reached')}</span>}<button data-focusable onClick={() => onRemove(alert.productId)} className="flex h-11 w-11 items-center justify-center rounded-full bg-red-500/15 text-red-300"><Trash2 size={16} /></button></section> })}</div>
+  if (alerts.length === 0) {
+    return (
+      <div className="flex h-full min-h-72 flex-col items-center justify-center gap-3 text-center">
+        <Bell size={32} className="text-accent" />
+        <h2 className="text-xl font-bold">{t('store.alert.empty')}</h2>
+        <p className="max-w-lg text-sm text-muted">{t('store.alert.emptyBody')}</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="grid grid-cols-1 gap-[clamp(0.75rem,1.25vw,1.15rem)] px-1 pb-8 md:grid-cols-2 xl:grid-cols-3">
+      {alerts.map((alert) => {
+        const product = products.find((item) => item.id === alert.productId)
+        const points = history[alert.productId] ?? []
+        return (
+          <section
+            key={alert.id}
+            className="flex min-h-52 flex-col rounded-[var(--radius-card)] border border-white/[0.08] bg-surface/70 p-5 shadow-card"
+          >
+            <div className="min-w-0">
+              <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-accent">
+                {t('store.alert.title')}
+              </p>
+              <h2 className="mt-1 truncate text-lg font-bold">{product?.name ?? alert.productId}</h2>
+              <p className="mt-1 truncate text-xs text-muted">
+                {t('store.alert.startedAt')}{' '}
+                {alert.startPriceMinor === undefined
+                  ? '—'
+                  : formatMinor(alert.startPriceMinor, alert.currency)}
+              </p>
+            </div>
+
+            <div className="my-5 grid grid-cols-2 gap-3 rounded-2xl bg-black/20 p-3">
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-muted">
+                  {t('store.alert.current')}
+                </p>
+                <p className="mt-1 text-lg font-black">
+                  {alert.currentPriceMinor === undefined
+                    ? '—'
+                    : formatMinor(alert.currentPriceMinor, alert.currency)}
+                </p>
+              </div>
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-muted">
+                  {t('store.alert.target')}
+                </p>
+                <p className="mt-1 text-lg font-black text-accent">
+                  {formatMinor(alert.targetPriceMinor, alert.currency)}
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-auto flex items-center justify-between gap-3">
+              {alert.triggeredAt ? (
+                <span className="rounded-full bg-emerald-400/15 px-3 py-2 text-xs font-bold text-emerald-300">
+                  {t('store.alert.reached')}
+                </span>
+              ) : (
+                <span className="truncate text-xs text-muted">
+                  {t('store.alert.points', { count: points.length })}
+                </span>
+              )}
+              <button
+                data-focusable
+                onClick={() => onRemove(alert.productId)}
+                aria-label={t('store.alert.remove')}
+                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-red-500/15 text-red-300"
+              >
+                <Trash2 size={16} />
+              </button>
+            </div>
+          </section>
+        )
+      })}
+    </div>
+  )
 }
 
 function OfferRow({ offer, t }: { offer: StoreOffer; t: ReturnType<typeof useT> }): JSX.Element {

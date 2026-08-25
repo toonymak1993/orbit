@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Search, Loader2 } from 'lucide-react'
+import { AnimatePresence } from 'framer-motion'
+import { Search, Loader2, Plus } from 'lucide-react'
 import { useAutoFocus } from '@renderer/hooks/useAutoFocus'
 import { useLibraryStore } from '@renderer/state/libraryStore'
 import {
@@ -10,15 +11,22 @@ import {
 import { useAuthStore } from '@renderer/state/authStore'
 import { useEpicAuthStore } from '@renderer/state/epicAuthStore'
 import { useNavigationStore } from '@renderer/state/navigationStore'
+import { usePreferencesStore } from '@renderer/state/preferencesStore'
 import { GameCard } from '@renderer/components/GameCard'
+import { CustomGameWizard } from '@renderer/components/CustomGameWizard'
 import { useT } from '@renderer/i18n/useT'
 import { focusElement } from '@renderer/lib/spatialNavigation'
 import { LIBRARY_SEARCH_EVENT } from '@renderer/lib/librarySearch'
 
-const GRID_COLUMNS = 6
+import type { GameCardSize } from '@shared/ipc'
+
+const GRID_COLUMNS: Record<GameCardSize, number> = {
+  compact: 7,
+  standard: 6,
+  large: 5
+}
 const INITIAL_RENDER_LIMIT = 30
 const RENDER_BATCH_SIZE = 18
-const PRELOAD_CARD_THRESHOLD = GRID_COLUMNS * 2
 
 export function LibraryView(): JSX.Element {
   const containerRef = useAutoFocus<HTMLDivElement>()
@@ -28,7 +36,11 @@ export function LibraryView(): JSX.Element {
   const source = useLibraryFilterStore((s) => s.source)
   const setSource = useLibraryFilterStore((s) => s.setSource)
   const isActive = useNavigationStore((s) => s.mainView === 'library')
+  const gameCardSize = usePreferencesStore((s) => s.gameCardSize)
+  const gridColumns = GRID_COLUMNS[gameCardSize]
+  const preloadCardThreshold = gridColumns * 2
   const [query, setQuery] = useState('')
+  const [showCustomWizard, setShowCustomWizard] = useState(false)
   const [renderLimit, setRenderLimit] = useState(INITIAL_RENDER_LIMIT)
   const revealLockedRef = useRef(false)
   const revealUnlockTimerRef = useRef<ReturnType<typeof setTimeout>>()
@@ -40,7 +52,8 @@ export function LibraryView(): JSX.Element {
       all: games.length,
       steam: providerGames.filter((game) => game.provider === 'steam').length,
       epic: providerGames.filter((game) => game.provider === 'epic').length,
-      xbox: providerGames.filter((game) => game.provider === 'xbox').length
+      xbox: providerGames.filter((game) => game.provider === 'xbox').length,
+      local: providerGames.filter((game) => game.provider === 'local').length
     }),
     [games, providerGames]
   )
@@ -120,15 +133,8 @@ export function LibraryView(): JSX.Element {
     if (value === 'steam') return t('library.source.steam')
     if (value === 'epic') return t('library.source.epic')
     if (value === 'xbox') return t('library.source.xbox')
+    if (value === 'local') return t('library.source.local')
     return t('library.source.all')
-  }
-
-  if (!account && !epicAccount && games.length === 0 && loadedAt > 0) {
-    return (
-      <div className="flex h-full items-center justify-center text-muted">
-        {t('library.noAccount')}
-      </div>
-    )
   }
 
   return (
@@ -176,25 +182,35 @@ export function LibraryView(): JSX.Element {
             RT
           </span>
         </div>
-        <div className="flex flex-1 items-center gap-2 rounded-full border border-white/[0.06] bg-white/5 px-3 py-2.5">
-          <Search size={16} className="text-muted" />
-          <input
-            ref={searchRef}
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          <div className="flex min-w-0 flex-1 items-center gap-2 rounded-full border border-white/[0.06] bg-white/5 px-3 py-2.5">
+            <Search size={16} className="shrink-0 text-muted" />
+            <input
+              ref={searchRef}
+              data-focusable
+              data-library-search
+              type="search"
+              inputMode="search"
+              enterKeyHint="search"
+              autoComplete="off"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={t('library.search')}
+              className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted"
+            />
+            <span className="flex h-6 min-w-6 shrink-0 items-center justify-center rounded-md border border-white/15 bg-black/25 px-1.5 text-[10px] font-black text-white/70">
+              Y
+            </span>
+          </div>
+          <button
             data-focusable
-            data-navigation-horizontal-only
-            data-library-search
-            type="search"
-            inputMode="search"
-            enterKeyHint="search"
-            autoComplete="off"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder={t('library.search')}
-            className="w-full bg-transparent text-sm outline-none placeholder:text-muted"
-          />
-          <span className="flex h-6 min-w-6 shrink-0 items-center justify-center rounded-md border border-white/15 bg-black/25 px-1.5 text-[10px] font-black text-white/70">
-            Y
-          </span>
+            type="button"
+            onClick={() => setShowCustomWizard(true)}
+            className="flex shrink-0 items-center gap-2 rounded-full bg-accent px-4 py-2.5 text-sm font-bold text-black shadow-[0_10px_28px_rgb(var(--color-accent)/0.18)] transition-transform hover:scale-[1.02]"
+          >
+            <Plus size={17} strokeWidth={2.7} />
+            <span className="hidden sm:inline">{t('customGame.addAction')}</span>
+          </button>
         </div>
         {isLoadingMetadata && (
           <div className="flex items-center gap-2 text-xs text-muted">
@@ -205,28 +221,60 @@ export function LibraryView(): JSX.Element {
       </div>
 
       {filtered.length === 0 ? (
-        <p className="text-sm text-muted">
-          {games.length === 0 && loadedAt === 0 ? t('library.loading') : t('library.empty')}
-        </p>
+        <div className="flex min-h-[14rem] flex-col items-center justify-center rounded-xl2 border border-dashed border-white/10 bg-white/[0.025] px-6 text-center">
+          <p className="text-sm font-semibold text-white/70">
+            {games.length === 0 && loadedAt === 0
+              ? t('library.loading')
+              : source === 'local'
+                ? t('customGame.empty')
+                : !account && !epicAccount && games.length === 0
+                  ? t('library.noAccount')
+                  : t('library.empty')}
+          </p>
+          {source === 'local' && loadedAt > 0 && (
+            <button
+              data-focusable
+              type="button"
+              onClick={() => setShowCustomWizard(true)}
+              className="mt-4 flex items-center gap-2 rounded-full border border-accent/35 bg-accent/10 px-4 py-2.5 text-sm font-bold text-accent transition-colors hover:bg-accent/15"
+            >
+              <Plus size={16} />
+              {t('customGame.addAction')}
+            </button>
+          )}
+        </div>
       ) : (
         <div
           data-navigation-grid
-          data-grid-columns={GRID_COLUMNS}
+          data-grid-columns={gridColumns}
           onFocusCapture={(event) => {
             const focused = (event.target as HTMLElement).closest<HTMLElement>('[data-grid-index]')
             const index = Number(focused?.dataset.gridIndex)
-            if (Number.isInteger(index) && index >= renderLimit - PRELOAD_CARD_THRESHOLD) {
+            if (Number.isInteger(index) && index >= renderLimit - preloadCardThreshold) {
               revealNextBatch()
             }
           }}
           className="-mx-2 grid gap-[clamp(0.9rem,1.8vw,1.5rem)] px-2 pb-8 pt-2"
-          style={{ gridTemplateColumns: `repeat(${GRID_COLUMNS}, minmax(0, 1fr))` }}
+          style={{ gridTemplateColumns: `repeat(${gridColumns}, minmax(0, 1fr))` }}
         >
           {filtered.slice(0, renderLimit).map((game, index) => (
             <GameCard key={game.id} game={game} navigationIndex={index} />
           ))}
         </div>
       )}
+
+      <AnimatePresence>
+        {showCustomWizard && (
+          <CustomGameWizard
+            key="custom-game-wizard"
+            onClose={() => setShowCustomWizard(false)}
+            onCompleted={() => {
+              setShowCustomWizard(false)
+              setSource('local')
+            }}
+          />
+        )}
+      </AnimatePresence>
     </div>
   )
 }

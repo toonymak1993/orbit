@@ -74,6 +74,184 @@
   scroll-margin-block: clamp(1.5rem, 6vh, 4rem);
 }
 
+.release-calendar-hero {
+  height: clamp(18rem, 43vh, 30rem);
+}
+
+.release-calendar-view {
+  overflow-anchor: none;
+}
+
+.release-day-group {
+  display: grid;
+  grid-template-columns: minmax(9rem, 0.18fr) minmax(0, 1fr);
+  gap: clamp(1rem, 2vw, 2.5rem);
+  align-items: start;
+}
+
+.release-day-label {
+  position: sticky;
+  top: 1rem;
+  padding: 0.8rem 0 0.8rem 0.8rem;
+  border-left: 2px solid rgb(var(--color-accent) / 0.68);
+}
+
+.release-calendar-card {
+  isolation: isolate;
+  border: 1px solid rgb(255 255 255 / 0.1);
+  border-radius: var(--radius-card);
+  background: rgb(var(--color-surface-2) / 0.82);
+  box-shadow: var(--shadow-card);
+}
+
+.release-calendar-card::after {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  border: 1px solid transparent;
+  border-radius: inherit;
+  content: '';
+  pointer-events: none;
+  transition: border-color 140ms ease;
+}
+
+.release-calendar-card:hover::after,
+.release-calendar-card:focus-within::after,
+.release-calendar-card[data-focused='true']::after {
+  border-color: rgb(var(--color-accent) / 0.74);
+}
+
+@media (orientation: landscape) and (max-height: 720px) {
+  .release-calendar-view {
+    padding-top: 5.5rem;
+  }
+
+  .release-calendar-hero {
+    height: 17rem;
+  }
+
+  .release-calendar-card {
+    min-height: 8rem;
+  }
+}
+
+@media (max-width: 760px) {
+  .release-day-group {
+    grid-template-columns: 1fr;
+  }
+
+  .release-day-label {
+    position: static;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .release-calendar-card::after,
+  .release-calendar-card img {
+    transition: none;
+  }
+}
+
+.store-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.store-toolbar > :first-child {
+  grid-column: 1 / -1;
+}
+
+.store-search-shell {
+  transition:
+    border-color 140ms ease,
+    background-color 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.store-search-shell:focus-within {
+  border-color: rgb(var(--color-accent) / 0.72);
+  background-color: rgb(255 255 255 / 0.075);
+  box-shadow:
+    0 0 0 var(--focus-ring-width) rgb(var(--color-accent) / 0.72),
+    var(--focus-shadow);
+}
+
+[data-store-search]:focus-visible,
+[data-store-search][data-focused='true'] {
+  box-shadow: none;
+}
+
+.store-product-grid {
+  gap: clamp(0.75rem, 1.25vw, 1.15rem);
+}
+
+.store-product-card {
+  isolation: isolate;
+  border: 1px solid rgb(255 255 255 / 0.09);
+  border-radius: var(--radius-card);
+  background:
+    linear-gradient(145deg, rgb(var(--color-surface-2) / 0.78), rgb(var(--color-surface) / 0.9));
+  box-shadow: var(--shadow-card);
+  transition:
+    border-color 140ms ease,
+    background-color 140ms ease;
+}
+
+.store-product-card::after {
+  position: absolute;
+  inset: auto 12% 0;
+  z-index: 2;
+  height: 2px;
+  border-radius: 999px 999px 0 0;
+  background: linear-gradient(90deg, transparent, rgb(var(--color-accent) / 0.9), transparent);
+  content: '';
+  opacity: 0;
+  transform: scaleX(0.55);
+  transition:
+    opacity 140ms ease,
+    transform 180ms ease;
+}
+
+.store-product-card:hover,
+.store-product-card:focus-visible,
+.store-product-card[data-focused='true'] {
+  border-color: rgb(var(--color-accent) / 0.62);
+  background:
+    linear-gradient(145deg, rgb(var(--color-surface-2) / 0.94), rgb(var(--color-surface) / 0.98));
+}
+
+.store-product-card:hover::after,
+.store-product-card:focus-visible::after,
+.store-product-card[data-focused='true']::after {
+  opacity: 1;
+  transform: scaleX(1);
+}
+
+@media (min-width: 1040px) {
+  .store-toolbar {
+    grid-template-columns: max-content minmax(14rem, 1fr) max-content;
+  }
+
+  .store-toolbar > :first-child {
+    grid-column: auto;
+  }
+}
+
+@media (max-height: 800px) {
+  .store-product-grid {
+    gap: 0.75rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .store-product-card,
+  .store-product-card::after {
+    transition: none;
+  }
+}
+
 @keyframes orbit-ticker {
   from {
     transform: translateX(0);
@@ -199,6 +377,41 @@
   }
 }
 
+/* Theme presentation axes stay independent from accent palettes. This preserves
+   every theme's identity while giving the library meaningful scale choices. */
+.home-backdrop-art {
+  opacity: var(--home-backdrop-opacity, 0.82);
+  filter: saturate(var(--home-backdrop-saturation, 0.95))
+    brightness(var(--home-backdrop-brightness, 0.94));
+  transition: opacity 240ms ease, filter 240ms ease;
+}
+
+.home-backdrop-dim {
+  background: rgb(0 0 0 / var(--home-backdrop-dim, 0.1));
+  transition: background-color 240ms ease;
+}
+
+[data-backdrop-intensity='subtle'] {
+  --home-backdrop-opacity: 0.58;
+  --home-backdrop-saturation: 0.72;
+  --home-backdrop-brightness: 0.82;
+  --home-backdrop-dim: 0.2;
+}
+
+[data-backdrop-intensity='balanced'] {
+  --home-backdrop-opacity: 0.82;
+  --home-backdrop-saturation: 0.95;
+  --home-backdrop-brightness: 0.94;
+  --home-backdrop-dim: 0.1;
+}
+
+[data-backdrop-intensity='vivid'] {
+  --home-backdrop-opacity: 1;
+  --home-backdrop-saturation: 1.25;
+  --home-backdrop-brightness: 1.06;
+  --home-backdrop-dim: 0.03;
+}
+
 /* Home scales by the effective CSS viewport rather than raw panel pixels.
    This accounts for Windows display scaling on handhelds and compact laptops. */
 .home-stage {
@@ -266,13 +479,16 @@
 }
 
 .home-focus-card-float {
-  display: grid;
   width: min(72rem, 88vw);
+  padding: clamp(0.75rem, 1.3vw, 1.1rem) clamp(0.9rem, 1.7vw, 1.4rem);
+  border-radius: clamp(1rem, 1.5vw, 1.4rem);
+}
+
+.home-focus-card-float .home-focus-view {
+  display: grid;
   grid-template-columns: minmax(16rem, 0.78fr) minmax(0, 1.22fr);
   align-items: center;
   gap: clamp(1rem, 2vw, 2rem);
-  padding: clamp(0.75rem, 1.3vw, 1.1rem) clamp(0.9rem, 1.7vw, 1.4rem);
-  border-radius: clamp(1rem, 1.5vw, 1.4rem);
 }
 
 .home-focus-card-float .home-focus-icon {
@@ -302,6 +518,11 @@
   font-size: clamp(0.85rem, 1.2vw, 1rem);
 }
 
+.home-focus-card-float .home-achievement-card p:last-child {
+  margin-top: 0.2rem;
+  font-size: 0.625rem;
+}
+
 @media (orientation: landscape) and (max-height: 720px) {
   [data-home-layout='float'] .home-stage {
     height: clamp(7rem, 17vh, 8rem);
@@ -319,11 +540,62 @@
 
   .home-focus-card-float {
     width: min(68rem, 92vw);
-    grid-template-columns: minmax(14rem, 0.72fr) minmax(0, 1.28fr);
     padding: 0.6rem 0.8rem;
+  }
+
+  .home-focus-card-float .home-focus-view {
+    grid-template-columns: minmax(14rem, 0.72fr) minmax(0, 1.28fr);
   }
 
   .home-focus-card-float .home-focus-identity > div:last-child > div {
     display: none;
+  }
+}
+
+/* Card-size overrides come after layout and short-viewport presets so every
+   choice remains observable in ORBIT and FLOAT at the quality-gate sizes. */
+.home-game-tile {
+  min-width: 9.5rem;
+}
+
+[data-card-size='compact'] .home-game-tile {
+  min-width: 8rem;
+  flex-basis: clamp(8rem, calc((100% - 5rem - 5 * var(--tile-gap)) / 6), 10.5rem);
+}
+
+[data-card-size='large'] .home-game-tile {
+  min-width: 11.5rem;
+  flex-basis: clamp(11.5rem, calc((100% - 3rem - 3 * var(--tile-gap)) / 4), 16.5rem);
+}
+
+[data-home-layout='float'][data-card-size='compact'] .home-game-tile {
+  min-width: 10rem;
+  flex-basis: clamp(10rem, 14vw, 14rem);
+}
+
+[data-home-layout='float'][data-card-size='large'] .home-game-tile {
+  min-width: 14rem;
+  flex-basis: clamp(14rem, 20vw, 21rem);
+}
+
+@media (orientation: landscape) and (max-height: 720px) {
+  [data-card-size='compact'] .home-game-tile {
+    min-width: 7.75rem;
+    flex-basis: clamp(7.75rem, 14vw, 9.25rem);
+  }
+
+  [data-card-size='large'] .home-game-tile {
+    min-width: 10.75rem;
+    flex-basis: clamp(10.75rem, 21vw, 13.5rem);
+  }
+
+  [data-home-layout='float'][data-card-size='compact'] .home-game-tile {
+    min-width: 8.25rem;
+    flex-basis: clamp(8.25rem, 15vw, 10.5rem);
+  }
+
+  [data-home-layout='float'][data-card-size='large'] .home-game-tile {
+    min-width: 11rem;
+    flex-basis: clamp(11rem, 21vw, 14.5rem);
   }
 }

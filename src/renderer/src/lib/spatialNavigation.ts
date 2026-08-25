@@ -10,9 +10,9 @@ export function getFocusableElements(): HTMLElement[] {
 }
 
 /**
- * Nearest-neighbour spatial navigation: scores every other focusable element by
- * distance along the pressed axis, penalizing perpendicular offset so navigation
- * feels like moving through a grid rather than jumping to the literal closest point.
+ * Nearest-neighbour spatial navigation. Direction is determined from element
+ * centres so visually adjacent controls remain reachable when rounded cards,
+ * focus transforms or responsive layouts make their rectangles overlap slightly.
  */
 export function findNextFocus(
   current: HTMLElement,
@@ -43,54 +43,7 @@ export function findNextFocus(
     if (gridResult !== undefined) return gridResult
   }
 
-  const currentRect = current.getBoundingClientRect()
-  const candidates = getFocusableElements().filter(
-    (el) =>
-      el !== current &&
-      (!el.hasAttribute('data-navigation-horizontal-only') ||
-        direction === 'left' ||
-        direction === 'right')
-  )
-
-  let best: HTMLElement | null = null
-  let bestScore = Infinity
-
-  for (const el of candidates) {
-    if (
-      el.hasAttribute('data-navigation-horizontal-only') &&
-      direction !== 'left' &&
-      direction !== 'right'
-    ) continue
-    const rect = el.getBoundingClientRect()
-    let primary: number
-    let secondary: number
-
-    if (direction === 'right') {
-      if (rect.left < currentRect.right - 1) continue
-      primary = rect.left - currentRect.right
-      secondary = Math.abs(centerY(rect) - centerY(currentRect))
-    } else if (direction === 'left') {
-      if (rect.right > currentRect.left + 1) continue
-      primary = currentRect.left - rect.right
-      secondary = Math.abs(centerY(rect) - centerY(currentRect))
-    } else if (direction === 'down') {
-      if (rect.top < currentRect.bottom - 1) continue
-      primary = rect.top - currentRect.bottom
-      secondary = Math.abs(centerX(rect) - centerX(currentRect))
-    } else {
-      if (rect.bottom > currentRect.top + 1) continue
-      primary = currentRect.top - rect.bottom
-      secondary = Math.abs(centerX(rect) - centerX(currentRect))
-    }
-
-    const score = primary * 2 + secondary
-    if (score < bestScore) {
-      bestScore = score
-      best = el
-    }
-  }
-
-  return best
+  return findNearestCandidate(current, direction, getFocusableElements())
 }
 
 /**
@@ -141,34 +94,9 @@ function findNearestCandidate(
   let bestScore = Infinity
 
   for (const el of candidates) {
-    if (
-      el.hasAttribute('data-navigation-horizontal-only') &&
-      direction !== 'left' &&
-      direction !== 'right'
-    ) continue
-    const rect = el.getBoundingClientRect()
-    let primary: number
-    let secondary: number
-
-    if (direction === 'right') {
-      if (rect.left < currentRect.right - 1) continue
-      primary = rect.left - currentRect.right
-      secondary = Math.abs(centerY(rect) - centerY(currentRect))
-    } else if (direction === 'left') {
-      if (rect.right > currentRect.left + 1) continue
-      primary = currentRect.left - rect.right
-      secondary = Math.abs(centerY(rect) - centerY(currentRect))
-    } else if (direction === 'down') {
-      if (rect.top < currentRect.bottom - 1) continue
-      primary = rect.top - currentRect.bottom
-      secondary = Math.abs(centerX(rect) - centerX(currentRect))
-    } else {
-      if (rect.bottom > currentRect.top + 1) continue
-      primary = currentRect.top - rect.bottom
-      secondary = Math.abs(centerX(rect) - centerX(currentRect))
-    }
-
-    const score = primary * 2 + secondary
+    if (el === current) continue
+    const score = scoreDirectionalCandidate(currentRect, el.getBoundingClientRect(), direction)
+    if (score === null) continue
     if (score < bestScore) {
       bestScore = score
       best = el
@@ -178,10 +106,87 @@ function findNearestCandidate(
   return best
 }
 
-function centerX(rect: DOMRect): number {
+interface NavigationRect {
+  top: number
+  right: number
+  bottom: number
+  left: number
+}
+
+const DIRECTION_EPSILON = 1
+const OFF_AXIS_ENTRY_PENALTY = 160
+
+/**
+ * Scores a candidate in the requested half-plane. The edge gap makes the next
+ * nearby control win, while the larger perpendicular-gap penalty keeps movement
+ * in a visible row or column whenever possible. Returning null rejects elements
+ * whose centre is not actually in the requested direction.
+ */
+export function scoreDirectionalCandidate(
+  current: NavigationRect,
+  candidate: NavigationRect,
+  direction: NavDirection
+): number | null {
+  const horizontal = direction === 'left' || direction === 'right'
+  const forward = direction === 'right' || direction === 'down'
+  const currentPrimaryCenter = horizontal ? centerX(current) : centerY(current)
+  const candidatePrimaryCenter = horizontal ? centerX(candidate) : centerY(candidate)
+  const primaryCenterDistance = forward
+    ? candidatePrimaryCenter - currentPrimaryCenter
+    : currentPrimaryCenter - candidatePrimaryCenter
+
+  if (primaryCenterDistance <= DIRECTION_EPSILON) return null
+
+  const primaryGap = Math.max(
+    0,
+    direction === 'right'
+      ? candidate.left - current.right
+      : direction === 'left'
+        ? current.left - candidate.right
+        : direction === 'down'
+          ? candidate.top - current.bottom
+          : current.top - candidate.bottom
+  )
+  const currentPerpendicularStart = horizontal ? current.top : current.left
+  const currentPerpendicularEnd = horizontal ? current.bottom : current.right
+  const candidatePerpendicularStart = horizontal ? candidate.top : candidate.left
+  const candidatePerpendicularEnd = horizontal ? candidate.bottom : candidate.right
+  const perpendicularGap = intervalGap(
+    currentPerpendicularStart,
+    currentPerpendicularEnd,
+    candidatePerpendicularStart,
+    candidatePerpendicularEnd
+  )
+  const perpendicularCenterDistance = Math.abs(
+    (currentPerpendicularStart + currentPerpendicularEnd) / 2 -
+      (candidatePerpendicularStart + candidatePerpendicularEnd) / 2
+  )
+  const offAxisPenalty = perpendicularGap > DIRECTION_EPSILON ? OFF_AXIS_ENTRY_PENALTY : 0
+
+  return (
+    primaryGap * 4 +
+    primaryCenterDistance * 0.25 +
+    perpendicularGap * 6 +
+    perpendicularCenterDistance * 0.15 +
+    offAxisPenalty
+  )
+}
+
+function intervalGap(
+  firstStart: number,
+  firstEnd: number,
+  secondStart: number,
+  secondEnd: number
+): number {
+  if (secondStart > firstEnd) return secondStart - firstEnd
+  if (firstStart > secondEnd) return firstStart - secondEnd
+  return 0
+}
+
+function centerX(rect: NavigationRect): number {
   return (rect.left + rect.right) / 2
 }
-function centerY(rect: DOMRect): number {
+function centerY(rect: NavigationRect): number {
   return (rect.top + rect.bottom) / 2
 }
 

@@ -1,5 +1,6 @@
 import type { StoreOffer } from '@shared/ipc'
 import { formatStorePrice, type StoreRegionConfig } from './storeRegions'
+import { fetchWithElectronNet } from '../networkFetch'
 import {
   hasRemoteArtwork,
   normalizeStoreTitle,
@@ -30,7 +31,7 @@ function slugify(value: string): string {
 
 async function queryXboxState(name: string, region: StoreRegionConfig): Promise<unknown | null> {
   const url = `https://www.xbox.com/${region.locale}/search/results?q=${encodeURIComponent(name)}`
-  const response = await fetch(url, {
+  const response = await fetchWithElectronNet(url, {
     headers: storeHeaders(region),
     signal: AbortSignal.timeout(STORE_REQUEST_TIMEOUT_MS)
   })

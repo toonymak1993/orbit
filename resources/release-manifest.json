@@ -17,8 +17,7 @@
   "minimumWindowsVersion": "10.0.22000.0",
   "xboxMode": {
     "enabled": true,
-    "minimumWindowsVersion": "10.0.26100.7019",
-    "nativeFseWindowsVersion": "10.0.26100.8328",
+    "minimumWindowsVersion": "10.0.26100.0",
     "packageIdentity": "ORBIT.GamingHome",
     "applicationId": "ORBIT",
     "appExtension": "windows.gamingApp",

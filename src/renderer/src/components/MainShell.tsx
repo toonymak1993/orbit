@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { TopBar } from './TopBar'
 import { HomeView } from '@renderer/views/Home/HomeView'
 import { LibraryView } from '@renderer/views/Library/LibraryView'
+import { ReleaseCalendarView } from '@renderer/views/Releases/ReleaseCalendarView'
 import { StoreView } from '@renderer/views/Store/StoreView'
 import { SettingsView } from '@renderer/views/Settings/SettingsView'
 import {
@@ -56,7 +57,7 @@ export function MainShell(): JSX.Element {
   }, [])
 
   useEffect(() => {
-    if (mainView === 'store') void refreshStoreIfStale()
+    if (mainView === 'store' || mainView === 'releases') void refreshStoreIfStale()
   }, [mainView, refreshStoreIfStale])
 
   useBackHandler(() => {
@@ -84,6 +85,7 @@ export function MainShell(): JSX.Element {
   function renderView(view: MainView): JSX.Element {
     if (view === 'home') return <HomeView />
     if (view === 'library') return <LibraryView />
+    if (view === 'releases') return <ReleaseCalendarView />
     if (view === 'store') return <StoreView />
     return <SettingsView />
   }

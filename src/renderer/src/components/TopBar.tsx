@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { AnimatePresence, motion, useAnimationControls } from 'framer-motion'
-import { Home, Library, ShoppingBag, Settings, User } from 'lucide-react'
+import { CalendarDays, Home, Library, ShoppingBag, Settings, User } from 'lucide-react'
 import { useNavigationStore, type MainView } from '@renderer/state/navigationStore'
 import { useAuthStore } from '@renderer/state/authStore'
 import { useEpicAuthStore } from '@renderer/state/epicAuthStore'
@@ -13,6 +13,7 @@ import { PowerMenu } from './PowerMenu'
 const items: { id: MainView; labelKey: TranslationKey; icon: typeof Home }[] = [
   { id: 'home', labelKey: 'nav.home', icon: Home },
   { id: 'library', labelKey: 'nav.library', icon: Library },
+  { id: 'releases', labelKey: 'nav.releases', icon: CalendarDays },
   { id: 'store', labelKey: 'nav.store', icon: ShoppingBag },
   { id: 'settings', labelKey: 'nav.settings', icon: Settings }
 ]

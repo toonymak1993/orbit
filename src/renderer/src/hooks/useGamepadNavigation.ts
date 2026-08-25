@@ -29,7 +29,7 @@ const DPAD_DOWN = 13
 const DPAD_LEFT = 14
 const DPAD_RIGHT = 15
 
-type DirectionState = Partial<Record<NavDirection, number>>
+type DirectionRepeatState = Partial<Record<NavDirection, number>>
 
 function confirmFocused(): void {
   const active = document.activeElement as HTMLElement | null
@@ -89,24 +89,26 @@ function isPressed(button: GamepadButton | undefined): boolean {
  */
 export function useGamepadNavigation(): void {
   useEffect(() => {
-    const heldSince: DirectionState = {}
+    const nextDirectionRepeatAt: DirectionRepeatState = {}
     let rafId = 0
 
     function handleDirection(direction: NavDirection, now: number): void {
-      const startedAt = heldSince[direction]
-      if (startedAt === undefined) {
-        heldSince[direction] = now
+      const repeatAt = nextDirectionRepeatAt[direction]
+      if (repeatAt === undefined) {
+        nextDirectionRepeatAt[direction] = now + REPEAT_DELAY_MS
         if (moveFocus(direction)) playUiSound('navigate')
         return
       }
-      const elapsed = now - startedAt
-      if (elapsed < REPEAT_DELAY_MS) return
-      const sinceRepeatWindow = (elapsed - REPEAT_DELAY_MS) % REPEAT_RATE_MS
-      if (sinceRepeatWindow < 16 && moveFocus(direction)) playUiSound('navigate')
+      if (now < repeatAt) return
+
+      // Schedule from the current frame so a high-refresh display or a stalled
+      // renderer can never emit several navigation steps for one repeat slot.
+      nextDirectionRepeatAt[direction] = now + REPEAT_RATE_MS
+      if (moveFocus(direction)) playUiSound('navigate')
     }
 
     function releaseDirection(direction: NavDirection): void {
-      delete heldSince[direction]
+      delete nextDirectionRepeatAt[direction]
     }
 
     const prevButtons: Record<number, boolean> = {}
@@ -135,60 +137,90 @@ export function useGamepadNavigation(): void {
     }
 
     function pollGamepads(now: number): void {
-      const pads = navigator.getGamepads?.() ?? []
-      for (const pad of pads) {
-        if (!pad) continue
+      const pads = Array.from(navigator.getGamepads?.() ?? []).filter(
+        (pad): pad is Gamepad => pad !== null
+      )
+      const anyButtonPressed = (buttonIndex: number): boolean =>
+        pads.some((pad) => isPressed(pad.buttons[buttonIndex]))
 
-        const axisX = pad.axes[0] ?? 0
-        const axisY = pad.axes[1] ?? 0
-
-        const dpadUp = pad.buttons[DPAD_UP]?.pressed || axisY < -STICK_DEADZONE
-        const dpadDown = pad.buttons[DPAD_DOWN]?.pressed || axisY > STICK_DEADZONE
-        const dpadLeft = pad.buttons[DPAD_LEFT]?.pressed || axisX < -STICK_DEADZONE
-        const dpadRight = pad.buttons[DPAD_RIGHT]?.pressed || axisX > STICK_DEADZONE
-
-        dpadUp ? handleDirection('up', now) : releaseDirection('up')
-        dpadDown ? handleDirection('down', now) : releaseDirection('down')
-        dpadLeft ? handleDirection('left', now) : releaseDirection('left')
-        dpadRight ? handleDirection('right', now) : releaseDirection('right')
-
-        const aPressed = pad.buttons[BTN_A]?.pressed ?? false
-        if (aPressed && !prevButtons[BTN_A]) confirmFocused()
-        prevButtons[BTN_A] = aPressed
-
-        const bPressed = pad.buttons[BTN_B]?.pressed ?? false
-        if (bPressed && !prevButtons[BTN_B] && triggerBack()) playUiSound('back')
-        prevButtons[BTN_B] = bPressed
-
-        const yPressed = pad.buttons[BTN_Y]?.pressed ?? false
-        if (yPressed && !prevButtons[BTN_Y]) openViewSearch()
-        prevButtons[BTN_Y] = yPressed
-
-        const lbPressed = pad.buttons[BTN_LB]?.pressed ?? false
-        handleCyclingButton(BTN_LB, lbPressed, now, () => cycleMainView(-1))
-
-        const rbPressed = pad.buttons[BTN_RB]?.pressed ?? false
-        handleCyclingButton(BTN_RB, rbPressed, now, () => cycleMainView(1))
-
-        const ltPressed = isPressed(pad.buttons[BTN_LT])
-        handleCyclingButton(BTN_LT, ltPressed, now, () => cycleSecondaryView(-1))
-
-        const rtPressed = isPressed(pad.buttons[BTN_RT])
-        handleCyclingButton(BTN_RT, rtPressed, now, () => cycleSecondaryView(1))
-
-        const startPressed = pad.buttons[BTN_START]?.pressed ?? false
-        if (startPressed && !prevButtons[BTN_START]) {
-          const active = document.activeElement as HTMLElement | null
-          const gameId = active?.matches('[data-game-card="true"]')
-            ? active.dataset.gameId
-            : undefined
-          if (gameId) {
-            playUiSound('confirm')
-            void window.api.game.launch(gameId).catch(() => playUiSound('error'))
-          }
-        }
-        prevButtons[BTN_START] = startPressed
+      const directionPressed: Record<NavDirection, boolean> = {
+        up: pads.some(
+          (pad) => isPressed(pad.buttons[DPAD_UP]) || (pad.axes[1] ?? 0) < -STICK_DEADZONE
+        ),
+        down: pads.some(
+          (pad) => isPressed(pad.buttons[DPAD_DOWN]) || (pad.axes[1] ?? 0) > STICK_DEADZONE
+        ),
+        left: pads.some(
+          (pad) => isPressed(pad.buttons[DPAD_LEFT]) || (pad.axes[0] ?? 0) < -STICK_DEADZONE
+        ),
+        right: pads.some(
+          (pad) => isPressed(pad.buttons[DPAD_RIGHT]) || (pad.axes[0] ?? 0) > STICK_DEADZONE
+        )
       }
+
+      // Hardware Control owns global/background controller input in the main
+      // process. Keeping navigation foreground-only prevents a held shortcut
+      // from launching a focused game card while another app is visible.
+      if (!document.hasFocus()) {
+        for (const buttonIndex of [
+          BTN_A,
+          BTN_B,
+          BTN_Y,
+          BTN_LB,
+          BTN_RB,
+          BTN_LT,
+          BTN_RT,
+          BTN_START
+        ]) {
+          prevButtons[buttonIndex] = anyButtonPressed(buttonIndex)
+          delete nextButtonRepeatAt[buttonIndex]
+        }
+        releaseDirection('up')
+        releaseDirection('down')
+        releaseDirection('left')
+        releaseDirection('right')
+        rafId = requestAnimationFrame(pollGamepads)
+        return
+      }
+
+      // Browsers can expose one physical controller more than once (for example
+      // through Steam Input). Aggregate all pads before updating shared state so
+      // an idle duplicate cannot release a direction pressed on another pad.
+      for (const direction of ['up', 'down', 'left', 'right'] as const) {
+        directionPressed[direction]
+          ? handleDirection(direction, now)
+          : releaseDirection(direction)
+      }
+
+      const aPressed = anyButtonPressed(BTN_A)
+      if (aPressed && !prevButtons[BTN_A]) confirmFocused()
+      prevButtons[BTN_A] = aPressed
+
+      const bPressed = anyButtonPressed(BTN_B)
+      if (bPressed && !prevButtons[BTN_B] && triggerBack()) playUiSound('back')
+      prevButtons[BTN_B] = bPressed
+
+      const yPressed = anyButtonPressed(BTN_Y)
+      if (yPressed && !prevButtons[BTN_Y]) openViewSearch()
+      prevButtons[BTN_Y] = yPressed
+
+      handleCyclingButton(BTN_LB, anyButtonPressed(BTN_LB), now, () => cycleMainView(-1))
+      handleCyclingButton(BTN_RB, anyButtonPressed(BTN_RB), now, () => cycleMainView(1))
+      handleCyclingButton(BTN_LT, anyButtonPressed(BTN_LT), now, () => cycleSecondaryView(-1))
+      handleCyclingButton(BTN_RT, anyButtonPressed(BTN_RT), now, () => cycleSecondaryView(1))
+
+      const startPressed = anyButtonPressed(BTN_START)
+      if (startPressed && !prevButtons[BTN_START]) {
+        const active = document.activeElement as HTMLElement | null
+        const gameId = active?.matches('[data-game-card="true"]')
+          ? active.dataset.gameId
+          : undefined
+        if (gameId) {
+          playUiSound('confirm')
+          void window.api.game.launch(gameId).catch(() => playUiSound('error'))
+        }
+      }
+      prevButtons[BTN_START] = startPressed
 
       rafId = requestAnimationFrame(pollGamepads)
     }

@@ -13,7 +13,7 @@ interface EpicAuthState {
 
 let unsubscribe: (() => void) | null = null
 
-export const useEpicAuthStore = create<EpicAuthState>((set) => ({
+export const useEpicAuthStore = create<EpicAuthState>((set, get) => ({
   account: null,
   status: { state: 'idle' },
   checkedExistingSession: false,
@@ -24,13 +24,26 @@ export const useEpicAuthStore = create<EpicAuthState>((set) => ({
   },
 
   startLogin: async () => {
+    if (get().status.state === 'waiting-for-browser') return
+
     unsubscribe?.()
-    set({ status: { state: 'idle' } })
+    set({ status: { state: 'waiting-for-browser' } })
     unsubscribe = window.api.epic.onStatus((status) => {
       set({ status })
       if (status.state === 'success') set({ account: status.account })
     })
-    await window.api.epic.startLogin()
+    try {
+      await window.api.epic.startLogin()
+    } catch (error) {
+      unsubscribe?.()
+      unsubscribe = null
+      set({
+        status: {
+          state: 'error',
+          message: error instanceof Error ? error.message : 'Epic login could not be started.'
+        }
+      })
+    }
   },
 
   cancelLogin: async () => {

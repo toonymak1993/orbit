@@ -12,6 +12,8 @@ $releaseMetadataPath = Join-Path $repoRoot 'resources\release-manifest.json'
 $releaseMetadata = Get-Content -LiteralPath $releaseMetadataPath -Raw | ConvertFrom-Json
 $displayVersion = [string]$releaseMetadata.displayVersion
 $windowsFileVersion = [string]$releaseMetadata.windowsFileVersion
+$xboxPackageVersion = [version][string]$releaseMetadata.xboxPackageVersion
+$xboxMinimumWindowsVersion = [version][string]$releaseMetadata.xboxMode.minimumWindowsVersion
 $appOutDir = Join-Path $releaseDir 'win-unpacked'
 $stageDir = Join-Path $releaseDir '_orbit-xbox-stage'
 $bundleDir = Join-Path $releaseDir '_orbit-xbox-bundle'
@@ -28,6 +30,20 @@ $passwordPath = Join-Path $certificateDir 'orbit-development-password.xml'
 $securePassword = $null
 $passwordPointer = [IntPtr]::Zero
 $plainPassword = $null
+$node = Get-Command node.exe -ErrorAction SilentlyContinue
+if (!$node) { throw 'node.exe is required to build the ORBIT Xbox Mode package.' }
+
+function Invoke-LocalNodeTool {
+  param(
+    [string]$RelativePath,
+    [string[]]$Arguments
+  )
+
+  $toolPath = Join-Path $repoRoot $RelativePath
+  if (!(Test-Path -LiteralPath $toolPath)) { throw "The local build tool is missing: $toolPath" }
+  & $node.Source $toolPath @Arguments
+  if ($LASTEXITCODE -ne 0) { throw "Local build tool failed: $RelativePath" }
+}
 
 function Assert-ReleaseChildPath {
   param([string]$Path)
@@ -44,20 +60,49 @@ function Get-WindowsSdkTool {
   $sdkToolVersion = '10.0.26100.0'
   $toolRoot = Join-Path $repoRoot ".tools\windows-sdk-buildtools\$sdkBuildToolsVersion"
   $packagePath = Join-Path $toolRoot 'sdk.nupkg'
+  $packageHashPath = Join-Path $toolRoot 'sdk.nupkg.sha512'
   $extractPath = Join-Path $toolRoot 'package'
   $toolPath = Join-Path $extractPath "bin\$sdkToolVersion\x64\$Name"
 
-  if (!(Test-Path -LiteralPath $toolPath)) {
-    New-Item -ItemType Directory -Force -Path $toolRoot | Out-Null
-    if (!(Test-Path -LiteralPath $packagePath)) {
-      $packageUrl = "https://api.nuget.org/v3-flatcontainer/microsoft.windows.sdk.buildtools/$sdkBuildToolsVersion/microsoft.windows.sdk.buildtools.$sdkBuildToolsVersion.nupkg"
-      Write-Host "Downloading Microsoft Windows SDK BuildTools $sdkBuildToolsVersion..."
-      Invoke-WebRequest -Uri $packageUrl -OutFile $packagePath
+  New-Item -ItemType Directory -Force -Path $toolRoot | Out-Null
+  $packageUrl = "https://api.nuget.org/v3-flatcontainer/microsoft.windows.sdk.buildtools/$sdkBuildToolsVersion/microsoft.windows.sdk.buildtools.$sdkBuildToolsVersion.nupkg"
+  if (!(Test-Path -LiteralPath $packagePath)) {
+    Write-Host "Downloading Microsoft Windows SDK BuildTools $sdkBuildToolsVersion..."
+    Invoke-WebRequest -Uri $packageUrl -OutFile $packagePath
+  }
+  if (!(Test-Path -LiteralPath $packageHashPath)) {
+    $registrationUrl = "https://api.nuget.org/v3/registration5-semver1/microsoft.windows.sdk.buildtools/$sdkBuildToolsVersion.json"
+    $registration = Invoke-RestMethod -Uri $registrationUrl
+    if ([string]$registration.packageContent -ne $packageUrl -or [string]::IsNullOrWhiteSpace([string]$registration.catalogEntry)) {
+      throw 'NuGet registration metadata does not match the requested Windows SDK BuildTools package.'
     }
-    if (!(Test-Path -LiteralPath $extractPath)) {
-      Add-Type -AssemblyName System.IO.Compression.FileSystem
-      [System.IO.Compression.ZipFile]::ExtractToDirectory($packagePath, $extractPath)
+    $catalogEntry = Invoke-RestMethod -Uri ([string]$registration.catalogEntry)
+    if (
+      [string]$catalogEntry.id -ne 'Microsoft.Windows.SDK.BuildTools' -or
+      [string]$catalogEntry.version -ne $sdkBuildToolsVersion -or
+      [string]$catalogEntry.packageHashAlgorithm -ne 'SHA512' -or
+      [string]::IsNullOrWhiteSpace([string]$catalogEntry.packageHash)
+    ) {
+      throw 'NuGet catalog metadata does not contain the expected Windows SDK SHA-512 contract.'
     }
+    [string]$catalogEntry.packageHash | Set-Content -LiteralPath $packageHashPath -Encoding ASCII
+  }
+
+  $expectedPackageHash = (Get-Content -LiteralPath $packageHashPath -Raw).Trim()
+  $sha512 = [System.Security.Cryptography.SHA512]::Create()
+  $packageStream = [System.IO.File]::OpenRead($packagePath)
+  try {
+    $actualPackageHash = [Convert]::ToBase64String($sha512.ComputeHash($packageStream))
+  } finally {
+    $packageStream.Dispose()
+    $sha512.Dispose()
+  }
+  if ($actualPackageHash -cne $expectedPackageHash) {
+    throw 'The cached Windows SDK BuildTools package failed its NuGet SHA-512 integrity check.'
+  }
+  if (!(Test-Path -LiteralPath $extractPath)) {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [System.IO.Compression.ZipFile]::ExtractToDirectory($packagePath, $extractPath)
   }
   if (!(Test-Path -LiteralPath $toolPath)) { throw "Windows SDK tool is missing after extraction: $toolPath" }
   return $toolPath
@@ -80,14 +125,10 @@ try {
   $env:WIN_CSC_KEY_PASSWORD = $plainPassword
 
   if (!$SkipCompile) {
-    & npm.cmd run typecheck
-    if ($LASTEXITCODE -ne 0) { throw 'TypeScript validation failed.' }
-
-    & npm.cmd run build
-    if ($LASTEXITCODE -ne 0) { throw 'Renderer/main build failed.' }
-
-    & npx.cmd electron-builder --win dir --x64 --publish never
-    if ($LASTEXITCODE -ne 0) { throw 'Windows application build failed.' }
+    Invoke-LocalNodeTool 'node_modules\typescript\bin\tsc' @('--noEmit', '-p', 'tsconfig.node.json')
+    Invoke-LocalNodeTool 'node_modules\typescript\bin\tsc' @('--noEmit', '-p', 'tsconfig.web.json')
+    Invoke-LocalNodeTool 'node_modules\electron-vite\bin\electron-vite.js' @('build')
+    Invoke-LocalNodeTool 'node_modules\electron-builder\out\cli\cli.js' @('--win', 'dir', '--x64', '--publish', 'never')
   }
 
   if (!(Test-Path -LiteralPath (Join-Path $appOutDir 'ORBIT.exe'))) {
@@ -111,6 +152,26 @@ try {
   Copy-Item -LiteralPath (Join-Path $repoRoot 'build\xbox\AppxManifest.xml') -Destination (Join-Path $stageDir 'AppxManifest.xml') -Force
   Copy-Item -LiteralPath (Join-Path $repoRoot 'build\xbox\CustomCapability.SCCD') -Destination (Join-Path $stageDir 'CustomCapability.SCCD') -Force
   Copy-Item -Path (Join-Path $repoRoot 'build\xbox\Public\*') -Destination (Join-Path $stageDir 'Public') -Recurse -Force
+
+  # Release metadata is the single version source. Stamp only the disposable
+  # staging copy so a package cannot accidentally ship stale identity or
+  # Gaming Home registration versions after the next beta bump.
+  $stagedManifestPath = Join-Path $stageDir 'AppxManifest.xml'
+  [xml]$stagedManifest = Get-Content -LiteralPath $stagedManifestPath -Raw
+  $manifestNamespace = [System.Xml.XmlNamespaceManager]::new($stagedManifest.NameTable)
+  $manifestNamespace.AddNamespace('f', 'http://schemas.microsoft.com/appx/manifest/foundation/windows10')
+  $stagedIdentity = $stagedManifest.SelectSingleNode('/f:Package/f:Identity', $manifestNamespace)
+  if (!$stagedIdentity) { throw 'The staged Xbox manifest has no package identity.' }
+  $stagedIdentity.SetAttribute('Version', $xboxPackageVersion.ToString())
+  foreach ($targetFamily in $stagedManifest.SelectNodes('/f:Package/f:Dependencies/f:TargetDeviceFamily', $manifestNamespace)) {
+    $targetFamily.SetAttribute('MinVersion', $xboxMinimumWindowsVersion.ToString())
+  }
+  $stagedManifest.Save($stagedManifestPath)
+
+  $registrationPath = Join-Path $stageDir 'Public\registration.json'
+  $registration = Get-Content -LiteralPath $registrationPath -Raw | ConvertFrom-Json
+  $registration.version = $xboxPackageVersion.ToString()
+  $registration | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $registrationPath -Encoding UTF8
 
   $makeAppx = Get-WindowsSdkTool 'makeappx.exe'
   $signTool = Get-WindowsSdkTool 'signtool.exe'

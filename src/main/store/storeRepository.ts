@@ -4,6 +4,7 @@ import type {
   StorePriceAlert,
   StorePricePoint,
   StoreProduct,
+  StoreRelease,
   StoreRegionId,
   StoreSnapshot
 } from '@shared/ipc'
@@ -12,6 +13,9 @@ const SCHEMA_VERSION = 1
 
 interface RegionCache {
   products: Record<string, StoreProduct>
+  monthlyReleases?: StoreRelease[]
+  releaseCalendarMonth?: string
+  releaseCalendarUpdatedAt?: number
   updatedAt: number
   lastSuccessfulRefreshAt?: number
 }
@@ -102,6 +106,19 @@ export class StoreRepository {
       }
       return { ...hydrated, bestOffer: chooseBestOffer(hydrated) }
     })
+  }
+
+  replaceMonthlyReleases(
+    region: StoreRegionId,
+    month: string,
+    releases: StoreRelease[]
+  ): void {
+    const cache = ensureRegion(region)
+    cache.monthlyReleases = releases
+    cache.releaseCalendarMonth = month
+    cache.releaseCalendarUpdatedAt = Date.now()
+    cache.updatedAt = Date.now()
+    scheduleDatabasePersist()
   }
 
   upsert(region: StoreRegionId, delta: StoreProduct): boolean {
@@ -202,10 +219,14 @@ export class StoreRepository {
 
   pruneUnverifiedProducts(region: StoreRegionId): number {
     const cache = ensureRegion(region)
-    const wishlist = databaseState.steamWishlist
+    const steamWishlist = databaseState.steamWishlist
+    const orbitWishlist = new Set(databaseState.orbitWishlistIds)
     const next = Object.fromEntries(
       Object.entries(cache.products).filter(
-        ([id, product]) => Boolean(product.detailsUpdatedAt) || Object.hasOwn(wishlist, id)
+        ([id, product]) =>
+          Boolean(product.detailsUpdatedAt) ||
+          Object.hasOwn(steamWishlist, id) ||
+          orbitWishlist.has(id)
       )
     )
     const removed = Object.keys(cache.products).length - Object.keys(next).length
@@ -254,11 +275,20 @@ export class StoreRepository {
   getSnapshot(
     region: StoreRegionId,
     isRefreshing: boolean,
-    changedSinceLastRefresh: number
+    changedSinceLastRefresh: number,
+    releaseCalendarError = false
   ): StoreSnapshot {
     const cache = ensureRegion(region)
+    const orbitWishlist = new Set(databaseState.orbitWishlistIds)
     return {
       products: this.getProducts(region),
+      monthlyReleases: (cache.monthlyReleases ?? []).map((release) => ({
+        ...release,
+        orbitWishlisted: orbitWishlist.has(release.id)
+      })),
+      releaseCalendarMonth: cache.releaseCalendarMonth,
+      releaseCalendarUpdatedAt: cache.releaseCalendarUpdatedAt,
+      releaseCalendarError,
       region,
       updatedAt: cache.updatedAt,
       lastSuccessfulRefreshAt: cache.lastSuccessfulRefreshAt,

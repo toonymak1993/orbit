@@ -1,5 +1,10 @@
 import { EventEmitter } from 'node:events'
-import type { GameMetadata, LibrarySnapshot } from '@shared/ipc'
+import type {
+  GameMetadata,
+  LibraryDetectionMethod,
+  LibraryProviderStatus,
+  LibrarySnapshot
+} from '@shared/ipc'
 import { artworkService } from '../imageCache'
 import { gameRepository } from '../library/gameRepository'
 import type { LibraryProviderAdapter } from '../library/libraryProvider'
@@ -53,6 +58,15 @@ export class XboxLibraryService
 {
   readonly provider = 'xbox' as const
   private refreshInFlight: Promise<LibrarySnapshot> | null = null
+  private providerStatus: LibraryProviderStatus = {
+    provider: 'xbox',
+    state: 'idle',
+    connection: 'automatic',
+    methods: [],
+    gameCount: 0,
+    installedCount: 0,
+    installableCount: 0
+  }
 
   constructor() {
     super()
@@ -92,6 +106,14 @@ export class XboxLibraryService
     return gameRepository.getSnapshot()
   }
 
+  getProviderStatus(): LibraryProviderStatus {
+    return {
+      ...this.providerStatus,
+      ...gameRepository.getProviderCounts('xbox'),
+      methods: [...this.providerStatus.methods]
+    }
+  }
+
   async refresh(): Promise<LibrarySnapshot> {
     if (this.refreshInFlight) return this.refreshInFlight
     this.refreshInFlight = this.doRefresh()
@@ -104,6 +126,11 @@ export class XboxLibraryService
 
   private async doRefresh(): Promise<LibrarySnapshot> {
     syncCoordinator.begin('library', 4, 0, 'xbox-app', 'xbox')
+    this.setProviderStatus({
+      state: 'scanning',
+      connection: 'automatic',
+      methods: []
+    })
     const [appLibraryResult, installedResult] = await Promise.allSettled([
       scanXboxAppLibrary(),
       scanInstalledXboxGames()
@@ -169,12 +196,54 @@ export class XboxLibraryService
       syncCoordinator.complete('library', 'xbox', 'xbox')
     }
 
+    const methods: LibraryDetectionMethod[] = []
+    if (appLibraryResult.status === 'fulfilled') methods.push('xbox-app-cache')
+    if (installedResult.status === 'fulfilled') methods.push('windows-packages')
+    const counts = gameRepository.getProviderCounts('xbox')
+    const allSourcesFailed =
+      appLibraryResult.status === 'rejected' && installedResult.status === 'rejected'
+    const appLibraryReady = Boolean(appLibrary?.available && appLibrary.activeSubscription)
+    const oneSourceFailed =
+      appLibraryResult.status === 'rejected' || installedResult.status === 'rejected'
+    this.setProviderStatus({
+      state: allSourcesFailed
+        ? 'error'
+        : oneSourceFailed
+          ? 'partial'
+          : appLibraryReady
+            ? 'ready'
+            : 'local-only',
+      connection: 'automatic',
+      methods,
+      issue: allSourcesFailed || oneSourceFailed || !appLibraryReady
+        ? 'source-unavailable'
+        : counts.gameCount === 0
+          ? 'no-games-found'
+          : undefined,
+      lastCheckedAt: Date.now()
+    })
+
     this.emitSnapshot()
     return this.getSnapshot()
   }
 
   private emitSnapshot(): void {
     this.emit('updated', this.getSnapshot())
+  }
+
+  private setProviderStatus(
+    next: Omit<
+      LibraryProviderStatus,
+      'provider' | 'gameCount' | 'installedCount' | 'installableCount'
+    >
+  ): void {
+    this.providerStatus = {
+      provider: 'xbox',
+      ...gameRepository.getProviderCounts('xbox'),
+      ...next,
+      methods: [...next.methods]
+    }
+    this.emitSnapshot()
   }
 }
 

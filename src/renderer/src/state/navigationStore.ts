@@ -1,8 +1,8 @@
 import { create } from 'zustand'
 
-export type MainView = 'home' | 'library' | 'store' | 'settings'
+export type MainView = 'home' | 'library' | 'releases' | 'store' | 'settings'
 
-export const MAIN_VIEW_ORDER: MainView[] = ['home', 'library', 'store', 'settings']
+export const MAIN_VIEW_ORDER: MainView[] = ['home', 'library', 'releases', 'store', 'settings']
 export type OnboardingStep = 'welcome' | 'steam-login' | 'epic-login' | 'success'
 export type AppPhase = 'onboarding' | 'main'
 

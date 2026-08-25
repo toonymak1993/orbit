@@ -13,7 +13,7 @@ interface AuthState {
 
 let unsubscribe: (() => void) | null = null
 
-export const useAuthStore = create<AuthState>((set) => ({
+export const useAuthStore = create<AuthState>((set, get) => ({
   account: null,
   status: { state: 'idle' },
   checkedExistingSession: false,
@@ -24,15 +24,28 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 
   startLogin: async () => {
+    if (get().status.state === 'waiting-for-browser') return
+
     unsubscribe?.()
-    set({ status: { state: 'idle' } })
+    set({ status: { state: 'waiting-for-browser' } })
     unsubscribe = window.api.steam.onStatus((status) => {
       set({ status })
       if (status.state === 'success') {
         set({ account: status.account })
       }
     })
-    await window.api.steam.startLogin()
+    try {
+      await window.api.steam.startLogin()
+    } catch (error) {
+      unsubscribe?.()
+      unsubscribe = null
+      set({
+        status: {
+          state: 'error',
+          message: error instanceof Error ? error.message : 'Steam login could not be started.'
+        }
+      })
+    }
   },
 
   cancelLogin: async () => {

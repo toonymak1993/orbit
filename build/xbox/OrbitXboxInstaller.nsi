@@ -1,5 +1,8 @@
 Unicode true
-RequestExecutionLevel admin
+; The bootstrapper stays in the interactive user's context. The PowerShell
+; installer elevates only the machine-wide preparation and verifies that UAC
+; did not switch to a different account before doing the per-user AppX install.
+RequestExecutionLevel user
 SetCompressor /SOLID lzma
 SetCompressorDictSize 32
 
@@ -38,9 +41,9 @@ VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright 2026 Luis Garcia"
 !define MUI_WELCOMEFINISHPAGE_BITMAP "${ORBIT_ROOT}\build\installerSidebar.bmp"
 !define MUI_ABORTWARNING
 !define MUI_WELCOMEPAGE_TITLE "ORBIT ${DISPLAY_VERSION} Xbox Mode"
-!define MUI_WELCOMEPAGE_TEXT "This setup installs the ORBIT beta as a Windows Gaming Home app.$\r$\n$\r$\nIt trusts only the bundled ORBIT self-signed certificate in Local Machine\Trusted People, enables Developer Mode for the SCCD capability, and installs the signed AppX package."
+!define MUI_WELCOMEPAGE_TEXT "This setup installs the ORBIT beta as a Windows Gaming Home app.$\r$\n$\r$\nAfter administrator approval it validates the complete package contract, trusts only the bundled ORBIT self-signed certificate in Local Machine\Trusted People, enables Developer Mode for the beta capability, and installs the signed AppX for this Windows account."
 !define MUI_FINISHPAGE_TITLE "ORBIT is installed for Xbox Mode"
-!define MUI_FINISHPAGE_TEXT "Windows Full screen experience settings will open next. Under Choose home app, select ORBIT."
+!define MUI_FINISHPAGE_TEXT "Windows Xbox Mode settings will open next. Under Choose home app, select ORBIT."
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_INSTFILES

@@ -3,16 +3,25 @@ import { electronAPI } from '@electron-toolkit/preload'
 import {
   IPC,
   type AppControlAction,
+  type CustomGameCommitInput,
+  type CustomGameDraft,
+  type CustomGameImportSource,
+  type CustomGameSaveSource,
   type EpicLoginStatus,
   type GameCompletionTimes,
   type GameAchievementsSnapshot,
   type GameLaunchStatus,
+  type HardwareControlStatus,
   type ImageOrientation,
   type ImageUpdate,
   type LibrarySnapshot,
   type LibraryStats,
+  type LocalGameBackupResult,
+  type OrbitBackgroundServiceAction,
+  type OrbitBackgroundServiceStatus,
   type OrbitSettings,
   type ResolvedImage,
+  type SteamGridDbArtworkOptions,
   type SteamLoginStatus,
   type StoreRegionId,
   type StoreSearchResponse,
@@ -26,6 +35,30 @@ const orbitApi = {
     get: (): Promise<OrbitSettings> => ipcRenderer.invoke(IPC.settingsGet),
     set: (partial: Partial<OrbitSettings>): Promise<OrbitSettings> =>
       ipcRenderer.invoke(IPC.settingsSet, partial)
+  },
+  backgroundService: {
+    getStatus: (): Promise<OrbitBackgroundServiceStatus> =>
+      ipcRenderer.invoke(IPC.backgroundServiceGetStatus),
+    control: (action: OrbitBackgroundServiceAction): Promise<OrbitBackgroundServiceStatus> =>
+      ipcRenderer.invoke(IPC.backgroundServiceControl, action),
+    onStatus: (callback: (status: OrbitBackgroundServiceStatus) => void): (() => void) => {
+      const listener = (
+        _e: Electron.IpcRendererEvent,
+        status: OrbitBackgroundServiceStatus
+      ): void => callback(status)
+      ipcRenderer.on(IPC.backgroundServiceStatus, listener)
+      return () => ipcRenderer.removeListener(IPC.backgroundServiceStatus, listener)
+    }
+  },
+  hardwareControl: {
+    getStatus: (): Promise<HardwareControlStatus> =>
+      ipcRenderer.invoke(IPC.hardwareControlGetStatus),
+    onStatus: (callback: (status: HardwareControlStatus) => void): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, status: HardwareControlStatus): void =>
+        callback(status)
+      ipcRenderer.on(IPC.hardwareControlStatus, listener)
+      return () => ipcRenderer.removeListener(IPC.hardwareControlStatus, listener)
+    }
   },
   steam: {
     getAccount: () => ipcRenderer.invoke(IPC.steamGetAccount),
@@ -55,6 +88,29 @@ const orbitApi = {
     get: (): Promise<LibrarySnapshot> => ipcRenderer.invoke(IPC.libraryGet),
     stats: (): Promise<LibraryStats> => ipcRenderer.invoke(IPC.libraryStatsGet),
     refresh: (): Promise<LibrarySnapshot> => ipcRenderer.invoke(IPC.libraryRefresh),
+    custom: {
+      beginImport: (source: CustomGameImportSource): Promise<CustomGameDraft | null> =>
+        ipcRenderer.invoke(IPC.customGameBeginImport, source),
+      selectArtwork: (draftId: string): Promise<CustomGameDraft | null> =>
+        ipcRenderer.invoke(IPC.customGameSelectArtwork, draftId),
+      selectSave: (
+        draftId: string,
+        source: CustomGameSaveSource
+      ): Promise<CustomGameDraft | null> =>
+        ipcRenderer.invoke(IPC.customGameSelectSave, draftId, source),
+      clearSave: (draftId: string): Promise<CustomGameDraft> =>
+        ipcRenderer.invoke(IPC.customGameClearSave, draftId),
+      commit: (input: CustomGameCommitInput): Promise<LibrarySnapshot> =>
+        ipcRenderer.invoke(IPC.customGameCommit, input),
+      cancel: (draftId: string): Promise<void> =>
+        ipcRenderer.invoke(IPC.customGameCancel, draftId),
+      remove: (gameId: string): Promise<LibrarySnapshot> =>
+        ipcRenderer.invoke(IPC.customGameRemove, gameId),
+      backup: (gameId: string): Promise<LocalGameBackupResult> =>
+        ipcRenderer.invoke(IPC.customGameBackup, gameId),
+      openBackups: (gameId: string): Promise<void> =>
+        ipcRenderer.invoke(IPC.customGameOpenBackups, gameId)
+    },
     onUpdated: (callback: (snapshot: LibrarySnapshot) => void): (() => void) => {
       const listener = (_e: Electron.IpcRendererEvent, snapshot: LibrarySnapshot): void =>
         callback(snapshot)
@@ -80,6 +136,22 @@ const orbitApi = {
   image: {
     resolve: (gameId: string, orientation: ImageOrientation): Promise<ResolvedImage | null> =>
       ipcRenderer.invoke(IPC.imageResolve, gameId, orientation),
+    listSteamGridDb: (gameId: string): Promise<SteamGridDbArtworkOptions> =>
+      ipcRenderer.invoke(IPC.imageSteamGridDbList, gameId),
+    applySteamGridDb: (gameId: string, artworkId: number): Promise<boolean> =>
+      ipcRenderer.invoke(IPC.imageSteamGridDbApply, gameId, artworkId),
+    selectCustom: (gameId: string): Promise<boolean> =>
+      ipcRenderer.invoke(IPC.imageSelectCustom, gameId),
+    resetCustom: (gameId: string): Promise<boolean> =>
+      ipcRenderer.invoke(IPC.imageResetCustom, gameId),
+    hasCustom: (gameId: string): Promise<boolean> =>
+      ipcRenderer.invoke(IPC.imageHasCustom, gameId),
+    reportFailure: (
+      gameId: string,
+      orientation: ImageOrientation,
+      revision: number
+    ): Promise<void> =>
+      ipcRenderer.invoke(IPC.imageReportFailure, gameId, orientation, revision),
     onUpdated: (callback: (update: ImageUpdate) => void): (() => void) => {
       const listener = (_e: Electron.IpcRendererEvent, update: ImageUpdate): void => callback(update)
       ipcRenderer.on(IPC.imageUpdated, listener)

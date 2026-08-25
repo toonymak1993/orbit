@@ -2,6 +2,7 @@ import { BrowserWindow, safeStorage, session } from 'electron'
 import Store from 'electron-store'
 import type { EpicAccount, EpicLoginStatus } from '@shared/ipc'
 import { t } from '../i18n'
+import { fetchWithElectronNet } from '../networkFetch'
 
 const SESSION_PARTITION = 'persist:orbit-epic-login'
 const EPIC_LOGIN_URL = 'https://www.epicgames.com/id/login?responseType=code'
@@ -118,7 +119,7 @@ export class EpicAuthManager {
     const headers = new Headers(init?.headers)
     headers.set('Authorization', `bearer ${accessToken}`)
     headers.set('User-Agent', EPIC_USER_AGENT)
-    const response = await fetch(url, {
+    const response = await fetchWithElectronNet(url, {
       ...init,
       headers,
       signal: init?.signal ?? AbortSignal.timeout(25_000)
@@ -265,7 +266,7 @@ export class EpicAuthManager {
   }
 
   private async exchangeTokens(fields: Record<string, string>): Promise<EpicOAuthTokens> {
-    const response = await fetch(EPIC_OAUTH_URL, {
+    const response = await fetchWithElectronNet(EPIC_OAUTH_URL, {
       method: 'POST',
       headers: {
         Authorization: `basic ${EPIC_LAUNCHER_BASIC}`,

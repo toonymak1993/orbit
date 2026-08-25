@@ -1,5 +1,6 @@
 import { HowLongToBeatService, SearchModifier } from 'howlongtobeat-ts'
 import type { GameCompletionTimes, LibraryGame } from '@shared/ipc'
+import { fetchWithElectronNet } from './networkFetch'
 
 const POSITIVE_TTL_MS = 120 * 24 * 60 * 60 * 1000
 const NEGATIVE_TTL_MS = 7 * 24 * 60 * 60 * 1000
@@ -7,7 +8,8 @@ const NEGATIVE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 const hltb = new HowLongToBeatService({
   minSimilarity: 0.72,
   timeout: 15_000,
-  retries: 1
+  retries: 1,
+  fetch: fetchWithElectronNet
 })
 
 function isFresh(value: GameCompletionTimes): boolean {

@@ -50,6 +50,13 @@ function requestImage(gameId: string, orientation: ImageOrientation): Promise<Re
       publish(key, image)
       return image
     })
+    .catch(() => {
+      // An IPC/startup failure is not a durable "missing artwork" result. Show
+      // the local fallback now, but let a later mount retry the resolution.
+      resolvedCache.delete(key)
+      for (const listener of listeners.get(key) ?? []) listener(null)
+      return null
+    })
     .finally(() => inFlight.delete(key))
   inFlight.set(key, request)
   return request
@@ -77,6 +84,7 @@ export function GameImage({
   const key = imageKey(gameId, orientation)
   const [resolved, setResolved] = useState<ResolvedImage | null | undefined>(() => resolvedCache.get(key))
   const [previewFailed, setPreviewFailed] = useState(false)
+  const [failedRevision, setFailedRevision] = useState<number | null>(null)
 
   useEffect(() => {
     ensureArtworkListener()
@@ -96,7 +104,16 @@ export function GameImage({
 
   useEffect(() => setPreviewFailed(false), [previewUrl])
 
-  if ((resolved === undefined || resolved === null) && previewUrl && !previewFailed) {
+  const displayed = resolved?.revision === failedRevision ? null : resolved
+  const reportResolvedFailure = (): void => {
+    if (!resolved) return
+    setFailedRevision(resolved.revision)
+    void window.api.image
+      .reportFailure(gameId, orientation, resolved.revision)
+      .catch(() => undefined)
+  }
+
+  if ((displayed === undefined || displayed === null) && previewUrl && !previewFailed) {
     return (
       <img
         src={previewUrl}
@@ -110,11 +127,11 @@ export function GameImage({
     )
   }
 
-  if (resolved === undefined) {
+  if (displayed === undefined) {
     return <div className={`animate-pulse bg-white/5 ${className}`} />
   }
 
-  if (resolved === null) {
+  if (displayed === null) {
     return (
       <div
         className={`flex items-center justify-center bg-gradient-to-br text-lg font-bold text-black/70 ${gradientFor(name)} ${className}`}
@@ -124,18 +141,19 @@ export function GameImage({
     )
   }
 
-  if (resolved.contain && fit !== 'cover') {
+  if (displayed.contain && fit !== 'cover') {
     return (
       <div
         className={`flex items-center justify-center bg-gradient-to-br ${orientation === 'icon' ? 'p-2' : 'p-6'} ${gradientFor(name)} ${className}`}
       >
         <img
-          key={resolved.revision}
-          src={resolved.url}
+          key={displayed.revision}
+          src={displayed.url}
           alt=""
           draggable={false}
           loading={orientation === 'horizontal' ? 'eager' : 'lazy'}
           decoding="async"
+          onError={reportResolvedFailure}
           className={`${orientation === 'icon' ? 'max-h-[88%] max-w-[88%]' : 'max-h-[45%] max-w-[70%]'} object-contain drop-shadow-lg`}
         />
       </div>
@@ -144,12 +162,13 @@ export function GameImage({
 
   return (
     <img
-      key={resolved.revision}
-      src={resolved.url}
+      key={displayed.revision}
+      src={displayed.url}
       alt=""
       draggable={false}
       loading={orientation === 'horizontal' ? 'eager' : 'lazy'}
       decoding="async"
+      onError={reportResolvedFailure}
       className={className}
     />
   )

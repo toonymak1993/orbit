@@ -1,4 +1,10 @@
-import type { ImageOrientation } from '@shared/ipc'
+import type { ImageOrientation, SteamGridDbArtworkOption } from '@shared/ipc'
+import { fetchWithElectronNet } from './networkFetch'
+import {
+  isTransientArtworkStatus,
+  runArtworkNetworkAttempt,
+  type ArtworkNetworkAttempt
+} from './artworkNetworkPolicy'
 
 /**
  * Optional fallback artwork source. Steam's own CDN occasionally 404s for a given
@@ -14,9 +20,18 @@ const DIMENSIONS: Record<SteamGridDbOrientation, string> = {
 }
 
 interface SteamGridDbAsset {
+  id?: number
   url: string
+  thumb?: string
   width?: number
   height?: number
+  author?: {
+    name?: string
+  }
+}
+
+export interface SteamGridDbArtworkCandidate extends SteamGridDbArtworkOption {
+  downloadUrl: string
 }
 
 interface SteamGridDbGame {
@@ -24,7 +39,28 @@ interface SteamGridDbGame {
   name: string
 }
 
-const searchCache = new Map<string, Promise<number | null>>()
+interface SearchCacheEntry {
+  gameId: number | null
+  expiresAt: number
+}
+
+const API_TIMEOUT_MS = 7_000
+const FOUND_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000
+const MISSING_CACHE_TTL_MS = 6 * 60 * 60 * 1000
+const MAX_SEARCH_CACHE_ENTRIES = 1_000
+const MAX_PICKER_ASSETS = 24
+const searchCache = new Map<string, SearchCacheEntry>()
+const searchInFlight = new Map<string, Promise<ArtworkNetworkAttempt<number>>>()
+
+function cacheSearchResult(cacheKey: string, entry: SearchCacheEntry): void {
+  searchCache.delete(cacheKey)
+  searchCache.set(cacheKey, entry)
+  while (searchCache.size > MAX_SEARCH_CACHE_ENTRIES) {
+    const oldestKey = searchCache.keys().next().value
+    if (oldestKey === undefined) break
+    searchCache.delete(oldestKey)
+  }
+}
 
 function searchKey(value: string): string {
   return value
@@ -55,52 +91,156 @@ function titleCoverage(query: string, candidate: string): number {
   return matches / queryTokens.size
 }
 
-async function fetchJson<T>(url: string, apiKey: string): Promise<T | null> {
-  try {
-    const response = await fetch(url, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-      signal: AbortSignal.timeout(20_000)
-    })
-    if (!response.ok) return null
-    return (await response.json()) as T
-  } catch {
-    return null
+function credentialTag(apiKey: string): string {
+  let hash = 0
+  for (let index = 0; index < apiKey.length; index++) {
+    hash = (hash * 31 + apiKey.charCodeAt(index)) >>> 0
   }
+  return hash.toString(16)
 }
 
-async function searchGameId(gameName: string, apiKey: string): Promise<number | null> {
-  const normalized = searchKey(gameName)
-  const cached = searchCache.get(normalized)
-  if (cached) return cached
+async function fetchJson<T>(
+  url: string,
+  apiKey: string
+): Promise<ArtworkNetworkAttempt<T>> {
+  return runArtworkNetworkAttempt<T>(`steamgriddb-api:${credentialTag(apiKey)}`, async () => {
+    const response = await fetchWithElectronNet(url, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(API_TIMEOUT_MS)
+    })
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined)
+      return { state: isTransientArtworkStatus(response.status) ? 'unavailable' : 'missing' }
+    }
+    return { state: 'success', value: (await response.json()) as T }
+  })
+}
 
-  const request = (async (): Promise<number | null> => {
+async function searchGameId(
+  gameName: string,
+  apiKey: string
+): Promise<ArtworkNetworkAttempt<number>> {
+  const normalized = searchKey(gameName)
+  const cacheKey = `${normalized}:${credentialTag(apiKey)}`
+  const cached = searchCache.get(cacheKey)
+  if (cached && cached.expiresAt > Date.now()) {
+    cacheSearchResult(cacheKey, cached)
+    return cached.gameId === null
+      ? { state: 'missing' }
+      : { state: 'success', value: cached.gameId }
+  }
+  if (cached) searchCache.delete(cacheKey)
+  const pending = searchInFlight.get(cacheKey)
+  if (pending) return pending
+
+  const request = (async (): Promise<ArtworkNetworkAttempt<number>> => {
     const queries = [...new Set([gameName.trim(), stripEditionWords(gameName)])].filter(Boolean)
     for (const query of queries) {
       const url = `https://www.steamgriddb.com/api/v2/search/autocomplete/${encodeURIComponent(query)}`
       const result = await fetchJson<{ success: boolean; data?: SteamGridDbGame[] }>(url, apiKey)
-      if (!result?.success || !result.data?.length) continue
+      if (result.state === 'unavailable') return result
+      if (result.state === 'missing' || !result.value.success || !result.value.data?.length) continue
 
-      const ranked = result.data
+      const ranked = result.value.data
         .map((game) => ({ game, score: titleCoverage(stripEditionWords(gameName), game.name) }))
         .sort((a, b) => b.score - a.score || a.game.name.length - b.game.name.length)
-      if (ranked[0]?.score >= 0.65) return ranked[0].game.id
+      if (ranked[0]?.score >= 0.65) {
+        const gameId = ranked[0].game.id
+        cacheSearchResult(cacheKey, { gameId, expiresAt: Date.now() + FOUND_CACHE_TTL_MS })
+        return { state: 'success', value: gameId }
+      }
     }
-    return null
+    cacheSearchResult(cacheKey, {
+      gameId: null,
+      expiresAt: Date.now() + MISSING_CACHE_TTL_MS
+    })
+    return { state: 'missing' }
   })()
 
-  searchCache.set(normalized, request)
-  return request
+  searchInFlight.set(cacheKey, request)
+  return request.finally(() => searchInFlight.delete(cacheKey))
 }
 
 async function fetchAssets(
   target: `steam/${number}` | `game/${number}`,
   apiKey: string,
   orientation: SteamGridDbOrientation
-): Promise<SteamGridDbAsset[]> {
+): Promise<ArtworkNetworkAttempt<SteamGridDbAsset[]>> {
   const assetType = orientation === 'vertical' ? 'grids' : 'heroes'
-  const url = `https://www.steamgriddb.com/api/v2/${assetType}/${target}?dimensions=${DIMENSIONS[orientation]}`
+  const url = `https://www.steamgriddb.com/api/v2/${assetType}/${target}?dimensions=${DIMENSIONS[orientation]}&types=static&nsfw=false`
   const result = await fetchJson<{ success: boolean; data?: SteamGridDbAsset[] }>(url, apiKey)
-  return result?.success && result.data ? result.data : []
+  if (result.state !== 'success') return result
+  if (!result.value.success) return { state: 'missing' }
+  return { state: 'success', value: result.value.data ?? [] }
+}
+
+export type SteamGridDbImageResult = ArtworkNetworkAttempt<string>
+
+export function isSteamGridDbAssetUrl(value: string): boolean {
+  try {
+    const url = new URL(value)
+    if (url.protocol !== 'https:') return false
+    if (url.username || url.password || (url.port && url.port !== '443')) return false
+    const host = url.hostname.toLowerCase()
+    if (host === 'cdn.steamgriddb.com' || host === 'cdn2.steamgriddb.com') return true
+    if (host === 'steamgriddb.s3.amazonaws.com') return true
+    return host === 's3.amazonaws.com' && url.pathname.startsWith('/steamgriddb/')
+  } catch {
+    return false
+  }
+}
+
+function toArtworkCandidates(assets: SteamGridDbAsset[]): SteamGridDbArtworkCandidate[] {
+  const seen = new Set<number>()
+  const candidates: SteamGridDbArtworkCandidate[] = []
+  for (const asset of assets) {
+    if (
+      !Number.isSafeInteger(asset.id) ||
+      (asset.id ?? 0) <= 0 ||
+      seen.has(asset.id as number) ||
+      !isSteamGridDbAssetUrl(asset.url)
+    ) {
+      continue
+    }
+    const previewUrl =
+      asset.thumb && isSteamGridDbAssetUrl(asset.thumb) ? asset.thumb : asset.url
+    seen.add(asset.id as number)
+    candidates.push({
+      id: asset.id as number,
+      previewUrl,
+      downloadUrl: asset.url,
+      width: asset.width,
+      height: asset.height,
+      authorName: asset.author?.name?.trim().slice(0, 80) || undefined
+    })
+    if (candidates.length >= MAX_PICKER_ASSETS) break
+  }
+  return candidates
+}
+
+export async function fetchSteamGridDbArtworkCandidates(
+  appId: number | undefined,
+  apiKey: string,
+  gameName?: string
+): Promise<ArtworkNetworkAttempt<SteamGridDbArtworkCandidate[]>> {
+  if (appId) {
+    const directAssets = await fetchAssets(`steam/${appId}`, apiKey, 'vertical')
+    if (directAssets.state === 'unavailable') return directAssets
+    if (directAssets.state === 'success') {
+      const candidates = toArtworkCandidates(directAssets.value)
+      if (candidates.length > 0) return { state: 'success', value: candidates }
+    }
+  }
+
+  if (!gameName?.trim()) return { state: 'missing' }
+  const gameId = await searchGameId(gameName, apiKey)
+  if (gameId.state !== 'success') return gameId
+  const nameAssets = await fetchAssets(`game/${gameId.value}`, apiKey, 'vertical')
+  if (nameAssets.state !== 'success') return nameAssets
+  const candidates = toArtworkCandidates(nameAssets.value)
+  return candidates.length > 0
+    ? { state: 'success', value: candidates }
+    : { state: 'missing' }
 }
 
 export async function fetchSteamGridDbImage(
@@ -108,17 +248,31 @@ export async function fetchSteamGridDbImage(
   apiKey: string,
   orientation: SteamGridDbOrientation,
   gameName?: string
-): Promise<string | null> {
+): Promise<SteamGridDbImageResult> {
+  if (orientation === 'vertical') {
+    const candidates = await fetchSteamGridDbArtworkCandidates(appId, apiKey, gameName)
+    if (candidates.state !== 'success') return candidates
+    return candidates.value[0]
+      ? { state: 'success', value: candidates.value[0].downloadUrl }
+      : { state: 'missing' }
+  }
+
   if (appId) {
     const directAssets = await fetchAssets(`steam/${appId}`, apiKey, orientation)
-    if (directAssets.length > 0) return directAssets[0].url
+    if (directAssets.state === 'unavailable') return directAssets
+    if (directAssets.state === 'success' && directAssets.value.length > 0) {
+      return { state: 'success', value: directAssets.value[0].url }
+    }
   }
 
   // Brand-new Steam app IDs often reach SteamGridDB later than the game name.
   // Search by title (and a conservative edition-stripped alias) before giving up.
-  if (!gameName?.trim()) return null
+  if (!gameName?.trim()) return { state: 'missing' }
   const gameId = await searchGameId(gameName, apiKey)
-  if (!gameId) return null
-  const nameAssets = await fetchAssets(`game/${gameId}`, apiKey, orientation)
-  return nameAssets[0]?.url ?? null
+  if (gameId.state !== 'success') return gameId
+  const nameAssets = await fetchAssets(`game/${gameId.value}`, apiKey, orientation)
+  if (nameAssets.state !== 'success') return nameAssets
+  return nameAssets.value[0]
+    ? { state: 'success', value: nameAssets.value[0].url }
+    : { state: 'missing' }
 }

@@ -13,6 +13,12 @@ export type ThemeId =
   | 'monochrome'
 export type UiDensity = 'standard' | 'compact'
 export type HomeLayoutId = 'orbit' | 'float'
+export type GameCardSize = 'compact' | 'standard' | 'large'
+export type BackdropIntensity = 'subtle' | 'balanced' | 'vivid'
+export const NOTIFICATION_POSITIONS = ['top-right', 'top-center', 'bottom-right'] as const
+export type NotificationPosition = (typeof NOTIFICATION_POSITIONS)[number]
+export const NOTIFICATION_MOTIONS = ['slide', 'lift', 'scale'] as const
+export type NotificationMotion = (typeof NOTIFICATION_MOTIONS)[number]
 export type Language = 'en' | 'de'
 export type AudioPreset =
   | 'orbit'
@@ -26,10 +32,60 @@ export type AudioPreset =
 export type StoreRegionId = 'eu' | 'us' | 'gb' | 'ca' | 'au'
 export type SystemPowerAction = 'sleep' | 'restart' | 'shutdown'
 export type AppControlAction = 'relaunch' | 'quit'
+export const HARDWARE_CONTROL_BUTTONS = [
+  'menu',
+  'view',
+  'guide',
+  'a',
+  'b',
+  'x',
+  'y',
+  'dpad-up',
+  'dpad-down',
+  'dpad-left',
+  'dpad-right',
+  'left-trigger',
+  'right-trigger',
+  'left-bumper',
+  'right-bumper',
+  'left-stick',
+  'right-stick'
+] as const
+export type HardwareControlButton = (typeof HARDWARE_CONTROL_BUTTONS)[number]
+export const HARDWARE_CONTROL_HOLD_SECONDS = [1, 1.5, 2, 3] as const
+export type HardwareControlHoldSeconds = (typeof HARDWARE_CONTROL_HOLD_SECONDS)[number]
+
+export interface HardwareControlStatus {
+  state: 'disabled' | 'starting' | 'ready' | 'unavailable'
+  connectedControllers: number
+  reason?: 'unsupported-platform' | 'monitor-failed' | 'service-not-running'
+  lastInputAt?: number
+  lastTriggerAt?: number
+  lastPressDurationMs?: number
+  lastAnyInputAt?: number
+  lastRawButtonMask?: number
+}
+
+export type OrbitBackgroundServiceAction = 'install' | 'repair' | 'restart' | 'remove'
+
+export interface OrbitBackgroundServiceStatus {
+  installation: 'not-installed' | 'installed' | 'repair-needed' | 'unsupported'
+  runtime: 'stopped' | 'starting' | 'running'
+  hardwareControl: HardwareControlStatus
+  lastActivationAt?: number
+  lastActivationResult?: 'focused' | 'launched' | 'failed'
+  reason?:
+    | 'unsupported-platform'
+    | 'login-item-disabled'
+    | 'configuration-mismatch'
+    | 'agent-unreachable'
+}
 
 export interface OrbitSettings {
   theme: ThemeId
   homeLayout: HomeLayoutId
+  gameCardSize: GameCardSize
+  backdropIntensity: BackdropIntensity
   uiDensity: UiDensity
   language: Language
   audioPreset: AudioPreset
@@ -40,6 +96,12 @@ export interface OrbitSettings {
   showHomeBanners: boolean
   showAchievements: boolean
   closeLaunchersAfterGame: boolean
+  notificationsEnabled: boolean
+  notificationPosition: NotificationPosition
+  notificationMotion: NotificationMotion
+  hardwareControlEnabled: boolean
+  hardwareControlButton: HardwareControlButton
+  hardwareControlHoldSeconds: HardwareControlHoldSeconds
 }
 
 export type StoreLoginState = 'idle' | 'waiting-for-browser' | 'success' | 'error'
@@ -151,6 +213,40 @@ export interface GameMetadata {
   completionTimes?: GameCompletionTimes
 }
 
+export type LocalGameBackupState = 'never' | 'success' | 'failed'
+
+export interface LocalGameConfig {
+  executablePath: string
+  savePath?: string
+  backupEnabled: boolean
+  lastBackupAt?: number
+  lastBackupState?: LocalGameBackupState
+}
+
+export type CustomGameImportSource = 'executable' | 'folder'
+export type CustomGameSaveSource = 'file' | 'folder'
+
+export interface CustomGameDraft {
+  id: string
+  name: string
+  executablePath: string
+  installDir: string
+  iconPreviewUrl?: string
+  artworkPreviewUrl?: string
+  savePath?: string
+}
+
+export interface CustomGameCommitInput {
+  draftId: string
+  name: string
+}
+
+export interface LocalGameBackupResult {
+  state: 'success' | 'failed' | 'skipped'
+  completedAt: number
+  backupPath?: string
+}
+
 /**
  * Provider-neutral library record. `id` is the durable identity used by ORBIT's
  * database (`<provider>:<providerGameId>`); `appId` remains Steam-specific data
@@ -172,8 +268,49 @@ export interface LibraryGame {
   lastStartedAt?: number
   installed: boolean
   installDir?: string
+  /** Locally detected provider update that has not finished downloading yet. */
+  updateAvailable?: boolean
+  local?: LocalGameConfig
   addedAt: number
   updatedAt: number
+}
+
+export type LibraryStatusProvider = 'steam' | 'epic' | 'xbox'
+export type LibraryProviderState =
+  | 'idle'
+  | 'scanning'
+  | 'ready'
+  | 'partial'
+  | 'local-only'
+  | 'error'
+export type LibraryProviderConnection = 'connected' | 'not-connected' | 'automatic'
+export type LibraryDetectionMethod =
+  | 'local-manifests'
+  | 'account-api'
+  | 'community-profile'
+  | 'launcher-session'
+  | 'epic-catalog'
+  | 'xbox-app-cache'
+  | 'windows-packages'
+  | 'cached-data'
+export type LibraryProviderIssue =
+  | 'not-connected'
+  | 'online-library-unavailable'
+  | 'metadata-pending'
+  | 'source-unavailable'
+  | 'no-games-found'
+
+export interface LibraryProviderStatus {
+  provider: LibraryStatusProvider
+  state: LibraryProviderState
+  connection: LibraryProviderConnection
+  methods: LibraryDetectionMethod[]
+  gameCount: number
+  installedCount: number
+  installableCount: number
+  pendingCount?: number
+  issue?: LibraryProviderIssue
+  lastCheckedAt?: number
 }
 
 export interface LibrarySnapshot {
@@ -184,6 +321,8 @@ export interface LibrarySnapshot {
   recentGameIds: string[]
   loadedAt: number
   isLoadingMetadata: boolean
+  /** Safe, user-facing provider diagnostics; no tokens, paths or account IDs. */
+  providerStatuses?: LibraryProviderStatus[]
 }
 
 export interface LibraryStats {
@@ -206,6 +345,7 @@ export interface GameLaunchStatus {
   startedAt?: number
   detectedAt?: number
   endedAt?: number
+  returnTask?: 'backing-up' | 'backup-complete' | 'backup-failed'
   message?: string
 }
 
@@ -259,6 +399,20 @@ export interface StoreProduct {
   updatedAt: number
 }
 
+export interface StoreRelease {
+  id: string
+  source: StoreOfferSource
+  sourceProductId: string
+  steamAppId?: number
+  name: string
+  releaseDate: number
+  capsuleUrl: string
+  heroUrl?: string
+  storeUrl: string
+  featured: boolean
+  orbitWishlisted: boolean
+}
+
 export interface StorePricePoint {
   priceMinor: number
   currency: string
@@ -281,6 +435,10 @@ export interface StorePriceAlert {
 
 export interface StoreSnapshot {
   products: StoreProduct[]
+  monthlyReleases: StoreRelease[]
+  releaseCalendarMonth?: string
+  releaseCalendarUpdatedAt?: number
+  releaseCalendarError: boolean
   region: StoreRegionId
   updatedAt: number
   lastSuccessfulRefreshAt?: number
@@ -307,6 +465,19 @@ export interface ImageUpdate {
   gameId: string
   orientation: ImageOrientation
   image: ResolvedImage | null
+}
+
+export interface SteamGridDbArtworkOption {
+  id: number
+  previewUrl: string
+  width?: number
+  height?: number
+  authorName?: string
+}
+
+export interface SteamGridDbArtworkOptions {
+  state: 'ready' | 'missing' | 'unavailable' | 'not-configured'
+  options: SteamGridDbArtworkOption[]
 }
 
 export type SyncPipelineId = 'library' | 'metadata' | 'artwork' | 'achievements' | 'store'
@@ -342,6 +513,15 @@ export const IPC = {
   libraryStatsGet: 'library:stats:get',
   libraryRefresh: 'library:refresh',
   libraryUpdated: 'library:updated',
+  customGameBeginImport: 'library:custom:import:begin',
+  customGameSelectArtwork: 'library:custom:artwork:select',
+  customGameSelectSave: 'library:custom:save:select',
+  customGameClearSave: 'library:custom:save:clear',
+  customGameCommit: 'library:custom:commit',
+  customGameCancel: 'library:custom:cancel',
+  customGameRemove: 'library:custom:remove',
+  customGameBackup: 'library:custom:backup',
+  customGameOpenBackups: 'library:custom:backups:open',
   gameLaunch: 'game:launch',
   gameLaunchGet: 'game:launch:get',
   gameLaunchRevealLauncher: 'game:launch:reveal-launcher',
@@ -351,7 +531,18 @@ export const IPC = {
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
   appVersion: 'app:version',
+  backgroundServiceGetStatus: 'background-service:status:get',
+  backgroundServiceControl: 'background-service:control',
+  backgroundServiceStatus: 'background-service:status',
+  hardwareControlGetStatus: 'hardware-control:status:get',
+  hardwareControlStatus: 'hardware-control:status',
   imageResolve: 'image:resolve',
+  imageSteamGridDbList: 'image:steamgriddb:list',
+  imageSteamGridDbApply: 'image:steamgriddb:apply',
+  imageSelectCustom: 'image:custom:select',
+  imageResetCustom: 'image:custom:reset',
+  imageHasCustom: 'image:custom:has',
+  imageReportFailure: 'image:failure:report',
   imageUpdated: 'image:updated',
   storeGet: 'store:get',
   storeRefresh: 'store:refresh',

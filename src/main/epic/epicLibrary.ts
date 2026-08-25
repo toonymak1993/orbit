@@ -1,5 +1,9 @@
 import { EventEmitter } from 'node:events'
-import type { LibrarySnapshot } from '@shared/ipc'
+import type {
+  LibraryDetectionMethod,
+  LibraryProviderStatus,
+  LibrarySnapshot
+} from '@shared/ipc'
 import type { LibraryProviderAdapter } from '../library/libraryProvider'
 import { gameRepository } from '../library/gameRepository'
 import { artworkService } from '../imageCache'
@@ -46,6 +50,16 @@ export class EpicLibraryService
 {
   readonly provider = 'epic' as const
   private refreshInFlight: Promise<LibrarySnapshot> | null = null
+  private pendingMetadataIds = new Set<string>()
+  private providerStatus: LibraryProviderStatus = {
+    provider: 'epic',
+    state: 'idle',
+    connection: 'not-connected',
+    methods: [],
+    gameCount: 0,
+    installedCount: 0,
+    installableCount: 0
+  }
 
   constructor() {
     super()
@@ -54,8 +68,10 @@ export class EpicLibraryService
       this.emitSnapshot()
     })
     epicMetadataService.on('updated', ({ metadata }: MetadataUpdate) => {
+      this.pendingMetadataIds.delete(metadata.providerGameId)
       if (metadata.kind !== 'game') {
         if (gameRepository.removeProviderGame('epic', metadata.providerGameId)) this.emitSnapshot()
+        this.finishMetadataStatus()
         return
       }
       const changed = gameRepository.applyProviderMetadataDelta(
@@ -77,15 +93,35 @@ export class EpicLibraryService
         if (game) artworkService.syncProvider([game], 'epic')
         this.emitSnapshot()
       }
+      this.finishMetadataStatus()
     })
     epicMetadataService.on('idle', () => {
       gameRepository.setMetadataLoading('epic', false)
+      if (this.providerStatus.issue === 'metadata-pending') {
+        const unresolved = this.pendingMetadataIds.size
+        this.setProviderStatus({
+          state: unresolved > 0 ? 'partial' : 'ready',
+          connection: 'connected',
+          methods: ['local-manifests', 'epic-catalog'],
+          pendingCount: unresolved || undefined,
+          issue: unresolved > 0 ? 'source-unavailable' : undefined,
+          lastCheckedAt: this.providerStatus.lastCheckedAt ?? Date.now()
+        })
+      }
       this.emitSnapshot()
     })
   }
 
   getSnapshot(): LibrarySnapshot {
     return gameRepository.getSnapshot()
+  }
+
+  getProviderStatus(): LibraryProviderStatus {
+    return {
+      ...this.providerStatus,
+      ...gameRepository.getProviderCounts('epic'),
+      methods: [...this.providerStatus.methods]
+    }
   }
 
   async refresh(auth: EpicAuthManager): Promise<LibrarySnapshot> {
@@ -101,6 +137,12 @@ export class EpicLibraryService
   private async doRefresh(auth: EpicAuthManager): Promise<LibrarySnapshot> {
     const account = auth.getAccount() ?? (await auth.restoreSession())
     syncCoordinator.begin('library', account ? 3 : 1, 0, 'epic-local', 'epic')
+    this.pendingMetadataIds.clear()
+    this.setProviderStatus({
+      state: 'scanning',
+      connection: account ? 'connected' : 'not-connected',
+      methods: ['local-manifests']
+    })
 
     const installed = scanInstalledEpicApps()
     gameRepository.applyInstalledProviderDelta('epic', installed.values())
@@ -112,6 +154,13 @@ export class EpicLibraryService
       const client = new EpicApiClient(auth)
       epicMetadataService.syncLibrary([], EPIC_LOCALE[settingsStore.get('language')] ?? 'en-US', 'US', client)
       syncCoordinator.complete('library', 'epic-local', 'epic')
+      this.setProviderStatus({
+        state: 'local-only',
+        connection: 'not-connected',
+        methods: ['local-manifests'],
+        issue: 'not-connected',
+        lastCheckedAt: Date.now()
+      })
       return this.getSnapshot()
     }
 
@@ -145,16 +194,48 @@ export class EpicLibraryService
           catalogItemId: asset.catalogItemId!.trim(),
           buildVersion: asset.buildVersion?.trim() || undefined
         }))
+      this.pendingMetadataIds = new Set(assets.keys())
       const locale = EPIC_LOCALE[settingsStore.get('language')] ?? 'en-US'
       const country = locale === 'de-DE' ? 'DE' : 'US'
       epicMetadataService.syncLibrary(targets, locale, country, client)
       syncCoordinator.progress('library', 3, 3, 'epic', 'epic')
       syncCoordinator.complete('library', 'epic', 'epic')
+      const pendingCount = this.pendingMetadataIds.size
+      const targetIds = new Set(targets.map((target) => target.providerGameId))
+      const pendingTargetCount = [...this.pendingMetadataIds].filter((id) =>
+        targetIds.has(id)
+      ).length
+      this.setProviderStatus({
+        state: pendingTargetCount > 0 ? 'scanning' : pendingCount > 0 ? 'partial' : 'ready',
+        connection: 'connected',
+        methods: ['local-manifests', 'epic-catalog'],
+        pendingCount: pendingCount || undefined,
+        issue:
+          pendingTargetCount > 0
+            ? 'metadata-pending'
+            : pendingCount > 0
+              ? 'source-unavailable'
+              : assets.size === 0
+                ? 'no-games-found'
+                : undefined,
+        lastCheckedAt: Date.now()
+      })
     } catch {
       // Keep both the installed delta and the last good online snapshot. An API
       // outage must never turn a populated library into an empty one.
       epicMetadataService.syncLibrary([], EPIC_LOCALE[settingsStore.get('language')] ?? 'en-US', 'US', client)
       syncCoordinator.fail('library', 'epic-cache', 'epic')
+      this.pendingMetadataIds.clear()
+      const counts = gameRepository.getProviderCounts('epic')
+      const methods: LibraryDetectionMethod[] = ['local-manifests']
+      if (counts.installableCount > 0) methods.push('cached-data')
+      this.setProviderStatus({
+        state: counts.gameCount > 0 ? 'partial' : 'error',
+        connection: 'connected',
+        methods,
+        issue: 'source-unavailable',
+        lastCheckedAt: Date.now()
+      })
     }
 
     artworkService.syncProvider(gameRepository.getGamesByProvider('epic'), 'epic')
@@ -164,6 +245,36 @@ export class EpicLibraryService
 
   private emitSnapshot(): void {
     this.emit('updated', this.getSnapshot())
+  }
+
+  private finishMetadataStatus(): void {
+    if (
+      this.pendingMetadataIds.size > 0 ||
+      this.providerStatus.issue !== 'metadata-pending'
+    ) {
+      return
+    }
+    this.setProviderStatus({
+      state: 'ready',
+      connection: 'connected',
+      methods: ['local-manifests', 'epic-catalog'],
+      lastCheckedAt: this.providerStatus.lastCheckedAt ?? Date.now()
+    })
+  }
+
+  private setProviderStatus(
+    next: Omit<
+      LibraryProviderStatus,
+      'provider' | 'gameCount' | 'installedCount' | 'installableCount'
+    >
+  ): void {
+    this.providerStatus = {
+      provider: 'epic',
+      ...gameRepository.getProviderCounts('epic'),
+      ...next,
+      methods: [...next.methods]
+    }
+    this.emitSnapshot()
   }
 }
 

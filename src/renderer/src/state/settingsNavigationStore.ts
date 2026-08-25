@@ -1,8 +1,14 @@
 import { create } from 'zustand'
 
-export type SettingsPage = 'interface' | 'libraries' | 'advanced'
+export type SettingsPage = 'appearance' | 'experience' | 'libraries' | 'hardware' | 'system'
 
-export const SETTINGS_PAGE_ORDER: SettingsPage[] = ['interface', 'libraries', 'advanced']
+export const SETTINGS_PAGE_ORDER: SettingsPage[] = [
+  'appearance',
+  'experience',
+  'libraries',
+  'hardware',
+  'system'
+]
 
 interface SettingsNavigationState {
   page: SettingsPage
@@ -12,7 +18,7 @@ interface SettingsNavigationState {
 }
 
 export const useSettingsNavigationStore = create<SettingsNavigationState>((set, get) => ({
-  page: 'interface',
+  page: 'appearance',
   direction: 1,
   setPage: (page) => {
     const currentIndex = SETTINGS_PAGE_ORDER.indexOf(get().page)

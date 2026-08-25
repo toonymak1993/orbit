@@ -155,17 +155,12 @@ foreach ($row in $productRows) {
   } catch {}
 }
 
-$activePlanTitles = @($activeProductIds | ForEach-Object { [string]$products[$_].title })
-$hasUltimate = @($activePlanTitles | Where-Object { $_ -match '(?i)ultimate' }).Count -gt 0
-$hasPremium = @($activePlanTitles | Where-Object { $_ -match '(?i)premium' }).Count -gt 0
-$hasActiveSubscription = @($activePlanTitles | Where-Object { $_ -match '(?i)(game pass|ea play)' }).Count -gt 0
-$allowedPlans = if ($hasUltimate) {
-  @('GPPC', 'GPULTIMATE', 'GPSTANDARD', 'GPCORE', 'GPDUET', 'GPCONSOLE')
-} elseif ($hasPremium) {
-  @('GPPC', 'GPSTANDARD')
-} else {
-  @('GPPC')
-}
+# Current Xbox app builds no longer retain subscription products in the
+# product_summary scope. The signed-in subscription records themselves remain
+# authoritative and already expose active/pass status. Restrict the imported
+# catalog to PC entitlements; console-only relations must not appear in ORBIT.
+$hasActiveSubscription = $activeProductIds.Count -gt 0
+$allowedPlans = @('GPPC', 'NAKUTOMIPC')
 
 $deduplicated = @{}
 if ($hasActiveSubscription -and $subscriptionData) {

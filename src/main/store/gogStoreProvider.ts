@@ -1,6 +1,7 @@
 import type { StoreOffer } from '@shared/ipc'
 import type { StoreRegionConfig } from './storeRegions'
 import { hasRemoteArtwork, type StoreSearchCandidate } from './storeProviderUtils'
+import { fetchWithElectronNet } from '../networkFetch'
 
 const REQUEST_TIMEOUT_MS = 12_000
 
@@ -31,7 +32,9 @@ async function queryGog(
   url.searchParams.set('locale', region.locale)
   url.searchParams.set('currencyCode', region.currency)
   url.searchParams.set('limit', String(limit))
-  const response = await fetch(url, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })
+  const response = await fetchWithElectronNet(url, {
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+  })
   if (!response.ok) return []
   const json = (await response.json()) as { products?: GogCatalogProduct[] }
   return json.products ?? []

@@ -2,13 +2,19 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import {
   CalendarDays,
+  Archive,
   ExternalLink,
+  FolderOpen,
   Gamepad2,
   HardDriveDownload,
+  ImagePlus,
+  Loader2,
   Play,
+  ShieldCheck,
   Sparkles,
   Timer,
   Trophy,
+  Trash2,
   X
 } from 'lucide-react'
 import type {
@@ -17,6 +23,7 @@ import type {
   LibraryGame
 } from '@shared/ipc'
 import { GameImage } from './GameImage'
+import { ArtworkPicker } from './ArtworkPicker'
 import { useBackHandler } from '@renderer/hooks/useBackHandler'
 import { useLaunchGame } from '@renderer/hooks/useLaunchGame'
 import { useT } from '@renderer/i18n/useT'
@@ -24,6 +31,7 @@ import { usePreferencesStore } from '@renderer/state/preferencesStore'
 import { useGameDetailStore } from '@renderer/state/gameDetailStore'
 import { focusElement } from '@renderer/lib/spatialNavigation'
 import { formatPlaytime } from '@renderer/lib/playtime'
+import { useLibraryStore } from '@renderer/state/libraryStore'
 
 interface Props {
   game: LibraryGame
@@ -44,13 +52,21 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
   const showAchievements = usePreferencesStore((state) => state.showAchievements)
   const closeGame = useGameDetailStore((state) => state.closeGame)
   const launch = useLaunchGame()
+  const detailRootRef = useRef<HTMLDivElement>(null)
   const launchRef = useRef<HTMLButtonElement>(null)
+  const artworkRef = useRef<HTMLButtonElement>(null)
   const [completionTimes, setCompletionTimes] = useState<GameCompletionTimes | null>(
     game.metadata.completionTimes ?? null
   )
   const [loadingTimes, setLoadingTimes] = useState(!game.metadata.completionTimes)
   const [achievements, setAchievements] = useState<GameAchievementsSnapshot | null>(null)
   const [loadingAchievements, setLoadingAchievements] = useState(showAchievements)
+  const [backupBusy, setBackupBusy] = useState(false)
+  const [backupFeedback, setBackupFeedback] = useState<'success' | 'failed' | null>(null)
+  const [confirmRemove, setConfirmRemove] = useState(false)
+  const [artworkPickerOpen, setArtworkPickerOpen] = useState(false)
+  const [hasArtworkOverride, setHasArtworkOverride] = useState(false)
+  const [artworkFeedback, setArtworkFeedback] = useState<'updated' | 'reset' | 'failed' | null>(null)
 
   useBackHandler(closeGame)
 
@@ -99,20 +115,117 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
     }
   }, [game.id, showAchievements])
 
+  useEffect(() => {
+    if (!confirmRemove) return
+    const timer = window.setTimeout(() => setConfirmRemove(false), 4_000)
+    return () => window.clearTimeout(timer)
+  }, [confirmRemove])
+
+  useEffect(() => {
+    let active = true
+    setArtworkFeedback(null)
+    setHasArtworkOverride(false)
+    void window.api.image
+      .hasCustom(game.id)
+      .then((custom) => {
+        if (active) setHasArtworkOverride(custom)
+      })
+      .catch(() => {
+        if (active) setHasArtworkOverride(false)
+      })
+    return () => {
+      active = false
+    }
+  }, [game.id])
+
+  useEffect(() => {
+    if (!artworkFeedback) return
+    const timer = window.setTimeout(() => setArtworkFeedback(null), 2_800)
+    return () => window.clearTimeout(timer)
+  }, [artworkFeedback])
+
+  useEffect(() => {
+    const root = detailRootRef.current
+    if (!root) return
+    if (artworkPickerOpen) root.setAttribute('inert', '')
+    else root.removeAttribute('inert')
+    return () => root.removeAttribute('inert')
+  }, [artworkPickerOpen])
+
   const playtime = formatPlaytime(game.playtimeMinutes, t) ?? t('details.notPlayed')
   const summary = game.metadata.summary ?? game.metadata.description
   const developer = game.metadata.developers?.[0]
   const genreText = useMemo(() => game.metadata.genres?.slice(0, 3).join(' · '), [game.metadata.genres])
   const completionAvailable = completionTimes?.state === 'available'
+  const local = game.provider === 'local' ? game.local : undefined
+  const lastBackupLabel =
+    backupFeedback === 'failed' || local?.lastBackupState === 'failed'
+      ? t('details.backupFailed')
+      : backupFeedback === 'success' || local?.lastBackupAt
+        ? t('details.backupLast', {
+            date: new Intl.DateTimeFormat(language === 'de' ? 'de-DE' : 'en-US', {
+              dateStyle: 'short',
+              timeStyle: 'short'
+            }).format(local?.lastBackupAt ?? Date.now())
+          })
+        : t('details.backupNever')
 
   const handleLaunch = (): void => {
     launch(game.id)
     closeGame()
   }
 
+  const handleBackup = async (): Promise<void> => {
+    if (!local?.backupEnabled || backupBusy) return
+    setBackupBusy(true)
+    setBackupFeedback(null)
+    try {
+      const result = await window.api.library.custom.backup(game.id)
+      setBackupFeedback(result.state === 'success' ? 'success' : 'failed')
+    } catch {
+      setBackupFeedback('failed')
+    } finally {
+      setBackupBusy(false)
+    }
+  }
+
+  const handleRemove = async (): Promise<void> => {
+    if (!confirmRemove) {
+      setConfirmRemove(true)
+      return
+    }
+    try {
+      const snapshot = await window.api.library.custom.remove(game.id)
+      useLibraryStore.getState().applySnapshot(snapshot)
+      closeGame()
+    } catch {
+      setConfirmRemove(false)
+    }
+  }
+
+  const closeArtworkPicker = (): void => {
+    setArtworkPickerOpen(false)
+    requestAnimationFrame(() => focusElement(artworkRef.current))
+  }
+
+  const handleArtworkApplied = (): void => {
+    setHasArtworkOverride(true)
+    setArtworkFeedback('updated')
+    closeArtworkPicker()
+  }
+
+  const handleArtworkReset = (): void => {
+    setHasArtworkOverride(false)
+    setArtworkFeedback('reset')
+    closeArtworkPicker()
+  }
+
   return (
+    <>
     <motion.div
-      data-focus-scope="active"
+      ref={detailRootRef}
+      data-focus-scope={artworkPickerOpen ? undefined : 'active'}
+      aria-hidden={artworkPickerOpen || undefined}
       role="dialog"
       aria-modal="true"
       aria-label={game.name}
@@ -201,6 +314,27 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
                 </p>
               )}
 
+              {local && (
+                <div className="mb-[clamp(0.75rem,1.7vh,1.25rem)] rounded-xl border border-white/10 bg-black/30 px-3.5 py-3 backdrop-blur-md">
+                  <div className="flex items-start gap-2.5">
+                    <ShieldCheck size={16} className="mt-0.5 shrink-0 text-accent" />
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold text-white/80">
+                        {local.backupEnabled ? t('details.backupReady') : t('details.backupNotConfigured')}
+                      </p>
+                      {local.savePath && (
+                        <p className="mt-1 truncate text-[10px] text-white/35" title={local.savePath}>
+                          {local.savePath}
+                        </p>
+                      )}
+                      {local.backupEnabled && (
+                        <p className="mt-1 text-[10px] text-white/45">{lastBackupLabel}</p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
               <div className="game-detail-actions flex flex-wrap items-center gap-2.5">
                 <button
                   ref={launchRef}
@@ -210,6 +344,25 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
                 >
                   {game.installed ? <Play size={17} fill="currentColor" /> : <HardDriveDownload size={17} />}
                   {game.installed ? t('details.play') : t('details.install')}
+                </button>
+
+                <button
+                  ref={artworkRef}
+                  data-focusable
+                  onClick={() => {
+                    setArtworkFeedback(null)
+                    setArtworkPickerOpen(true)
+                  }}
+                  className="flex items-center gap-2 rounded-full border border-white/15 bg-white/[0.07] px-4 py-3 text-sm font-semibold text-white backdrop-blur-md transition-colors hover:bg-white/15"
+                >
+                  <ImagePlus size={16} />
+                  {artworkFeedback === 'updated'
+                    ? t('details.artworkChanged')
+                    : artworkFeedback === 'reset'
+                      ? t('details.artworkReset')
+                      : artworkFeedback === 'failed'
+                        ? t('details.artworkFailed')
+                        : t('details.changeArtwork')}
                 </button>
 
                 {game.metadata.storeUrl && (
@@ -231,6 +384,43 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
                   >
                     <Sparkles size={14} className="text-accent" />
                     HLTB
+                  </button>
+                )}
+
+                {local?.backupEnabled && (
+                  <button
+                    data-focusable
+                    data-disabled={backupBusy ? 'true' : undefined}
+                    disabled={backupBusy}
+                    onClick={() => void handleBackup()}
+                    className="flex items-center gap-2 rounded-full border border-white/15 bg-white/[0.07] px-4 py-3 text-sm font-semibold text-white backdrop-blur-md transition-colors hover:bg-white/15"
+                  >
+                    {backupBusy ? <Loader2 size={16} className="animate-spin" /> : <Archive size={16} />}
+                    {backupBusy ? t('details.backupRunning') : t('details.backupNow')}
+                  </button>
+                )}
+
+                {local?.backupEnabled && (
+                  <button
+                    data-focusable
+                    onClick={() => void window.api.library.custom.openBackups(game.id)}
+                    className="flex items-center gap-2 rounded-full px-3 py-3 text-xs font-medium text-white/55 transition-colors hover:text-white"
+                  >
+                    <FolderOpen size={15} />
+                    {t('details.openBackups')}
+                  </button>
+                )}
+
+                {local && (
+                  <button
+                    data-focusable
+                    onClick={() => void handleRemove()}
+                    className={`flex items-center gap-2 rounded-full px-3 py-3 text-xs font-semibold transition-colors ${
+                      confirmRemove ? 'bg-rose-300/12 text-rose-200' : 'text-white/45 hover:text-rose-200'
+                    }`}
+                  >
+                    <Trash2 size={15} />
+                    {confirmRemove ? t('details.confirmRemoveCustom') : t('details.removeCustom')}
                   </button>
                 )}
               </div>
@@ -287,6 +477,17 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
         </div>
       </motion.section>
     </motion.div>
+    {artworkPickerOpen && (
+      <ArtworkPicker
+        gameId={game.id}
+        gameName={game.name}
+        hasOverride={hasArtworkOverride}
+        onApplied={handleArtworkApplied}
+        onReset={handleArtworkReset}
+        onClose={closeArtworkPicker}
+      />
+    )}
+    </>
   )
 }
 

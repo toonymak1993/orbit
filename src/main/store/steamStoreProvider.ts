@@ -1,6 +1,7 @@
-import type { StoreOffer, StoreProduct } from '@shared/ipc'
+import type { StoreOffer, StoreProduct, StoreRelease } from '@shared/ipc'
 import type { SteamAuthManager } from '../steam/steamAuth'
 import { gameRepository } from '../library/gameRepository'
+import { fetchWithElectronNet } from '../networkFetch'
 import { formatStorePrice, type StoreRegionConfig } from './storeRegions'
 import { fetchGogOffer } from './gogStoreProvider'
 import { fetchEpicOffer } from './epicStoreProvider'
@@ -13,6 +14,7 @@ import {
 } from './storeProviderUtils'
 
 const REQUEST_TIMEOUT_MS = 15_000
+const RELEASE_CALENDAR_LIMIT = 18
 
 interface SteamWishlistItem {
   appid?: number
@@ -87,6 +89,111 @@ function portraitUrl(appId: number): string {
   return `https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/${appId}/library_600x900_2x.jpg`
 }
 
+function decodeHtmlText(value: string): string {
+  const namedEntities: Record<string, string> = {
+    amp: '&',
+    apos: "'",
+    gt: '>',
+    lt: '<',
+    quot: '"'
+  }
+  return value
+    .replace(/<[^>]+>/g, '')
+    .replace(/&#x([0-9a-f]+);/gi, (_match, code: string) =>
+      String.fromCodePoint(Number.parseInt(code, 16))
+    )
+    .replace(/&#(\d+);/g, (_match, code: string) => String.fromCodePoint(Number(code)))
+    .replace(/&([a-z]+);/gi, (match, name: string) => namedEntities[name.toLowerCase()] ?? match)
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function parseEnglishSteamDate(value: string): { timestamp: number; year: number; month: number; day: number } | null {
+  const match = /^(\d{1,2})\s+([a-z]{3}),?\s+(\d{4})$/i.exec(decodeHtmlText(value))
+  if (!match) return null
+  const months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+  const month = months.indexOf(match[2].toLowerCase())
+  const day = Number(match[1])
+  const year = Number(match[3])
+  if (month < 0 || day < 1 || day > 31 || !Number.isInteger(year)) return null
+  return { timestamp: Date.UTC(year, month, day, 12), year, month, day }
+}
+
+/**
+ * Steam's popular-upcoming search is a compact editorial source for the current
+ * month. One bounded request yields the official title, date and capsule; the
+ * larger hero URL is resolved by ORBIT's existing artwork cache with the
+ * capsule as its fallback.
+ */
+export async function fetchMonthlySteamReleases(
+  region: StoreRegionConfig,
+  now = new Date()
+): Promise<StoreRelease[]> {
+  const url = new URL('https://store.steampowered.com/search/results/')
+  url.searchParams.set('query', '')
+  url.searchParams.set('start', '0')
+  url.searchParams.set('count', '100')
+  url.searchParams.set('filter', 'popularcomingsoon')
+  url.searchParams.set('category1', '998')
+  url.searchParams.set('supportedlang', 'english,german')
+  url.searchParams.set('infinite', '1')
+  url.searchParams.set('cc', region.countryCode)
+  url.searchParams.set('l', 'english')
+
+  const response = await fetchWithElectronNet(url, {
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+  })
+  if (!response.ok) throw new Error(`Steam release calendar returned ${response.status}`)
+  const json = (await response.json()) as { results_html?: string }
+  const html = json.results_html ?? ''
+  const rows = html.matchAll(
+    /<a\b(?=[^>]*\bdata-ds-appid="(\d+)")(?=[^>]*\bclass="[^"]*\bsearch_result_row\b[^"]*")([^>]*)>([\s\S]*?)<\/a>/gi
+  )
+  const ranked: Array<StoreRelease & { rank: number }> = []
+  const seen = new Set<number>()
+
+  for (const row of rows) {
+    const appId = Number(row[1])
+    if (!Number.isInteger(appId) || appId <= 0 || seen.has(appId)) continue
+    const body = row[3]
+    const title = /<span\b[^>]*class="[^"]*\btitle\b[^"]*"[^>]*>([\s\S]*?)<\/span>/i.exec(body)?.[1]
+    const dateText = /<div\b[^>]*class="[^"]*\bsearch_released\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i.exec(body)?.[1]
+    const capsule = /<div\b[^>]*class="[^"]*\bsearch_capsule\b[^"]*"[^>]*>[\s\S]*?<img\b[^>]*src="([^"]+)"/i.exec(body)?.[1]
+    if (!title || !dateText || !capsule) continue
+    const decodedTitle = decodeHtmlText(title)
+    if (decodedTitle.length > 72 || hasUnsupportedTitleScript(decodedTitle)) continue
+    const release = parseEnglishSteamDate(dateText)
+    if (
+      !release ||
+      release.year !== now.getFullYear() ||
+      release.month !== now.getMonth() ||
+      release.day < now.getDate()
+    ) continue
+
+    seen.add(appId)
+    ranked.push({
+      id: productId(appId),
+      source: 'steam',
+      sourceProductId: String(appId),
+      steamAppId: appId,
+      name: decodedTitle,
+      releaseDate: release.timestamp,
+      capsuleUrl: decodeHtmlText(capsule),
+      heroUrl: `https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/${appId}/library_hero.jpg`,
+      storeUrl: `https://store.steampowered.com/app/${appId}/?cc=${region.countryCode}`,
+      featured: false,
+      orbitWishlisted: false,
+      rank: ranked.length
+    })
+  }
+
+  const selected = ranked.slice(0, RELEASE_CALENDAR_LIMIT)
+  if (selected[0]) selected[0].featured = true
+  return selected
+    .sort((left, right) => left.releaseDate - right.releaseDate || left.rank - right.rank)
+    .map(({ rank: _rank, ...release }) => release)
+}
+
 const GENRE_TAG_IDS: Record<string, number> = {
   action: 19,
   adventure: 21,
@@ -111,7 +218,9 @@ export async function searchSteamProducts(
   url.searchParams.set('term', query)
   url.searchParams.set('l', region.steamLanguage)
   url.searchParams.set('cc', region.countryCode)
-  const response = await fetch(url, { signal: AbortSignal.timeout(STORE_REQUEST_TIMEOUT_MS) })
+  const response = await fetchWithElectronNet(url, {
+    signal: AbortSignal.timeout(STORE_REQUEST_TIMEOUT_MS)
+  })
   if (!response.ok) return []
   const json = (await response.json()) as { items?: SteamSearchItem[] }
   const checkedAt = Date.now()
@@ -180,7 +289,9 @@ export async function fetchPersonalizedCandidateIds(
       url.searchParams.set('infinite', '1')
       url.searchParams.set('cc', region.countryCode)
       url.searchParams.set('l', region.steamLanguage)
-      const response = await fetch(url, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })
+      const response = await fetchWithElectronNet(url, {
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+      })
       if (!response.ok) return []
       const json = (await response.json()) as { results_html?: string }
       return [...(json.results_html ?? '').matchAll(/data-ds-appid="(\d+)"/g)]
@@ -247,7 +358,9 @@ export async function fetchSteamWishlist(
   const url = new URL('https://api.steampowered.com/IWishlistService/GetWishlist/v1/')
   url.searchParams.set('steamid', steamId)
   try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })
+    const response = await fetchWithElectronNet(url, {
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+    })
     if (response.ok) {
       const json = (await response.json()) as { response?: { items?: SteamWishlistItem[] } }
       const items = json.response?.items ?? []
@@ -294,7 +407,9 @@ export async function fetchFeaturedProducts(
   const url = new URL('https://store.steampowered.com/api/featuredcategories')
   url.searchParams.set('cc', region.countryCode)
   url.searchParams.set('l', region.steamLanguage)
-  const response = await fetch(url, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })
+  const response = await fetchWithElectronNet(url, {
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+  })
   if (!response.ok) return []
   const json = (await response.json()) as Record<string, { items?: FeaturedItem[] }>
   const checkedAt = Date.now()
@@ -343,7 +458,9 @@ export async function fetchSteamProduct(
   url.searchParams.set('appids', String(appId))
   url.searchParams.set('cc', region.countryCode)
   url.searchParams.set('l', region.steamLanguage)
-  const response = await fetch(url, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })
+  const response = await fetchWithElectronNet(url, {
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+  })
   if (!response.ok) return null
   const json = (await response.json()) as Record<string, { success?: boolean; data?: SteamAppDetails }>
   const result = json[String(appId)]

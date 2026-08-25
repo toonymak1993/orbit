@@ -1,3 +1,5 @@
+import { fetchWithElectronNet } from '../networkFetch'
+
 const STEAM_API_ROOT = 'https://api.steampowered.com'
 const STEAM_STORE_ROOT = 'https://store.steampowered.com'
 
@@ -40,7 +42,7 @@ function retryDelay(response: Response, attempt: number): number {
 async function fetchWithRetry(
   url: string | URL,
   init?: RequestInit,
-  fetcher: SteamSessionFetch = fetch
+  fetcher: SteamSessionFetch = fetchWithElectronNet
 ): Promise<Response> {
   let lastResponse: Response | undefined
   for (let attempt = 0; attempt < 5; attempt++) {
@@ -58,6 +60,76 @@ function decodeJavascriptString(value: string): string {
   } catch {
     return value
   }
+}
+
+function decodeXmlText(value: string): string {
+  const named: Record<string, string> = {
+    amp: '&',
+    apos: "'",
+    gt: '>',
+    lt: '<',
+    quot: '"'
+  }
+  return value
+    .replace(/^\s*<!\[CDATA\[|\]\]>\s*$/g, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&(#x?[\da-f]+|[a-z]+);/gi, (match, entity: string) => {
+      if (entity.startsWith('#')) {
+        const hexadecimal = entity[1]?.toLowerCase() === 'x'
+        const codePoint = Number.parseInt(
+          entity.slice(hexadecimal ? 2 : 1),
+          hexadecimal ? 16 : 10
+        )
+        return Number.isFinite(codePoint) ? String.fromCodePoint(codePoint) : match
+      }
+      return named[entity.toLowerCase()] ?? match
+    })
+    .trim()
+}
+
+function xmlElement(source: string, name: string): string | undefined {
+  const value = source.match(new RegExp(`<${name}\\b[^>]*>([\\s\\S]*?)<\\/${name}>`, 'i'))?.[1]
+  return value === undefined ? undefined : decodeXmlText(value)
+}
+
+/**
+ * Authenticated fallback for accounts whose current Steam store page no longer
+ * embeds a Web API token. The community games feed contains no credential and
+ * is requested inside the same private Chromium partition as the login flow.
+ */
+export async function fetchSteamCommunityGames(
+  steamId: string,
+  sessionFetch: SteamSessionFetch
+): Promise<Map<number, SteamOwnedGame>> {
+  const url = new URL(`https://steamcommunity.com/profiles/${steamId}/games`)
+  url.searchParams.set('xml', '1')
+  url.searchParams.set('l', 'english')
+  const response = await fetchWithRetry(url, undefined, sessionFetch)
+  if (!response.ok || response.url.includes('/login')) {
+    throw new Error(`Steam community library unavailable (${response.status})`)
+  }
+
+  const source = await response.text()
+  if (!/<gamesList\b/i.test(source) || /<error\b/i.test(source) || !/<games\b/i.test(source)) {
+    throw new Error('Steam community library was not available to the signed-in account')
+  }
+
+  const games = new Map<number, SteamOwnedGame>()
+  for (const match of source.matchAll(/<game\b[^>]*>([\s\S]*?)<\/game>/gi)) {
+    const record = match[1]
+    const appId = Number(xmlElement(record, 'appID'))
+    const name = xmlElement(record, 'name')
+    if (!Number.isInteger(appId) || appId <= 0 || !name) continue
+    const hoursText = xmlElement(record, 'hoursOnRecord')?.replace(/,/g, '')
+    const hours = hoursText ? Number(hoursText) : undefined
+    games.set(appId, {
+      appId,
+      name,
+      iconUrl: xmlElement(record, 'logo'),
+      playtimeMinutes: Number.isFinite(hours) ? Math.round((hours as number) * 60) : undefined
+    })
+  }
+  return games
 }
 
 /**

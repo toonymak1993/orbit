@@ -1,5 +1,11 @@
 import { EventEmitter } from 'node:events'
-import type { StoreRegionId, StoreSearchResponse, StoreSnapshot } from '@shared/ipc'
+import type {
+  StoreProduct,
+  StoreRegionId,
+  StoreRelease,
+  StoreSearchResponse,
+  StoreSnapshot
+} from '@shared/ipc'
 import { settingsStore } from '../settingsStore'
 import { steamAuthManager } from '../steam/steamAuth'
 import { syncCoordinator } from '../sync/syncCoordinator'
@@ -8,6 +14,7 @@ import { STORE_REGIONS } from './storeRegions'
 import { storeRepository } from './storeRepository'
 import {
   fetchFeaturedProducts,
+  fetchMonthlySteamReleases,
   fetchPersonalizedCandidateIds,
   fetchSteamProduct,
   fetchSteamWishlist
@@ -26,6 +33,29 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds))
 }
 
+function releaseStoreProduct(release: StoreRelease, current?: StoreProduct): StoreProduct {
+  const now = Date.now()
+  return {
+    ...current,
+    id: release.id,
+    steamAppId: current?.steamAppId ?? release.steamAppId,
+    canonicalSource: current?.canonicalSource ?? release.source,
+    sourceProductId: current?.sourceProductId ?? release.sourceProductId,
+    name: current?.name ?? release.name,
+    discoverEligible: current?.discoverEligible ?? false,
+    artworkStatus: 'available',
+    releaseDateText:
+      current?.releaseDateText ?? new Date(release.releaseDate).toISOString().slice(0, 10),
+    headerUrl: current?.headerUrl ?? release.capsuleUrl,
+    heroUrl: current?.heroUrl ?? release.heroUrl ?? release.capsuleUrl,
+    steamWishlisted: current?.steamWishlisted ?? false,
+    orbitWishlisted: current?.orbitWishlisted ?? false,
+    offers: current?.offers ?? [],
+    recommendationScore: current?.recommendationScore ?? 0,
+    updatedAt: current?.updatedAt ?? now
+  }
+}
+
 export class StoreService extends EventEmitter {
   private snapshotEmitTimer: ReturnType<typeof setTimeout> | undefined
   private isRefreshing = false
@@ -33,6 +63,7 @@ export class StoreService extends EventEmitter {
   private refreshInFlight: Promise<StoreSnapshot> | null = null
   private productComparisons = new Map<string, Promise<StoreSnapshot>>()
   private searchCache = new Map<string, { expiresAt: number; response: StoreSearchResponse }>()
+  private releaseCalendarError = false
 
   constructor() {
     super()
@@ -44,7 +75,8 @@ export class StoreService extends EventEmitter {
     return storeRepository.getSnapshot(
       settingsStore.store.storeRegion,
       this.isRefreshing,
-      this.changedSinceLastRefresh
+      this.changedSinceLastRefresh,
+      this.releaseCalendarError
     )
   }
 
@@ -67,6 +99,12 @@ export class StoreService extends EventEmitter {
   }
 
   toggleOrbitWishlist(productId: string): StoreSnapshot {
+    const region = settingsStore.store.storeRegion
+    const release = this.getSnapshot().monthlyReleases.find((item) => item.id === productId)
+    if (release) {
+      const current = storeRepository.getProduct(region, productId)
+      storeRepository.upsert(region, releaseStoreProduct(release, current))
+    }
     storeRepository.toggleOrbitWishlist(productId)
     this.changedSinceLastRefresh++
     this.emitSnapshot()
@@ -172,6 +210,7 @@ export class StoreService extends EventEmitter {
     const region = STORE_REGIONS[regionId]
     this.isRefreshing = true
     this.changedSinceLastRefresh = 0
+    this.releaseCalendarError = false
     this.emitSnapshot()
 
     try {
@@ -182,11 +221,21 @@ export class StoreService extends EventEmitter {
           .games.map((game) => game.appId)
           .filter((appId): appId is number => Number.isInteger(appId))
       )
-      const [wishlist, featured, personalizedIds] = await Promise.all([
+      const [wishlist, featured, personalizedIds, releaseCalendar] = await Promise.all([
         account ? fetchSteamWishlist(account.steamId, steamAuthManager).catch(() => []) : Promise.resolve([]),
         fetchFeaturedProducts(region).catch(() => []),
-        fetchPersonalizedCandidateIds(region).catch(() => [])
+        fetchPersonalizedCandidateIds(region).catch(() => []),
+        fetchMonthlySteamReleases(region)
+          .then((releases) => ({ ok: true as const, releases }))
+          .catch(() => ({ ok: false as const, releases: [] }))
       ])
+
+      this.releaseCalendarError = !releaseCalendar.ok
+      if (releaseCalendar.ok) {
+        const now = new Date()
+        const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+        storeRepository.replaceMonthlyReleases(regionId, month, releaseCalendar.releases)
+      }
 
       storeRepository.replaceSteamWishlist(
         wishlist.map((item) => ({ productId: `steam:${item.appId}`, addedAt: item.addedAt }))
@@ -244,6 +293,7 @@ export class StoreService extends EventEmitter {
       storeRepository.markRefreshComplete(regionId)
       syncCoordinator.complete('store', undefined, 'orbit-store')
     } catch (error) {
+      this.releaseCalendarError = true
       syncCoordinator.fail(
         'store',
         error instanceof Error ? error.message : 'Store refresh failed',
