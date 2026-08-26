@@ -3,6 +3,8 @@ param()
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+$env:PSModulePath = "$(Join-Path $PSHOME 'Modules')$([IO.Path]::PathSeparator)$env:PSModulePath"
+Import-Module (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1') -ErrorAction Stop
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $releaseDir = Join-Path $repoRoot 'release'

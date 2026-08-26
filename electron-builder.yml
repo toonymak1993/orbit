@@ -1,7 +1,7 @@
 appId: com.orbit.launcher
 productName: ORBIT
-buildVersion: 0.1.0.3
-artifactName: ORBIT-Beta-Setup-0.1.0-beta.4-${arch}.${ext}
+buildVersion: 0.1.0.4
+artifactName: ORBIT-Setup-0.1.0-${arch}.${ext}
 copyright: Copyright © 2026 Luis Garcia
 forceCodeSigning: true
 
@@ -50,7 +50,7 @@ nsis:
   runAfterFinish: true
   packElevateHelper: false
   differentialPackage: false
-  uninstallDisplayName: ORBIT Beta 0.1.0-beta.4
+  uninstallDisplayName: ORBIT 0.1.0
   installerIcon: build/installerIcon.ico
   uninstallerIcon: build/uninstallerIcon.ico
   installerHeader: build/installerHeader.bmp
