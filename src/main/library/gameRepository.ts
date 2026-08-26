@@ -764,13 +764,17 @@ export class GameRepository {
   setRecentSteamAppIds(appIds: Iterable<number>): void {
     this.ensureOpen()
     const ids = [...new Set(appIds)]
-      .filter((appId) => Number.isInteger(appId) && appId > 0)
+      .filter((appId) => Number.isInteger(appId) && appId > 0 && appId <= 0xffffffff)
       .map(steamGameId)
-    const known = new Set(Object.keys(this.account.games))
     const otherProviders = this.account.recentGameIds.filter(
-      (id) => this.account.games[id]?.provider !== STEAM_PROVIDER
+      (id) => {
+        const game = this.account.games[id]
+        return Boolean(game && game.provider !== STEAM_PROVIDER)
+      }
     )
-    this.account.recentGameIds = [...ids.filter((id) => known.has(id)), ...otherProviders]
+    // Keep valid IDs even while their metadata is still being resolved. Public
+    // snapshots hide unknown records and reveal them in this order once created.
+    this.account.recentGameIds = [...ids, ...otherProviders]
     this.commit(Date.now())
   }
 

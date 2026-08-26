@@ -393,7 +393,7 @@ export class SteamLibraryService extends EventEmitter implements LibraryProvider
       authoritativeOwned && supplementalSourcesComplete
     )
     gameRepository.applyProviderActivityDelta('steam', localActivity)
-    if (dynamicRecentIds.length > 0) gameRepository.setRecentSteamAppIds(dynamicRecentIds)
+    if (dynamicSourceAvailable) gameRepository.setRecentSteamAppIds(dynamicRecentIds)
 
     let metadataTargets: MetadataSyncTarget[] = [...metadataByAppId].map(
       ([appId, allowCreate]) => ({ appId, allowCreate })

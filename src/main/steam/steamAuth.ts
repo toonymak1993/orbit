@@ -113,6 +113,7 @@ async function fetchSteamProfile(steamId: string): Promise<SteamProfile | null> 
 export class SteamAuthManager extends EventEmitter {
   private account: SteamAccount | null = null
   private loginWindow: BrowserWindow | null = null
+  private readonly profileRefreshes = new Map<string, Promise<void>>()
 
   async restoreSession(): Promise<SteamAccount | null> {
     const cookies = await readAllCookies()
@@ -123,34 +124,50 @@ export class SteamAuthManager extends EventEmitter {
       return null
     }
 
-    const profileUpdatedAt = accountCache.get('profileUpdatedAt')
-    if (
-      cached?.steamId === steamId &&
-      profileUpdatedAt !== undefined &&
-      Date.now() - profileUpdatedAt < PROFILE_CACHE_MAX_AGE_MS
-    ) {
-      this.account = cached
-      return cached
+    const cachedMatches = cached?.steamId === steamId
+    const account: SteamAccount = cachedMatches
+      ? cached
+      : { steamId, accountName: 'Steam User' }
+    this.account = account
+    if (!cachedMatches) {
+      accountCache.set('account', account)
+      accountCache.delete('profileUpdatedAt')
     }
 
-    const profile = await fetchSteamProfile(steamId)
-    const account: SteamAccount = {
-      steamId,
-      accountName: profile?.accountName ?? cached?.accountName ?? 'Steam User',
-      avatarUrl: profile?.avatarUrl ?? cached?.avatarUrl
-    }
-    accountCache.set('account', account)
-    // A failed/offline profile lookup is still a completed refresh attempt.
-    // Cache its fallback briefly as well so every restore does not block on
-    // another five-second request while the network or profile is unavailable.
-    accountCache.set(
-      'profileUpdatedAt',
-      profile
-        ? Date.now()
-        : Date.now() - PROFILE_CACHE_MAX_AGE_MS + PROFILE_FAILURE_CACHE_AGE_MS
-    )
-    this.account = account
+    const profileUpdatedAt = accountCache.get('profileUpdatedAt')
+    const profileFresh =
+      cachedMatches &&
+      profileUpdatedAt !== undefined &&
+      Date.now() - profileUpdatedAt < PROFILE_CACHE_MAX_AGE_MS
+    if (!profileFresh) this.refreshProfileInBackground(steamId, account)
     return account
+  }
+
+  private refreshProfileInBackground(steamId: string, fallback: SteamAccount): void {
+    if (this.profileRefreshes.has(steamId)) return
+    const refresh = (async (): Promise<void> => {
+      const profile = await fetchSteamProfile(steamId)
+      if (this.account?.steamId !== steamId) return
+      const account: SteamAccount = {
+        steamId,
+        accountName: profile?.accountName ?? fallback.accountName,
+        avatarUrl: profile?.avatarUrl ?? fallback.avatarUrl
+      }
+      this.account = account
+      accountCache.set('account', account)
+      // Failed lookups are negative-cached for five minutes without delaying
+      // bootstrap; successful profiles remain fresh for the normal 24 hours.
+      accountCache.set(
+        'profileUpdatedAt',
+        profile
+          ? Date.now()
+          : Date.now() - PROFILE_CACHE_MAX_AGE_MS + PROFILE_FAILURE_CACHE_AGE_MS
+      )
+      this.emit('account', account)
+    })().finally(() => {
+      if (this.profileRefreshes.get(steamId) === refresh) this.profileRefreshes.delete(steamId)
+    })
+    this.profileRefreshes.set(steamId, refresh)
   }
 
   getAccount(): SteamAccount | null {
@@ -256,13 +273,10 @@ export class SteamAuthManager extends EventEmitter {
           verificationAttempts++
           const sessionFetch = (url: string | URL, init?: RequestInit): Promise<Response> =>
             loginSession.fetch(url.toString(), { ...init, credentials: 'include' })
-          const verification = await Promise.allSettled([
+          await Promise.any([
             getSteamUserToken(steamId, sessionFetch, 1, 8_000),
-            fetchDynamicStoreData(sessionFetch)
+            fetchDynamicStoreData(sessionFetch, { maxAttempts: 1, timeoutMs: 8_000 })
           ])
-          if (verification.every((attempt) => attempt.status === 'rejected')) {
-            throw new Error('Steam library session unavailable')
-          }
           await finalize()
         } catch {
           // A Steam login can publish its store cookie before either the Store

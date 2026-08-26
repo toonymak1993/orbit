@@ -32,6 +32,11 @@ export interface DynamicStoreData {
   recentlyPlayedAppIds: number[]
 }
 
+export interface DynamicStoreFetchOptions {
+  maxAttempts?: number
+  timeoutMs?: number
+}
+
 export type SteamSessionFetch = (url: string | URL, init?: RequestInit) => Promise<Response>
 
 function delay(milliseconds: number): Promise<void> {
@@ -275,12 +280,15 @@ export async function fetchSteamClientGames(
 
 /** Last-resort ID source. Its entries are not considered games until resolved. */
 export async function fetchDynamicStoreData(
-  sessionFetch: SteamSessionFetch
+  sessionFetch: SteamSessionFetch,
+  options: DynamicStoreFetchOptions = {}
 ): Promise<DynamicStoreData> {
   const response = await fetchWithRetry(
     `${STEAM_STORE_ROOT}/dynamicstore/userdata/`,
     { cache: 'no-store', headers: { 'Cache-Control': 'no-cache', Referer: `${STEAM_STORE_ROOT}/` } },
-    sessionFetch
+    sessionFetch,
+    options.maxAttempts,
+    options.timeoutMs
   )
   if (!response.ok) throw new Error(`Steam userdata failed (${response.status})`)
   const source = await response.text()
