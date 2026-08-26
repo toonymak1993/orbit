@@ -23,6 +23,7 @@ import {
   type OrbitBackgroundServiceStatus,
   type OrbitSettings,
   type ResolvedImage,
+  type SteamAccount,
   type SteamGridDbArtworkOptions,
   type SteamLoginStatus,
   type StoreRegionId,
@@ -77,6 +78,12 @@ const orbitApi = {
         callback(status)
       ipcRenderer.on(IPC.steamLoginStatus, listener)
       return () => ipcRenderer.removeListener(IPC.steamLoginStatus, listener)
+    },
+    onAccountUpdated: (callback: (account: SteamAccount) => void): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, account: SteamAccount): void =>
+        callback(account)
+      ipcRenderer.on(IPC.steamAccountUpdated, listener)
+      return () => ipcRenderer.removeListener(IPC.steamAccountUpdated, listener)
     }
   },
   epic: {

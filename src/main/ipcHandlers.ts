@@ -20,6 +20,7 @@ import {
   type OrbitSettings,
   type ResolvedImage,
   type StoreRegionId,
+  type SteamAccount,
   type SteamLoginStatus,
   type SystemPowerAction
 } from '@shared/ipc'
@@ -248,6 +249,12 @@ function runSystemPowerAction(action: SystemPowerAction): Promise<void> {
 }
 
 export function registerIpcHandlers(mainWindow: BrowserWindow): void {
+  const sendSteamAccountUpdate = (account: SteamAccount): void => {
+    if (mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return
+    mainWindow.webContents.send(IPC.steamAccountUpdated, account)
+  }
+  steamAuthManager.on('account', sendSteamAccountUpdate)
+  mainWindow.once('closed', () => steamAuthManager.off('account', sendSteamAccountUpdate))
   const gameSessionManager = new GameSessionManager(mainWindow, {
     onGameConfirmed: (game, detectedAt) => libraryService.markGameStarted(game.id, detectedAt),
     onSessionCompleted: (game, session) =>

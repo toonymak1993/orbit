@@ -154,6 +154,7 @@ export class SteamAuthManager extends EventEmitter {
         avatarUrl: profile?.avatarUrl ?? fallback.avatarUrl
       }
       this.account = account
+      this.emit('account', account)
       accountCache.set('account', account)
       // Failed lookups are negative-cached for five minutes without delaying
       // bootstrap; successful profiles remain fresh for the normal 24 hours.
@@ -163,10 +164,13 @@ export class SteamAuthManager extends EventEmitter {
           ? Date.now()
           : Date.now() - PROFILE_CACHE_MAX_AGE_MS + PROFILE_FAILURE_CACHE_AGE_MS
       )
-      this.emit('account', account)
-    })().finally(() => {
-      if (this.profileRefreshes.get(steamId) === refresh) this.profileRefreshes.delete(steamId)
-    })
+    })()
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.profileRefreshes.get(steamId) === refresh) {
+          this.profileRefreshes.delete(steamId)
+        }
+      })
     this.profileRefreshes.set(steamId, refresh)
   }
 

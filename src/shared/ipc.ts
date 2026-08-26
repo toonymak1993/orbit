@@ -638,6 +638,7 @@ export const IPC = {
   steamLoginStart: 'steam:login:start',
   steamLoginCancel: 'steam:login:cancel',
   steamLoginStatus: 'steam:login:status',
+  steamAccountUpdated: 'steam:account:updated',
   steamLogout: 'steam:logout',
   steamGetAccount: 'steam:get-account',
   epicLoginStart: 'epic:login:start',

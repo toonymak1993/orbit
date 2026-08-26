@@ -50,6 +50,7 @@ interface StoredGame extends LibraryGame {
 interface AccountLibrary {
   games: Record<string, StoredGame>
   recentGameIds: string[]
+  steamRecentGameIds: string[]
   sessions: LibrarySessionRecord[]
   loadedAt: number
 }
@@ -190,6 +191,14 @@ function steamGameId(appId: number): string {
   return providerGameId(STEAM_PROVIDER, String(appId))
 }
 
+function isSteamGameId(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  const match = /^steam:(\d+)$/.exec(value)
+  if (!match) return false
+  const appId = Number(match[1])
+  return Number.isInteger(appId) && appId > 0 && appId <= 0xffffffff
+}
+
 function validProviderGameId(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0 && value.trim().length <= 512
 }
@@ -298,7 +307,7 @@ function preferDisplayGame(current: StoredGame, candidate: StoredGame): StoredGa
 }
 
 function emptyAccount(): AccountLibrary {
-  return { games: {}, recentGameIds: [], sessions: [], loadedAt: 0 }
+  return { games: {}, recentGameIds: [], steamRecentGameIds: [], sessions: [], loadedAt: 0 }
 }
 
 /**
@@ -774,6 +783,7 @@ export class GameRepository {
     )
     // Keep valid IDs even while their metadata is still being resolved. Public
     // snapshots hide unknown records and reveal them in this order once created.
+    this.account.steamRecentGameIds = ids
     this.account.recentGameIds = [...ids, ...otherProviders]
     this.commit(Date.now())
   }
@@ -974,12 +984,16 @@ export class GameRepository {
   }
 
   private rebuildRecentIds(): void {
-    this.account.recentGameIds = Object.values(this.account.games)
+    const steamRecents = this.account.steamRecentGameIds.filter(isSteamGameId)
+    const steamRecentSet = new Set(steamRecents)
+    const activityRecents = Object.values(this.account.games)
       .filter((game) => (game.lastStartedAt || game.lastPlayedTimestamp) && (game.owned || game.installed))
       .sort(
         (a, b) => latestLibraryActivity(b) - latestLibraryActivity(a)
       )
       .map((game) => game.id)
+      .filter((id) => !steamRecentSet.has(id))
+    this.account.recentGameIds = [...steamRecents, ...activityRecents]
   }
 
   private sanitize(input: AccountLibrary): AccountLibrary {
@@ -1039,7 +1053,16 @@ export class GameRepository {
       }
     }
 
-    clean.recentGameIds = [...new Set(input.recentGameIds ?? [])].filter((id) => Boolean(clean.games[id]))
+    clean.steamRecentGameIds = [
+      ...new Set(
+        (input.steamRecentGameIds ?? input.recentGameIds ?? []).filter(isSteamGameId)
+      )
+    ]
+    const steamRecentSet = new Set(clean.steamRecentGameIds)
+    const knownRecents = [...new Set(input.recentGameIds ?? [])].filter(
+      (id) => Boolean(clean.games[id]) && !steamRecentSet.has(id)
+    )
+    clean.recentGameIds = [...clean.steamRecentGameIds, ...knownRecents]
     const sessionCandidates = Array.isArray(input.sessions) ? input.sessions : []
     clean.sessions = sessionCandidates
       .flatMap((candidate) => {
@@ -1115,6 +1138,7 @@ export class GameRepository {
     account.recentGameIds = [...new Set(legacy.snapshot.recentlyPlayedAppIds ?? [])]
       .map(steamGameId)
       .filter((id) => Boolean(account.games[id]))
+    account.steamRecentGameIds = [...account.recentGameIds]
     account.loadedAt = legacy.snapshot.loadedAt ?? now
     return account
   }

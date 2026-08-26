@@ -12,6 +12,7 @@ interface AuthState {
 }
 
 let unsubscribe: (() => void) | null = null
+let unsubscribeAccountUpdates: (() => void) | null = null
 
 export const useAuthStore = create<AuthState>((set, get) => ({
   account: null,
@@ -19,6 +20,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   checkedExistingSession: false,
 
   restore: async () => {
+    unsubscribeAccountUpdates ??= window.api.steam.onAccountUpdated((account) => {
+      set({ account })
+    })
     const account = await window.api.steam.getAccount()
     set({ account, checkedExistingSession: true })
   },
@@ -26,6 +30,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   startLogin: async () => {
     if (get().status.state === 'waiting-for-browser') return
 
+    unsubscribeAccountUpdates ??= window.api.steam.onAccountUpdated((account) => {
+      set({ account })
+    })
     unsubscribe?.()
     set({ status: { state: 'waiting-for-browser' } })
     unsubscribe = window.api.steam.onStatus((status) => {
@@ -57,6 +64,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
   logout: async () => {
     await window.api.steam.logout()
+    unsubscribeAccountUpdates?.()
+    unsubscribeAccountUpdates = null
     set({ account: null, status: { state: 'idle' } })
   }
 }))
