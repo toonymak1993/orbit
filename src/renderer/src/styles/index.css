@@ -163,14 +163,14 @@
   grid-column: 1 / -1;
 }
 
-.store-search-shell {
+.view-search-shell {
   transition:
     border-color 140ms ease,
     background-color 140ms ease,
     box-shadow 140ms ease;
 }
 
-.store-search-shell:focus-within {
+.view-search-shell:focus-within {
   border-color: rgb(var(--color-accent) / 0.72);
   background-color: rgb(255 255 255 / 0.075);
   box-shadow:
@@ -178,8 +178,8 @@
     var(--focus-shadow);
 }
 
-[data-store-search]:focus-visible,
-[data-store-search][data-focused='true'] {
+[data-view-search]:focus-visible,
+[data-view-search][data-focused='true'] {
   box-shadow: none;
 }
 
@@ -279,8 +279,12 @@
 }
 
 .game-card-shine {
+  position: absolute;
+  inset-block: 0;
   left: -45%;
+  z-index: 10;
   width: 34%;
+  pointer-events: none;
   opacity: 0;
   transform: skewX(-10deg);
   background: linear-gradient(
@@ -299,6 +303,92 @@
 [data-home-game-card='true']:focus-visible .game-card-shine,
 [data-home-game-card='true'][data-focused='true'] .game-card-shine {
   animation: orbit-card-shine 620ms cubic-bezier(0.2, 0.72, 0.25, 1) both;
+}
+
+.home-card-reflection {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  overflow: hidden;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: var(--reflection-opacity);
+}
+
+.home-card-reflection[data-reflection-edge='left'] {
+  background:
+    radial-gradient(
+      ellipse 72% 54% at -6% -5%,
+      rgb(255 255 255 / 0.46) 0%,
+      rgb(var(--color-accent) / 0.24) 23%,
+      transparent 64%
+    ),
+    linear-gradient(
+      90deg,
+      rgb(255 255 255 / 0.38) 0%,
+      rgb(var(--color-accent) / 0.16) 5%,
+      transparent var(--reflection-edge-reach)
+    );
+  box-shadow: inset 1px 1px 0 rgb(255 255 255 / 0.3);
+}
+
+.home-card-reflection[data-reflection-edge='right'] {
+  background:
+    radial-gradient(
+      ellipse 72% 54% at 106% -5%,
+      rgb(255 255 255 / 0.46) 0%,
+      rgb(var(--color-accent) / 0.24) 23%,
+      transparent 64%
+    ),
+    linear-gradient(
+      270deg,
+      rgb(255 255 255 / 0.38) 0%,
+      rgb(var(--color-accent) / 0.16) 5%,
+      transparent var(--reflection-edge-reach)
+    );
+  box-shadow: inset -1px 1px 0 rgb(255 255 255 / 0.3);
+}
+
+[data-home-card-bubbles='on'] .home-card-convex::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: var(--home-card-bubble-opacity, 0.64);
+  background:
+    radial-gradient(
+      ellipse 100% 72% at 34% 10%,
+      rgb(255 255 255 / 0.18) 0%,
+      rgb(255 255 255 / 0.065) 30%,
+      transparent 62%
+    ),
+    radial-gradient(
+      ellipse 112% 100% at 50% 44%,
+      transparent 56%,
+      rgb(0 0 0 / 0.09) 77%,
+      rgb(0 0 0 / 0.26) 100%
+    ),
+    linear-gradient(
+      118deg,
+      rgb(255 255 255 / 0.065),
+      transparent 38% 70%,
+      rgb(0 0 0 / 0.11)
+    );
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.3),
+    inset 1px 0 0 rgb(255 255 255 / 0.09),
+    inset -1px 0 0 rgb(0 0 0 / 0.22),
+    inset 0 -2px 5px rgb(0 0 0 / 0.24);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .game-card-shine {
+    opacity: 0;
+    animation: none !important;
+  }
+
 }
 
 .ticker-track {
@@ -461,21 +551,30 @@
   }
 }
 
-/* FLOAT is a poster-first Home preset. It intentionally removes both banners,
-   spends the released height on library-sized artwork, and keeps the focused
-   game's information in one low horizontal strip. */
+/* FLOAT is a poster-first Home preset. Its single-row grid fills the available
+   width, safely centers short libraries and keeps overflow controller-friendly. */
 [data-home-layout='float'] .home-stage {
-  height: clamp(8.5rem, 18vh, 11rem);
+  height: clamp(7.75rem, 16.5vh, 9rem);
 }
 
 [data-home-layout='float'] .home-game-row {
-  margin-top: clamp(7rem, 14vh, 13rem);
-  padding-top: 1.4rem;
+  --float-card-width-limit: max(10rem, calc(66.667vh - 16rem));
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: min(
+    calc((100% - 4 * var(--tile-gap)) / 5),
+    var(--float-card-width-limit)
+  );
+  align-items: start;
+  justify-content: safe center;
+  flex-shrink: 0;
+  margin-top: clamp(1rem, 3vh, 2rem);
+  padding-inline: clamp(1rem, 2vw, 2rem);
+  padding-top: clamp(0.9rem, 2vh, 1.4rem);
 }
 
 [data-home-layout='float'] .home-game-tile {
-  min-width: 12rem;
-  flex-basis: clamp(12rem, 17vw, 18rem);
+  width: 100%;
 }
 
 .home-focus-card-float {
@@ -525,17 +624,12 @@
 
 @media (orientation: landscape) and (max-height: 720px) {
   [data-home-layout='float'] .home-stage {
-    height: clamp(7rem, 17vh, 8rem);
+    height: clamp(7.25rem, 16.5vh, 7.5rem);
   }
 
   [data-home-layout='float'] .home-game-row {
-    margin-top: clamp(3rem, 9vh, 4.5rem);
-    padding-top: 1rem;
-  }
-
-  [data-home-layout='float'] .home-game-tile {
-    min-width: 9.5rem;
-    flex-basis: clamp(9.5rem, 18vw, 13rem);
+    margin-top: clamp(0.75rem, 2.5vh, 1.1rem);
+    padding-top: 0.85rem;
   }
 
   .home-focus-card-float {
@@ -549,6 +643,117 @@
 
   .home-focus-card-float .home-focus-identity > div:last-child > div {
     display: none;
+  }
+}
+
+/* CoreSense is a console-first Home composition. Its two shelves derive every
+   track from the available width, so the initial view never exposes clipped
+   "peek" cards at an edge. Home deliberately keeps six recent launchers; the
+   complete collection remains available in Library. */
+.coresense-home {
+  --coresense-launcher-size: clamp(7rem, 10vw, 13rem);
+  --coresense-shelf-gap: clamp(0.6rem, 1vw, 1rem);
+}
+
+.coresense-backdrop-veil {
+  background:
+    linear-gradient(90deg, rgb(var(--color-base) / 0.95) 0%, rgb(var(--color-base) / 0.58) 34%, rgb(var(--color-base) / 0.08) 76%),
+    linear-gradient(180deg, rgb(0 0 0 / 0.18) 0%, transparent 42%, rgb(var(--color-base) / 0.88) 100%);
+}
+
+.coresense-launcher {
+  width: 100%;
+  min-width: 0;
+}
+
+.coresense-launcher-art {
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: clamp(0.75rem, 1.4vw, 1.35rem);
+  transition:
+    border-color 150ms ease,
+    box-shadow 150ms ease;
+}
+
+.coresense-launcher-grid,
+.coresense-recommendation-grid {
+  gap: var(--coresense-shelf-gap);
+}
+
+.coresense-launcher[data-active='true'] .coresense-launcher-art {
+  border-color: rgb(var(--color-accent) / 0.72);
+  box-shadow: var(--shadow-glow);
+}
+
+[data-coresense-launcher]:focus-visible,
+[data-coresense-launcher][data-focused='true'] {
+  box-shadow: none;
+}
+
+[data-coresense-launcher]:focus-visible .coresense-launcher-art,
+[data-coresense-launcher][data-focused='true'] .coresense-launcher-art {
+  border-color: rgb(255 255 255 / 0.9);
+  box-shadow:
+    0 0 0 var(--focus-ring-width) rgb(var(--color-accent) / 0.92),
+    var(--focus-shadow);
+}
+
+.coresense-identity-icon {
+  width: clamp(3.75rem, 5.25vw, 8rem);
+  height: clamp(3.75rem, 5.25vw, 8rem);
+}
+
+.coresense-store-card {
+  width: 100%;
+  min-width: 0;
+}
+
+[data-card-size='compact'] .coresense-home {
+  --coresense-launcher-size: clamp(6.25rem, 8.5vw, 11rem);
+}
+
+[data-card-size='large'] .coresense-home {
+  --coresense-launcher-size: clamp(8rem, 11.5vw, 15rem);
+}
+
+@media (orientation: landscape) and (max-width: 1700px) and (max-height: 900px) {
+  .coresense-home {
+    --coresense-launcher-size: clamp(5.5rem, 14vh, 7rem);
+  }
+
+  [data-card-size='compact'] .coresense-home {
+    --coresense-launcher-size: clamp(5rem, 12.5vh, 6.25rem);
+  }
+
+  [data-card-size='large'] .coresense-home {
+    --coresense-launcher-size: clamp(6rem, 15.5vh, 7.75rem);
+  }
+
+  .coresense-spotlight {
+    padding-block: clamp(0.55rem, 1.8vh, 1.15rem);
+  }
+}
+
+@media (orientation: landscape) and (max-height: 720px) {
+  .coresense-home {
+    --coresense-launcher-size: clamp(4.5rem, 13.5vh, 6.25rem);
+  }
+
+  [data-card-size='compact'] .coresense-home {
+    --coresense-launcher-size: clamp(4.25rem, 12vh, 5.5rem);
+  }
+
+  [data-card-size='large'] .coresense-home {
+    --coresense-launcher-size: clamp(5rem, 15vh, 6.75rem);
+  }
+
+  .coresense-identity-icon {
+    width: clamp(3.25rem, 8vh, 4rem);
+    height: clamp(3.25rem, 8vh, 4rem);
+  }
+
+  .coresense-recommendations .coresense-store-card > span:first-child {
+    aspect-ratio: 16 / 6.5;
   }
 }
 
@@ -568,17 +773,73 @@
   flex-basis: clamp(11.5rem, calc((100% - 3rem - 3 * var(--tile-gap)) / 4), 16.5rem);
 }
 
-[data-home-layout='float'][data-card-size='compact'] .home-game-tile {
-  min-width: 10rem;
-  flex-basis: clamp(10rem, 14vw, 14rem);
+/* Large ORBIT cards stay distinct without dominating the banner composition. */
+[data-card-size='large'] .home-layout[data-home-layout='orbit'] .home-game-tile {
+  min-width: 10.5rem;
+  flex-basis: calc((100% - 4rem - 4 * var(--tile-gap)) / 5);
 }
 
-[data-home-layout='float'][data-card-size='large'] .home-game-tile {
-  min-width: 14rem;
-  flex-basis: clamp(14rem, 20vw, 21rem);
+[data-card-size='large'] .home-layout[data-home-layout='orbit'] .home-stage {
+  height: clamp(17rem, 43vh, 27rem);
+}
+
+[data-card-size='large'] .home-layout[data-home-layout='orbit'] .home-game-row {
+  flex-shrink: 0;
+  justify-content: safe center;
+  margin-top: clamp(1.75rem, 4vh, 3rem);
+}
+
+[data-home-layout='float'] .home-game-tile {
+  min-width: 0;
+  flex-basis: auto;
+}
+
+[data-home-layout='float'][data-card-size='compact'] .home-game-row {
+  grid-auto-columns: min(
+    calc((100% - 5 * var(--tile-gap)) / 6),
+    var(--float-card-width-limit)
+  );
+}
+
+[data-home-layout='float'][data-card-size='large'] .home-game-row {
+  grid-auto-columns: min(
+    calc((100% - 3 * var(--tile-gap)) / 4),
+    var(--float-card-width-limit)
+  );
+}
+
+@media (orientation: landscape) and (max-width: 1700px) and (max-height: 900px) {
+  [data-home-layout='float'] .home-game-row {
+    --float-card-width-limit: max(9.5rem, calc(37.5vh - 3rem));
+  }
+
+  [data-card-size='large'] .home-layout[data-home-layout='orbit'] .home-stage {
+    height: clamp(13rem, 33vh, 16rem);
+  }
+
+  [data-card-size='large'] .home-layout[data-home-layout='orbit'] .home-game-row {
+    margin-top: clamp(1.25rem, 3vh, 1.75rem);
+  }
 }
 
 @media (orientation: landscape) and (max-height: 720px) {
+  [data-home-layout='float'] .home-game-row {
+    --float-card-width-limit: max(9rem, calc(37.5vh - 3rem));
+  }
+
+  [data-card-size='large'] .home-layout[data-home-layout='orbit'] .home-game-tile {
+    min-width: 10rem;
+    flex-basis: calc((100% - 3rem - 4 * var(--tile-gap)) / 5);
+  }
+
+  [data-card-size='large'] .home-layout[data-home-layout='orbit'] .home-stage {
+    height: clamp(10.5rem, 29vh, 12.5rem);
+  }
+
+  [data-card-size='large'] .home-layout[data-home-layout='orbit'] .home-game-row {
+    margin-top: clamp(0.75rem, 2vh, 1rem);
+  }
+
   [data-card-size='compact'] .home-game-tile {
     min-width: 7.75rem;
     flex-basis: clamp(7.75rem, 14vw, 9.25rem);
@@ -589,13 +850,4 @@
     flex-basis: clamp(10.75rem, 21vw, 13.5rem);
   }
 
-  [data-home-layout='float'][data-card-size='compact'] .home-game-tile {
-    min-width: 8.25rem;
-    flex-basis: clamp(8.25rem, 15vw, 10.5rem);
-  }
-
-  [data-home-layout='float'][data-card-size='large'] .home-game-tile {
-    min-width: 11rem;
-    flex-basis: clamp(11rem, 21vw, 14.5rem);
-  }
 }

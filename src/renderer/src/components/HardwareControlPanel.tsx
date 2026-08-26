@@ -13,6 +13,11 @@ import type { TranslationKey } from '@renderer/i18n/translations'
 import { useBackHandler } from '@renderer/hooks/useBackHandler'
 import { focusElement } from '@renderer/lib/spatialNavigation'
 import { usePreferencesStore } from '@renderer/state/preferencesStore'
+import { useControllerButtonLabels } from '@renderer/state/controllerStore'
+import type {
+  ControllerButtonId,
+  ControllerButtonLabels
+} from '@renderer/lib/controllerProfile'
 
 export const HARDWARE_CONTROL_BUTTON_LABEL_KEYS: Record<
   HardwareControlButton,
@@ -35,6 +40,35 @@ export const HARDWARE_CONTROL_BUTTON_LABEL_KEYS: Record<
   'right-bumper': 'settings.hardwareControl.button.rightBumper',
   'left-stick': 'settings.hardwareControl.button.leftStick',
   'right-stick': 'settings.hardwareControl.button.rightStick'
+}
+
+const HARDWARE_CONTROL_CONTROLLER_BUTTONS: Partial<
+  Record<HardwareControlButton, ControllerButtonId>
+> = {
+  menu: 'menu',
+  view: 'view',
+  guide: 'guide',
+  a: 'south',
+  b: 'east',
+  x: 'west',
+  y: 'north',
+  'left-trigger': 'leftTrigger',
+  'right-trigger': 'rightTrigger',
+  'left-bumper': 'leftBumper',
+  'right-bumper': 'rightBumper',
+  'left-stick': 'leftStick',
+  'right-stick': 'rightStick'
+}
+
+export function hardwareControlButtonLabel(
+  button: HardwareControlButton,
+  t: ReturnType<typeof useT>,
+  controllerLabels: ControllerButtonLabels
+): string {
+  const controllerButton = HARDWARE_CONTROL_CONTROLLER_BUTTONS[button]
+  return controllerButton
+    ? controllerLabels[controllerButton]
+    : t(HARDWARE_CONTROL_BUTTON_LABEL_KEYS[button])
 }
 
 function statusCopy(
@@ -328,6 +362,7 @@ function HardwareButtonSelect({
   onChange: (value: HardwareControlButton) => void
 }): JSX.Element {
   const t = useT()
+  const controllerLabels = useControllerButtonLabels()
   const [open, setOpen] = useState(false)
   const buttonRef = useRef<HTMLButtonElement>(null)
   const listboxId = useId()
@@ -352,7 +387,9 @@ function HardwareButtonSelect({
         whileTap={{ scale: 0.98 }}
         className="flex min-h-11 w-full items-center justify-between gap-3 rounded-xl border border-white/[0.09] bg-black/25 px-3.5 py-2.5 text-left text-xs font-semibold text-white/75 transition-colors hover:bg-white/[0.05] data-[focused=true]:border-accent/70 data-[focused=true]:bg-accent/10 data-[focused=true]:text-white"
       >
-        <span className="truncate">{t(HARDWARE_CONTROL_BUTTON_LABEL_KEYS[value])}</span>
+        <span className="truncate">
+          {hardwareControlButtonLabel(value, t, controllerLabels)}
+        </span>
         <ChevronDown
           size={15}
           className={`shrink-0 text-accent transition-transform ${open ? 'rotate-180' : ''}`}
@@ -410,6 +447,7 @@ function HardwareButtonMenu({
   onClose: () => void
 }): JSX.Element {
   const t = useT()
+  const controllerLabels = useControllerButtonLabels()
   const selectedRef = useRef<HTMLButtonElement>(null)
 
   useBackHandler(onClose)
@@ -469,7 +507,7 @@ function HardwareButtonMenu({
                 selected ? 'bg-accent/12 text-white' : 'text-white/55 hover:bg-white/[0.06]'
               }`}
             >
-              <span>{t(HARDWARE_CONTROL_BUTTON_LABEL_KEYS[button])}</span>
+              <span>{hardwareControlButtonLabel(button, t, controllerLabels)}</span>
               {selected && <Check size={13} className="shrink-0 text-accent" strokeWidth={3} />}
             </button>
           )

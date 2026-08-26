@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import Store from 'electron-store'
-import type { ResolvedImage } from '@shared/ipc'
+import type { ImageOrientation, ResolvedImage } from '@shared/ipc'
 import { settingsStore } from './settingsStore'
 import { fetchWithElectronNet } from './networkFetch'
 import { isSteamGridDbAssetUrl } from './steamGridDb'
@@ -12,9 +12,17 @@ import { isSteamGridDbAssetUrl } from './steamGridDb'
 const CACHE_DIR = join(app.getPath('userData'), 'artwork-v2')
 const MAX_SOURCE_BYTES = 25 * 1024 * 1024
 const MAX_SOURCE_PIXELS = 50_000_000
-const COVER_WIDTH = 600
-const COVER_HEIGHT = 900
 const REMOTE_TIMEOUT_MS = 12_000
+
+export type CustomArtworkOrientation = Exclude<ImageOrientation, 'icon'>
+
+const ARTWORK_TARGETS: Record<
+  CustomArtworkOrientation,
+  { width: number; height: number; filePrefix: string }
+> = {
+  vertical: { width: 600, height: 900, filePrefix: 'custom-cover-' },
+  horizontal: { width: 1600, height: 900, filePrefix: 'custom-background-' }
+}
 
 interface CustomArtworkEntry {
   fileName: string
@@ -36,10 +44,19 @@ const customArtworkEntries: Record<string, CustomArtworkEntry> = {
   ...customArtworkStore.get('entries')
 }
 
-function isSafeFileName(fileName: unknown): fileName is string {
+function entryKey(gameId: string, orientation: CustomArtworkOrientation): string {
+  // Existing vertical entries remain keyed by game ID. Horizontal entries use
+  // their own namespace, so the original store needs no migration.
+  return orientation === 'vertical' ? gameId : `horizontal:${gameId}`
+}
+
+function isSafeFileName(
+  fileName: unknown,
+  orientation: CustomArtworkOrientation = 'vertical'
+): fileName is string {
   return (
     typeof fileName === 'string' &&
-    fileName.startsWith('custom-cover-') &&
+    fileName.startsWith(ARTWORK_TARGETS[orientation].filePrefix) &&
     !fileName.includes('/') &&
     !fileName.includes('\\')
   )
@@ -57,9 +74,13 @@ function toResolved(entry: CustomArtworkEntry): ResolvedImage {
   }
 }
 
-function cropCover(image: NativeImage): NativeImage {
+function cropArtwork(
+  image: NativeImage,
+  orientation: CustomArtworkOrientation
+): NativeImage {
+  const target = ARTWORK_TARGETS[orientation]
   const { width, height } = image.getSize()
-  const targetRatio = COVER_WIDTH / COVER_HEIGHT
+  const targetRatio = target.width / target.height
   const sourceRatio = width / height
   const cropWidth = sourceRatio > targetRatio ? Math.round(height * targetRatio) : width
   const cropHeight = sourceRatio > targetRatio ? height : Math.round(width / targetRatio)
@@ -68,7 +89,7 @@ function cropCover(image: NativeImage): NativeImage {
 
   return image
     .crop({ x, y, width: cropWidth, height: cropHeight })
-    .resize({ width: COVER_WIDTH, height: COVER_HEIGHT, quality: 'best' })
+    .resize({ width: target.width, height: target.height, quality: 'best' })
 }
 
 async function writeAtomically(filePath: string, buffer: Buffer): Promise<void> {
@@ -84,7 +105,11 @@ async function writeAtomically(filePath: string, buffer: Buffer): Promise<void> 
   }
 }
 
-function prepareCover(source: Buffer, context: string): NativeImage {
+function prepareArtwork(
+  source: Buffer,
+  context: string,
+  orientation: CustomArtworkOrientation
+): NativeImage {
   if (source.byteLength === 0 || source.byteLength > MAX_SOURCE_BYTES) {
     throw new Error(`${context} is empty or too large`)
   }
@@ -98,9 +123,9 @@ function prepareCover(source: Buffer, context: string): NativeImage {
   ) {
     throw new Error(`${context} has unsupported dimensions`)
   }
-  const cover = cropCover(image)
-  if (cover.isEmpty()) throw new Error(`${context} could not be prepared`)
-  return cover
+  const artwork = cropArtwork(image, orientation)
+  if (artwork.isEmpty()) throw new Error(`${context} could not be prepared`)
+  return artwork
 }
 
 async function readResponseLimited(response: Response): Promise<Buffer> {
@@ -132,25 +157,55 @@ async function readResponseLimited(response: Response): Promise<Buffer> {
 }
 
 class CustomArtworkService {
-  resolve(gameId: string): ResolvedImage | null {
-    const entry = customArtworkEntries[gameId]
-    if (!entry || !isSafeFileName(entry.fileName)) return null
+  referencedFileNames(): string[] {
+    return Object.values(customArtworkEntries)
+      .map((entry) => entry.fileName)
+      .filter(
+        (fileName) =>
+          isSafeFileName(fileName, 'vertical') || isSafeFileName(fileName, 'horizontal')
+      )
+  }
+
+  resolve(
+    gameId: string,
+    orientation: CustomArtworkOrientation = 'vertical'
+  ): ResolvedImage | null {
+    const key = entryKey(gameId, orientation)
+    const entry = customArtworkEntries[key]
+    if (!entry || !isSafeFileName(entry.fileName, orientation)) return null
     if (existsSync(join(CACHE_DIR, entry.fileName))) return toResolved(entry)
 
-    delete customArtworkEntries[gameId]
+    delete customArtworkEntries[key]
     persistEntries()
     return null
   }
 
-  has(gameId: string): boolean {
-    return this.resolve(gameId) !== null
+  has(gameId: string, orientation: CustomArtworkOrientation = 'vertical'): boolean {
+    return this.resolve(gameId, orientation) !== null
   }
 
-  async select(mainWindow: BrowserWindow, gameId: string): Promise<ResolvedImage | null> {
+  async select(
+    mainWindow: BrowserWindow,
+    gameId: string,
+    orientation: CustomArtworkOrientation = 'vertical'
+  ): Promise<ResolvedImage | null> {
     const german = settingsStore.store.language === 'de'
+    const horizontal = orientation === 'horizontal'
     const result = await dialog.showOpenDialog(mainWindow, {
-      title: german ? 'ORBIT · Artwork auswählen' : 'ORBIT · Select artwork',
-      buttonLabel: german ? 'Artwork verwenden' : 'Use artwork',
+      title: german
+        ? horizontal
+          ? 'ORBIT · Hintergrund auswählen'
+          : 'ORBIT · Artwork auswählen'
+        : horizontal
+          ? 'ORBIT · Select background'
+          : 'ORBIT · Select artwork',
+      buttonLabel: german
+        ? horizontal
+          ? 'Hintergrund verwenden'
+          : 'Artwork verwenden'
+        : horizontal
+          ? 'Use background'
+          : 'Use artwork',
       properties: ['openFile'],
       filters: [
         { name: german ? 'Bilder' : 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] },
@@ -167,10 +222,18 @@ class CustomArtworkService {
     if (source.byteLength !== sourceStats.size) {
       throw new Error('Selected artwork changed while it was being read')
     }
-    return this.persistCover(gameId, prepareCover(source, 'Selected artwork'))
+    return this.persistArtwork(
+      gameId,
+      orientation,
+      prepareArtwork(source, 'Selected artwork', orientation)
+    )
   }
 
-  async applySteamGridDb(gameId: string, sourceUrl: string): Promise<ResolvedImage> {
+  async applySteamGridDb(
+    gameId: string,
+    sourceUrl: string,
+    orientation: CustomArtworkOrientation = 'vertical'
+  ): Promise<ResolvedImage> {
     if (!isSteamGridDbAssetUrl(sourceUrl)) {
       throw new Error('SteamGridDB returned an unsupported artwork URL')
     }
@@ -191,42 +254,71 @@ class CustomArtworkService {
       throw new Error('SteamGridDB returned a non-image response')
     }
     const source = await readResponseLimited(response)
-    return this.persistCover(gameId, prepareCover(source, 'SteamGridDB artwork'))
+    return this.persistArtwork(
+      gameId,
+      orientation,
+      prepareArtwork(source, 'SteamGridDB artwork', orientation)
+    )
   }
 
-  private async persistCover(gameId: string, cover: NativeImage): Promise<ResolvedImage> {
-    const buffer = cover.toPNG()
+  private async persistArtwork(
+    gameId: string,
+    orientation: CustomArtworkOrientation,
+    artwork: NativeImage
+  ): Promise<ResolvedImage> {
+    const target = ARTWORK_TARGETS[orientation]
+    const key = entryKey(gameId, orientation)
+    const buffer = artwork.toPNG()
     const gameHash = createHash('sha256').update(gameId).digest('hex').slice(0, 12)
     const imageHash = createHash('sha256').update(buffer).digest('hex').slice(0, 16)
-    const fileName = `custom-cover-${gameHash}-${imageHash}.png`
+    const fileName = `${target.filePrefix}${gameHash}-${imageHash}.png`
     await mkdir(CACHE_DIR, { recursive: true })
     await writeAtomically(join(CACHE_DIR, fileName), buffer)
 
-    const previous = customArtworkEntries[gameId]
+    const previous = customArtworkEntries[key]
     const entry: CustomArtworkEntry = {
       fileName,
-      width: COVER_WIDTH,
-      height: COVER_HEIGHT,
+      width: target.width,
+      height: target.height,
       revision: Date.now()
     }
-    customArtworkEntries[gameId] = entry
+    customArtworkEntries[key] = entry
     persistEntries()
 
-    if (previous && previous.fileName !== fileName && isSafeFileName(previous.fileName)) {
+    if (
+      previous &&
+      previous.fileName !== fileName &&
+      isSafeFileName(previous.fileName, orientation)
+    ) {
       await unlink(join(CACHE_DIR, previous.fileName)).catch(() => undefined)
     }
     return toResolved(entry)
   }
 
-  async reset(gameId: string, expectedRevision?: number): Promise<boolean> {
-    const entry = customArtworkEntries[gameId]
-    if (!entry || (expectedRevision !== undefined && entry.revision !== expectedRevision)) {
+  async reset(gameId: string, expectedRevision?: number): Promise<boolean>
+  async reset(
+    gameId: string,
+    orientation: CustomArtworkOrientation,
+    expectedRevision?: number
+  ): Promise<boolean>
+  async reset(
+    gameId: string,
+    orientationOrRevision: CustomArtworkOrientation | number = 'vertical',
+    expectedRevision?: number
+  ): Promise<boolean> {
+    const orientation =
+      typeof orientationOrRevision === 'number' ? 'vertical' : orientationOrRevision
+    const revision =
+      typeof orientationOrRevision === 'number' ? orientationOrRevision : expectedRevision
+    const key = entryKey(gameId, orientation)
+    const entry = customArtworkEntries[key]
+    if (!entry || (revision !== undefined && entry.revision !== revision)) {
       return false
     }
 
-    delete customArtworkEntries[gameId]
+    delete customArtworkEntries[key]
     persistEntries()
-    if (isSafeFileName(entry.fileName)) {
+    if (isSafeFileName(entry.fileName, orientation)) {
       await unlink(join(CACHE_DIR, entry.fileName)).catch(() => undefined)
     }
     return true

@@ -9,9 +9,14 @@ $releaseDir = Join-Path $repoRoot 'release'
 $releaseMetadata = Get-Content -LiteralPath (Join-Path $repoRoot 'resources\release-manifest.json') -Raw | ConvertFrom-Json
 $displayVersion = [string]$releaseMetadata.displayVersion
 $packageVersion = [string]$releaseMetadata.packageVersion
+$releaseChannel = ([string]$releaseMetadata.channel).Trim().ToLowerInvariant()
+if ($releaseChannel -notin @('beta', 'stable')) {
+  throw "Unsupported ORBIT release channel: $releaseChannel"
+}
+$installerPrefix = if ($releaseChannel -eq 'beta') { 'ORBIT-Beta-Setup' } else { 'ORBIT-Setup' }
 $windowsFileVersion = [string]$releaseMetadata.windowsFileVersion
 $releaseSequence = [int]$releaseMetadata.releaseSequence
-$installerPath = Join-Path $releaseDir "ORBIT-Beta-Setup-$displayVersion-x64.exe"
+$installerPath = Join-Path $releaseDir "$installerPrefix-$displayVersion-x64.exe"
 $applicationPath = Join-Path $releaseDir 'win-unpacked\ORBIT.exe'
 $packagedManifestPath = Join-Path $releaseDir 'win-unpacked\resources\release-manifest.json'
 $certificateMetadataPath = Join-Path $repoRoot '.certificates\orbit-development.json'
@@ -36,6 +41,9 @@ $verifiedFiles = foreach ($path in @($installerPath, $applicationPath)) {
   if ($signature.Status -ne 'Valid' -and !$isDevelopmentTrustPending) {
     throw "Invalid Authenticode signature for $path ($($signature.Status): $($signature.StatusMessage))"
   }
+  if (!$signature.TimeStamperCertificate) {
+    throw "The Authenticode signature has no trusted timestamp: $path"
+  }
   if ($signature.SignerCertificate.Thumbprint -ne $certificateMetadata.thumbprint) {
     throw "Unexpected signer for $path"
   }
@@ -55,6 +63,7 @@ $verifiedFiles = foreach ($path in @($installerPath, $applicationPath)) {
     trustStatus = $signature.Status.ToString()
     signer = $signature.SignerCertificate.Subject
     signerThumbprint = $signature.SignerCertificate.Thumbprint
+    timestampSigner = $signature.TimeStamperCertificate.Subject
   }
 }
 
@@ -65,7 +74,7 @@ $distributionManifest = [ordered]@{
   displayVersion = $displayVersion
   packageVersion = $packageVersion
   releaseSequence = $releaseSequence
-  channel = 'beta'
+  channel = $releaseChannel
   updateMode = 'manual-package'
   generatedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
   artifacts = $verifiedFiles

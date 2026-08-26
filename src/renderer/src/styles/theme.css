@@ -17,6 +17,7 @@
   --glass-saturation: 1.1;
   --shadow-card: 0 6px 24px -6px rgb(0 0 0 / 0.55);
   --shadow-glow: 0 0 0 1px rgb(var(--color-accent) / 0.24), 0 8px 30px -6px rgb(var(--color-accent) / 0.45);
+  --home-card-bubble-opacity: 0.64;
   --theme-ambient: radial-gradient(circle at 18% 8%, rgb(63 208 255 / 0.08), transparent 34%), radial-gradient(circle at 82% 92%, rgb(139 92 246 / 0.08), transparent 38%);
 
   --content-gap: 3rem;
@@ -42,6 +43,28 @@
   --shadow-card: 0 6px 24px -6px rgb(0 0 0 / 0.55);
   --focus-shadow: 0 8px 30px -6px rgb(63 208 255 / 0.5);
   --theme-ambient: radial-gradient(circle at 18% 8%, rgb(63 208 255 / 0.08), transparent 34%), radial-gradient(circle at 82% 92%, rgb(139 92 246 / 0.08), transparent 38%);
+}
+
+/* CoreSense pairs a deep console-blue canvas with crisp, luminous focus states.
+   It evokes a modern living-room UI while keeping ORBIT's own glass language. */
+[data-theme='coresense'] {
+  --home-card-bubble-opacity: 0.72;
+  --color-base: 2 7 20;
+  --color-surface: 7 18 43;
+  --color-surface-2: 12 34 72;
+  --color-text: 247 250 255;
+  --color-muted: 158 177 209;
+  --color-accent: 74 148 255;
+  --color-accent-2: 113 218 255;
+  --radius-card: 0.9rem;
+  --focus-ring-width: 2px;
+  --glass-blur: 30px;
+  --glass-opacity: 0.54;
+  --glass-saturation: 1.4;
+  --shadow-card: 0 20px 50px -20px rgb(0 49 150 / 0.68), 0 10px 28px -12px rgb(0 0 0 / 0.72);
+  --focus-shadow: 0 0 0 1px rgb(222 241 255 / 0.72), 0 0 30px -2px rgb(74 148 255 / 0.78), 0 18px 44px -16px rgb(0 58 184 / 0.72);
+  --shadow-glow: 0 0 0 1px rgb(191 226 255 / 0.4), 0 12px 42px -9px rgb(48 128 255 / 0.65);
+  --theme-ambient: radial-gradient(ellipse at 50% -18%, rgb(74 148 255 / 0.3), transparent 42%), radial-gradient(ellipse at 105% 52%, rgb(54 199 255 / 0.17), transparent 35%), linear-gradient(145deg, rgb(10 38 96 / 0.16), transparent 55%);
 }
 
 [data-theme='aurora'] {
@@ -109,6 +132,7 @@
 }
 
 [data-theme='ocean'] {
+  --home-card-bubble-opacity: 0.72;
   --color-base: 3 10 18;
   --color-surface: 8 24 38;
   --color-surface-2: 12 34 51;
@@ -157,6 +181,7 @@
 }
 
 [data-theme='crimson'] {
+  --home-card-bubble-opacity: 0.46;
   --color-base: 13 5 7;
   --color-surface: 29 10 15;
   --color-surface-2: 43 14 20;
@@ -173,6 +198,7 @@
 }
 
 [data-theme='ice'] {
+  --home-card-bubble-opacity: 0.72;
   --color-base: 5 10 16;
   --color-surface: 13 24 34;
   --color-surface-2: 20 35 47;
@@ -189,6 +215,7 @@
 }
 
 [data-theme='lime'] {
+  --home-card-bubble-opacity: 0.46;
   --color-base: 7 11 5;
   --color-surface: 18 27 13;
   --color-surface-2: 27 39 18;
@@ -205,6 +232,7 @@
 }
 
 [data-theme='monochrome'] {
+  --home-card-bubble-opacity: 0.46;
   --color-base: 6 6 7;
   --color-surface: 19 19 21;
   --color-surface-2: 31 31 34;

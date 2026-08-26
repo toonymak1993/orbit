@@ -12,6 +12,19 @@ SetCompressorDictSize 32
 !ifndef FILE_VERSION
   !error "FILE_VERSION is required"
 !endif
+!ifndef IS_BETA
+  !error "IS_BETA is required"
+!endif
+
+!if ${IS_BETA} == 1
+  !define ORBIT_SETUP_NAME "ORBIT Beta Xbox Mode"
+  !define ORBIT_RELEASE_KIND "beta"
+  !define ORBIT_CAPABILITY_KIND "community-beta"
+!else
+  !define ORBIT_SETUP_NAME "ORBIT Xbox Mode"
+  !define ORBIT_RELEASE_KIND "release"
+  !define ORBIT_CAPABILITY_KIND "Gaming Home"
+!endif
 
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
@@ -19,8 +32,8 @@ SetCompressorDictSize 32
 
 Var OrbitPowerShell
 
-Name "ORBIT Beta Xbox Mode"
-Caption "ORBIT Beta Xbox Mode Setup"
+Name "${ORBIT_SETUP_NAME}"
+Caption "${ORBIT_SETUP_NAME} Setup"
 OutFile "${OUTPUT_PATH}"
 InstallDir "$LOCALAPPDATA\Programs\ORBIT Xbox Mode"
 BrandingText "ORBIT ${DISPLAY_VERSION} - Gaming Home"
@@ -41,7 +54,7 @@ VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright 2026 Luis Garcia"
 !define MUI_WELCOMEFINISHPAGE_BITMAP "${ORBIT_ROOT}\build\installerSidebar.bmp"
 !define MUI_ABORTWARNING
 !define MUI_WELCOMEPAGE_TITLE "ORBIT ${DISPLAY_VERSION} Xbox Mode"
-!define MUI_WELCOMEPAGE_TEXT "This setup installs the ORBIT beta as a Windows Gaming Home app.$\r$\n$\r$\nAfter administrator approval it validates the complete package contract, trusts only the bundled ORBIT self-signed certificate in Local Machine\Trusted People, enables Developer Mode for the beta capability, and installs the signed AppX for this Windows account."
+!define MUI_WELCOMEPAGE_TEXT "This setup installs the ORBIT ${ORBIT_RELEASE_KIND} as a Windows Gaming Home app.$\r$\n$\r$\nAfter administrator approval it validates the complete package contract, trusts only the bundled ORBIT self-signed certificate in Local Machine\Trusted People, enables Developer Mode for the ${ORBIT_CAPABILITY_KIND} capability, and installs the signed AppX for this Windows account."
 !define MUI_FINISHPAGE_TITLE "ORBIT is installed for Xbox Mode"
 !define MUI_FINISHPAGE_TEXT "Windows Xbox Mode settings will open next. Under Choose home app, select ORBIT."
 

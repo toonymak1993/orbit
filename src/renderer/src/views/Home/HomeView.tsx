@@ -1,6 +1,15 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
-import { Building2, ExternalLink, Heart, Play, Sparkles, Timer, Trophy } from 'lucide-react'
+import {
+  Building2,
+  CalendarDays,
+  ExternalLink,
+  Heart,
+  Play,
+  Sparkles,
+  Timer,
+  Trophy
+} from 'lucide-react'
 import { useAutoFocus } from '@renderer/hooks/useAutoFocus'
 import { useLibraryStore } from '@renderer/state/libraryStore'
 import { useAuthStore } from '@renderer/state/authStore'
@@ -9,14 +18,21 @@ import { useStoreStore } from '@renderer/state/storeStore'
 import { useStoreNavigationStore } from '@renderer/state/storeNavigationStore'
 import { GameImage } from '@renderer/components/GameImage'
 import { GameCard } from '@renderer/components/GameCard'
+import {
+  HomeCardReflection,
+  resolveHomeCardReflection
+} from '@renderer/components/HomeCardReflection'
 import { useNavigationStore } from '@renderer/state/navigationStore'
 import { useT, type TFunction } from '@renderer/i18n/useT'
 import type {
   GameAchievementsSnapshot,
   GameCompletionTimes,
+  LibraryActivitySummary,
+  LibraryActivityWindow,
   LibraryGame,
   StoreProduct
 } from '@shared/ipc'
+import { latestLibraryActivity, normalizeLibraryTimestamp } from '@shared/libraryTime'
 import { useGameDetailStore } from '@renderer/state/gameDetailStore'
 import { formatPlaytime } from '@renderer/lib/playtime'
 import { usePreferencesStore } from '@renderer/state/preferencesStore'
@@ -24,18 +40,6 @@ import { focusElement, HOME_SHOW_BANNERS_EVENT } from '@renderer/lib/spatialNavi
 
 const HOME_ACHIEVEMENTS_DELAY_MS = 5_000
 const WISHLIST_ROTATION_MS = 15_000
-
-function normalizedTimestamp(value?: number): number {
-  if (!value) return 0
-  return value < 10_000_000_000 ? value * 1000 : value
-}
-
-function lastPlayedAt(game: LibraryGame): number {
-  return Math.max(
-    normalizedTimestamp(game.lastStartedAt),
-    normalizedTimestamp(game.lastPlayedTimestamp)
-  )
-}
 
 function formatHours(minutes: number, language: 'en' | 'de'): string {
   const hours = minutes / 60
@@ -58,10 +62,28 @@ function completionEstimate(
   return null
 }
 
+function storeProductUrl(product: StoreProduct): string | undefined {
+  return (
+    product.bestOffer?.url ??
+    product.offers.find((offer) => offer.available && offer.exactMatch)?.url
+  )
+}
+
+function formatActivityDuration(seconds: number, language: 'en' | 'de'): string {
+  const totalSeconds = Math.round(Math.max(0, seconds))
+  if (totalSeconds < 60) return `${totalSeconds} s`
+  const totalMinutes = Math.floor(totalSeconds / 60)
+  if (totalMinutes < 60) return `${totalMinutes} min`
+  const hours = totalMinutes / 60
+  return `${new Intl.NumberFormat(language === 'de' ? 'de-DE' : 'en-US', {
+    maximumFractionDigits: hours < 10 ? 1 : 0
+  }).format(hours)} h`
+}
+
 export function HomeView(): JSX.Element {
   const containerRef = useAutoFocus<HTMLDivElement>()
   const t = useT()
-  const { games, loadedAt } = useLibraryStore((s) => s.snapshot)
+  const { games, recentGameIds, activity, loadedAt } = useLibraryStore((s) => s.snapshot)
   const account = useAuthStore((s) => s.account)
   const epicAccount = useEpicAuthStore((s) => s.account)
   const storeProducts = useStoreStore((s) => s.snapshot.products)
@@ -75,6 +97,9 @@ export function HomeView(): JSX.Element {
   const [focusedGame, setFocusedGame] = useState<LibraryGame | null>(null)
   const [focusDirection, setFocusDirection] = useState(1)
   const previousFocusedIndexRef = useRef<number | null>(null)
+  const focusedHomeGameRef = useRef<LibraryGame | null>(null)
+  const hoveredHomeGameRef = useRef<LibraryGame | null>(null)
+  const homeInteractionSourceRef = useRef<'focus' | 'pointer' | null>(null)
   const [focusedCompletionTimes, setFocusedCompletionTimes] =
     useState<GameCompletionTimes | null>(null)
   const [wishlistIndex, setWishlistIndex] = useState(0)
@@ -88,14 +113,26 @@ export function HomeView(): JSX.Element {
         .filter((game) => game.installed)
         .sort(
           (a, b) =>
-            lastPlayedAt(b) - lastPlayedAt(a) ||
-            normalizedTimestamp(b.addedAt) - normalizedTimestamp(a.addedAt) ||
+            latestLibraryActivity(b) - latestLibraryActivity(a) ||
+            normalizeLibraryTimestamp(b.addedAt) - normalizeLibraryTimestamp(a.addedAt) ||
             a.name.localeCompare(b.name)
         ),
     [games]
   )
 
-  const featured = installedGames[0] ?? null
+  const featured = useMemo(() => {
+    const installedById = new Map(installedGames.map((game) => [game.id, game]))
+    for (const gameId of [activity?.continueGameId, ...recentGameIds]) {
+      if (!gameId) continue
+      const game = installedById.get(gameId)
+      if (game) return game
+    }
+    return installedGames[0] ?? null
+  }, [activity?.continueGameId, installedGames, recentGameIds])
+  const featuredHasActivity = Boolean(featured && latestLibraryActivity(featured) > 0)
+  const focusedGameIndex = focusedGame
+    ? installedGames.findIndex((game) => game.id === focusedGame.id)
+    : -1
 
   useEffect(() => {
     let active = true
@@ -136,9 +173,49 @@ export function HomeView(): JSX.Element {
     setFocusedGame(game)
   }
 
+  function updateHomeGameInteraction(
+    game: LibraryGame,
+    active: boolean,
+    source: 'focus' | 'pointer'
+  ): void {
+    const sourceGameRef =
+      source === 'focus' ? focusedHomeGameRef : hoveredHomeGameRef
+
+    if (active) {
+      const alreadyActive =
+        sourceGameRef.current?.id === game.id && homeInteractionSourceRef.current === source
+      sourceGameRef.current = game
+      if (alreadyActive) return
+      homeInteractionSourceRef.current = source
+      activateGame(game)
+      return
+    }
+
+    if (sourceGameRef.current?.id === game.id) sourceGameRef.current = null
+    if (source === 'focus') {
+      homeInteractionSourceRef.current = null
+      activateGame(null)
+      return
+    }
+    if (homeInteractionSourceRef.current !== source) return
+
+    if (focusedHomeGameRef.current) {
+      homeInteractionSourceRef.current = 'focus'
+      activateGame(focusedHomeGameRef.current)
+      return
+    }
+
+    homeInteractionSourceRef.current = null
+    activateGame(null)
+  }
+
   useEffect(() => {
     function showBannersAndFocusJumpBack(): void {
+      focusedHomeGameRef.current = null
+      hoveredHomeGameRef.current = null
+      homeInteractionSourceRef.current = null
       setFocusedGame(null)
+      previousFocusedIndexRef.current = null
       requestAnimationFrame(() => {
         focusElement(document.querySelector<HTMLElement>('[data-home-jump-back="true"]'))
       })
@@ -212,6 +289,16 @@ export function HomeView(): JSX.Element {
     showWishlist()
   }
 
+  function openStoreProduct(product: StoreProduct): void {
+    const url = storeProductUrl(product)
+    if (url) {
+      void window.api.app.openExternal(url)
+      return
+    }
+    setStorePage('discover')
+    setMainView('store')
+  }
+
   if (!account && !epicAccount && games.length === 0 && loadedAt > 0) {
     return (
       <div
@@ -229,6 +316,25 @@ export function HomeView(): JSX.Element {
           {t('home.noAccount.cta')}
         </button>
       </div>
+    )
+  }
+
+  if (homeLayout === 'coresense') {
+    return (
+      <CoreSenseHome
+        containerRef={containerRef}
+        installedGames={installedGames}
+        libraryGames={games}
+        selectedGame={focusedGame ?? featured}
+        backdropGame={backdropGame ?? focusedGame ?? featured}
+        storeProducts={storeProducts}
+        activity={activity}
+        language={language}
+        onSelectGame={activateGame}
+        onOpenGame={(game) => openGame(game.id)}
+        onOpenStoreProduct={openStoreProduct}
+        t={t}
+      />
     )
   }
 
@@ -298,7 +404,7 @@ export function HomeView(): JSX.Element {
                   <div>
                     <p className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-[0.22em] text-accent">
                       <span className="h-1.5 w-1.5 rounded-full bg-accent shadow-[0_0_12px_currentColor]" />
-                      {t('home.jumpBack')}
+                      {featuredHasActivity ? t('home.continuePlaying') : t('home.featuredInstalled')}
                     </p>
                     {featured.metadata.genres && (
                       <p className="mt-1 line-clamp-1 text-xs text-white/55">
@@ -306,6 +412,24 @@ export function HomeView(): JSX.Element {
                       </p>
                     )}
                   </div>
+                  {activity && (
+                    <div className="absolute right-[clamp(1rem,2vw,1.5rem)] top-[clamp(1rem,2vw,1.5rem)] flex gap-2">
+                      <ActivityMetric
+                        label={t('home.activity7Days')}
+                        activity={activity.sevenDays}
+                        hasHistory={activity.recordedSessionCount > 0}
+                        language={language}
+                        t={t}
+                      />
+                      <ActivityMetric
+                        label={t('home.activity30Days')}
+                        activity={activity.thirtyDays}
+                        hasHistory={activity.recordedSessionCount > 0}
+                        language={language}
+                        t={t}
+                      />
+                    </div>
+                  )}
                   <div className="flex items-end justify-between gap-4">
                     <div className="flex min-w-0 items-end gap-[clamp(0.75rem,1.4vw,1.1rem)]">
                       <div className="h-[clamp(3.25rem,5vw,4.75rem)] w-[clamp(3.25rem,5vw,4.75rem)] shrink-0 overflow-hidden rounded-[24%] border border-white/15 bg-black/40 shadow-xl backdrop-blur-md">
@@ -323,7 +447,7 @@ export function HomeView(): JSX.Element {
                         <div className="mt-2 flex flex-wrap items-center gap-2">
                           <span className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-black/35 px-2.5 py-1 text-[11px] font-medium text-white/75 backdrop-blur-md">
                             <Timer size={12} className="text-accent" />
-                            {t('details.yourPlaytime')}: {formatPlaytime(featured.playtimeMinutes, t) ?? t('details.notPlayed')}
+                            {t('details.yourPlaytime')}: {formatPlaytime(featured, t) ?? t('details.notPlayed')}
                           </span>
                           {featuredCompletionEstimate && (
                               <span className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-black/35 px-2.5 py-1 text-[11px] font-medium text-white/75 backdrop-blur-md">
@@ -376,19 +500,22 @@ export function HomeView(): JSX.Element {
             data-grid-columns={installedGames.length}
             className="home-game-row scrollbar-none flex gap-[var(--tile-gap)] overflow-x-auto overflow-y-hidden px-8 pb-8"
           >
-            {installedGames.map((game, index) => (
-              <div
-                key={game.id}
-                className="home-game-tile shrink-0"
-              >
-                <GameCard
-                  game={game}
-                  navigationIndex={index}
-                  variant={homeLayout === 'float' ? 'float' : 'home'}
-                  onActiveChange={(active) => activateGame(active ? game : null)}
-                />
-              </div>
-            ))}
+            {installedGames.map((game, index) => {
+              const reflection = resolveHomeCardReflection(index, focusedGameIndex)
+              return (
+                <div key={game.id} className="home-game-tile shrink-0">
+                  <GameCard
+                    game={game}
+                    navigationIndex={index}
+                    homeReflection={reflection}
+                    variant={homeLayout === 'float' ? 'float' : 'home'}
+                    onActiveChange={(active, source) =>
+                      updateHomeGameInteraction(game, active, source)
+                    }
+                  />
+                </div>
+              )
+            })}
           </div>
         )}
 
@@ -398,6 +525,738 @@ export function HomeView(): JSX.Element {
         )}
       </div>
     </div>
+  )
+}
+
+function canonicalRecommendationGenre(value: string): string {
+  const genre = value.toLocaleLowerCase().replace(/[^a-z0-9äöüß]+/g, ' ').trim()
+  const aliases: Array<[RegExp, string]> = [
+    [/action|aktion/, 'action'],
+    [/adventure|abenteuer/, 'adventure'],
+    [/role playing|rollenspiel|\brpg\b/, 'rpg'],
+    [/strategy|strategie/, 'strategy'],
+    [/simulation/, 'simulation'],
+    [/racing|rennen/, 'racing'],
+    [/sport/, 'sports'],
+    [/puzzle|rätsel/, 'puzzle'],
+    [/horror/, 'horror'],
+    [/shooter/, 'shooter'],
+    [/indie/, 'indie']
+  ]
+  return aliases.find(([pattern]) => pattern.test(genre))?.[1] ?? genre
+}
+
+function normalizedProductName(value: string): string {
+  return value
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLocaleLowerCase()
+    .replace(/[^a-z0-9]+/g, '')
+}
+
+type CoreSenseRelationship = 'series' | 'publisher' | 'developer' | 'genre'
+
+interface CoreSenseRecommendation {
+  product: StoreProduct
+  relationship: CoreSenseRelationship
+  relationshipScore: number
+}
+
+const SERIES_SUFFIX_WORDS = new Set([
+  'collection',
+  'complete',
+  'definitive',
+  'deluxe',
+  'digital',
+  'dlc',
+  'edition',
+  'enhanced',
+  'game',
+  'german',
+  'global',
+  'gold',
+  'goty',
+  'international',
+  'pack',
+  'pass',
+  'pc',
+  'remake',
+  'remastered',
+  'resynced',
+  'season',
+  'standard',
+  'soundtrack',
+  'ultimate',
+  'upgrade',
+  'version',
+  'worldwide'
+])
+const SERIES_CONNECTOR_WORDS = new Set(['a', 'an', 'and', 'der', 'des', 'die', 'of', 'the', 'und'])
+const GENERIC_SINGLE_SERIES_WORDS = new Set([
+  'black',
+  'dead',
+  'fall',
+  'legend',
+  'new',
+  'red',
+  'rise',
+  'story',
+  'world'
+])
+const CORPORATE_SUFFIX_WORDS = new Set([
+  'ag',
+  'co',
+  'company',
+  'corp',
+  'corporation',
+  'gmbh',
+  'inc',
+  'incorporated',
+  'limited',
+  'llc',
+  'ltd',
+  'plc',
+  'sa'
+])
+
+function normalizedWords(value: string): string[] {
+  return value
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLocaleLowerCase()
+    .match(/[a-z0-9]+/g)
+    ?.filter((word) => word !== 's') ?? []
+}
+
+function seriesWords(value: string): string[] {
+  return normalizedWords(value).filter(
+    (word) => !SERIES_SUFFIX_WORDS.has(word) && !SERIES_CONNECTOR_WORDS.has(word)
+  )
+}
+
+function baseGameIdentity(value: string): string {
+  return seriesWords(value).join('')
+}
+
+function isInstallmentNumber(value: string): boolean {
+  return /^(?:\d+|[ivxlcdm]+)$/i.test(value)
+}
+
+function isSameBaseGame(leftName: string, rightName: string): boolean {
+  const left = seriesWords(leftName)
+  const right = seriesWords(rightName)
+  if (left.length === 0 || right.length === 0) return false
+  if (left.join('') === right.join('')) return true
+
+  const shorter = left.length <= right.length ? left : right
+  const longer = left.length <= right.length ? right : left
+  const isPrefix = shorter.every((word, index) => word === longer[index])
+  return isPrefix && shorter.length >= 2 && shorter.some(isInstallmentNumber)
+}
+
+function seriesAffinity(leftName: string, rightName: string): number {
+  const left = seriesWords(leftName)
+  const right = seriesWords(rightName)
+  if (left.length === 0 || right.length === 0) return 0
+
+  let sharedPrefix = 0
+  while (left[sharedPrefix] && left[sharedPrefix] === right[sharedPrefix]) sharedPrefix++
+  if (sharedPrefix >= 2) return 4 + sharedPrefix
+
+  const first = left[0]
+  if (
+    first === right[0] &&
+    (/^\d+$/.test(first) ||
+      (first.length >= 6 && !GENERIC_SINGLE_SERIES_WORDS.has(first)))
+  ) {
+    return 3
+  }
+
+  const rightHead = new Set(right.slice(0, 4))
+  const sharedHeadWords = [...new Set(left.slice(0, 4))].filter((word) => rightHead.has(word))
+  return sharedHeadWords.length >= 2 ? 2 : 0
+}
+
+function seriesSearchQuery(value: string): string {
+  const tokens =
+    value.match(/[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)?/gu)?.filter(Boolean) ?? []
+  if (tokens.length === 0) return ''
+
+  const meaningful = tokens
+    .map((token, index) => ({ token, index, words: normalizedWords(token) }))
+    .filter(
+      ({ words }) =>
+        words.length > 0 &&
+        !words.every(
+          (word) => SERIES_CONNECTOR_WORDS.has(word) || SERIES_SUFFIX_WORDS.has(word)
+        )
+    )
+  if (meaningful.length === 0) return ''
+
+  const first = meaningful[0]
+  if (/^\d+$/.test(first.words[0])) return first.token
+  const second = meaningful[1]
+  if (!second) return first.token
+  if (/^(?:\d+|[ivxlcdm]+)$/i.test(second.words[0])) {
+    return tokens.slice(0, first.index + 1).join(' ')
+  }
+  if (GENERIC_SINGLE_SERIES_WORDS.has(second.words[0])) {
+    return tokens.slice(0, first.index + 1).join(' ')
+  }
+  return tokens.slice(0, second.index + 1).join(' ')
+}
+
+function normalizedStudio(value: string): string {
+  return normalizedWords(value)
+    .filter((word) => !CORPORATE_SUFFIX_WORDS.has(word))
+    .join('')
+}
+
+function studioOverlap(left: string[], right: string[]): number {
+  const leftKeys = [...new Set(left.map(normalizedStudio).filter(Boolean))]
+  const rightKeys = [...new Set(right.map(normalizedStudio).filter(Boolean))]
+  return leftKeys.filter((leftKey) =>
+    rightKeys.some(
+      (rightKey) =>
+        leftKey === rightKey ||
+        (Math.min(leftKey.length, rightKey.length) >= 5 &&
+          (leftKey.startsWith(rightKey) || rightKey.startsWith(leftKey)))
+    )
+  ).length
+}
+
+function relationshipForProduct(
+  game: LibraryGame,
+  product: StoreProduct
+): CoreSenseRecommendation | null {
+  const seriesScore = seriesAffinity(game.name, product.name)
+  if (seriesScore > 0) {
+    return { product, relationship: 'series', relationshipScore: seriesScore }
+  }
+
+  const publisherScore = studioOverlap(game.metadata.publishers ?? [], product.publishers ?? [])
+  if (publisherScore > 0) {
+    return { product, relationship: 'publisher', relationshipScore: publisherScore }
+  }
+
+  const developerScore = studioOverlap(game.metadata.developers ?? [], product.developers ?? [])
+  if (developerScore > 0) {
+    return { product, relationship: 'developer', relationshipScore: developerScore }
+  }
+
+  const genres = new Set(
+    (game.metadata.genres ?? []).map(canonicalRecommendationGenre).filter(Boolean)
+  )
+  const matchingGenres = (product.genres ?? []).filter((genre) =>
+    genres.has(canonicalRecommendationGenre(genre))
+  )
+  return matchingGenres.length > 0
+    ? { product, relationship: 'genre', relationshipScore: matchingGenres.length }
+    : null
+}
+
+function relatedStoreProducts(
+  game: LibraryGame | null,
+  products: StoreProduct[],
+  libraryGames: LibraryGame[]
+): CoreSenseRecommendation[] {
+  if (!game) return []
+
+  const ownedSteamAppIds = new Set(
+    libraryGames
+      .map((candidate) => candidate.appId)
+      .filter((appId): appId is number => Number.isInteger(appId))
+  )
+  const ownedNames = new Set(libraryGames.map((candidate) => normalizedProductName(candidate.name)))
+  const productsById = new Map<string, StoreProduct>()
+  for (const product of products) {
+    const existing = productsById.get(product.id)
+    productsById.set(
+      product.id,
+      existing
+        ? {
+            ...existing,
+            ...product,
+            developers: product.developers ?? existing.developers,
+            publishers: product.publishers ?? existing.publishers,
+            searchOnly: existing.searchOnly === false ? false : product.searchOnly
+          }
+        : product
+    )
+  }
+
+  const relationshipPriority: Record<CoreSenseRelationship, number> = {
+    series: 4,
+    publisher: 3,
+    developer: 2,
+    genre: 1
+  }
+
+  const ranked = [...productsById.values()]
+    .map((product) => relationshipForProduct(game, product))
+    .filter((recommendation): recommendation is CoreSenseRecommendation => Boolean(recommendation))
+    .filter(
+      ({ product }) =>
+        !ownedSteamAppIds.has(product.steamAppId ?? -1) &&
+        !ownedNames.has(normalizedProductName(product.name)) &&
+        !isSameBaseGame(product.name, game.name) &&
+        product.discoverEligible !== false &&
+        product.artworkStatus === 'available' &&
+        Boolean(product.headerUrl ?? product.heroUrl ?? product.portraitUrl) &&
+        Boolean(storeProductUrl(product))
+    )
+    .sort(
+      (left, right) =>
+        relationshipPriority[right.relationship] - relationshipPriority[left.relationship] ||
+        right.relationshipScore - left.relationshipScore ||
+        right.product.recommendationScore - left.product.recommendationScore ||
+        (right.product.bestOffer?.discountPercent ?? 0) -
+          (left.product.bestOffer?.discountPercent ?? 0)
+    )
+
+  const seenBaseGames = new Set<string>()
+  return ranked
+    .filter(({ product }) => {
+      const identity = baseGameIdentity(product.name) || normalizedProductName(product.name)
+      if (seenBaseGames.has(identity)) return false
+      seenBaseGames.add(identity)
+      return true
+    })
+    .slice(0, 6)
+}
+
+function relationshipLabel(relationship: CoreSenseRelationship, t: TFunction): string {
+  if (relationship === 'series') return t('home.coresense.relation.series')
+  if (relationship === 'publisher') return t('home.coresense.relation.publisher')
+  if (relationship === 'developer') return t('home.coresense.relation.developer')
+  return t('home.coresense.relation.genre')
+}
+
+function CoreSenseHome({
+  containerRef,
+  installedGames,
+  libraryGames,
+  selectedGame,
+  backdropGame,
+  storeProducts,
+  activity,
+  language,
+  onSelectGame,
+  onOpenGame,
+  onOpenStoreProduct,
+  t
+}: {
+  containerRef: RefObject<HTMLDivElement>
+  installedGames: LibraryGame[]
+  libraryGames: LibraryGame[]
+  selectedGame: LibraryGame | null
+  backdropGame: LibraryGame | null
+  storeProducts: StoreProduct[]
+  activity?: LibraryActivitySummary
+  language: 'en' | 'de'
+  onSelectGame: (game: LibraryGame) => void
+  onOpenGame: (game: LibraryGame) => void
+  onOpenStoreProduct: (product: StoreProduct) => void
+  t: TFunction
+}): JSX.Element {
+  const reduceMotion = useReducedMotion()
+  const [seriesStoreProducts, setSeriesStoreProducts] = useState<StoreProduct[]>([])
+  const [launcherInteractionGameId, setLauncherInteractionGameId] = useState<string | null>(null)
+  const focusedLauncherGameIdRef = useRef<string | null>(null)
+  const hoveredLauncherGameIdRef = useRef<string | null>(null)
+  const launcherInteractionSourceRef = useRef<'focus' | 'pointer' | null>(null)
+  const relationshipQuery = useMemo(
+    () => seriesSearchQuery(selectedGame?.name ?? ''),
+    [selectedGame?.name]
+  )
+
+  useEffect(() => {
+    let active = true
+    setSeriesStoreProducts([])
+    if (relationshipQuery.length < 2) return () => undefined
+
+    const timer = window.setTimeout(() => {
+      void window.api.store
+        .search(relationshipQuery)
+        .then((response) => {
+          if (active) setSeriesStoreProducts(response.products)
+        })
+        .catch(() => {
+          if (active) setSeriesStoreProducts([])
+        })
+    }, 300)
+
+    return () => {
+      active = false
+      window.clearTimeout(timer)
+    }
+  }, [relationshipQuery])
+
+  const recommendations = useMemo(
+    () =>
+      relatedStoreProducts(
+        selectedGame,
+        [...storeProducts, ...seriesStoreProducts],
+        libraryGames
+      ),
+    [libraryGames, selectedGame, seriesStoreProducts, storeProducts]
+  )
+  const launcherGames = installedGames.slice(0, 6)
+  const launcherReflectionIndex = launcherInteractionGameId
+    ? launcherGames.findIndex((game) => game.id === launcherInteractionGameId)
+    : -1
+  const providerLabel = selectedGame?.provider.toLocaleUpperCase()
+  const selectedPublishers = selectedGame?.metadata.publishers?.filter(Boolean).slice(0, 2) ?? []
+
+  function updateLauncherInteraction(
+    gameId: string,
+    active: boolean,
+    source: 'focus' | 'pointer'
+  ): void {
+    const sourceGameRef =
+      source === 'focus' ? focusedLauncherGameIdRef : hoveredLauncherGameIdRef
+
+    if (active) {
+      const alreadyActive =
+        sourceGameRef.current === gameId && launcherInteractionSourceRef.current === source
+      sourceGameRef.current = gameId
+      if (alreadyActive) return
+      launcherInteractionSourceRef.current = source
+      setLauncherInteractionGameId(gameId)
+      return
+    }
+
+    if (sourceGameRef.current === gameId) sourceGameRef.current = null
+    if (source === 'focus') {
+      launcherInteractionSourceRef.current = null
+      setLauncherInteractionGameId(null)
+      return
+    }
+    if (launcherInteractionSourceRef.current !== source) return
+
+    if (focusedLauncherGameIdRef.current) {
+      launcherInteractionSourceRef.current = 'focus'
+      setLauncherInteractionGameId(focusedLauncherGameIdRef.current)
+      return
+    }
+
+    launcherInteractionSourceRef.current = null
+    setLauncherInteractionGameId(null)
+  }
+
+  return (
+    <div
+      data-home-layout="coresense"
+      data-home-stage-mode="game-focus"
+      className="home-layout coresense-home relative flex h-full flex-col overflow-hidden"
+    >
+      <div className="absolute inset-0">
+        <div className="home-backdrop-art absolute inset-0">
+          <HomeBackdrop game={backdropGame} />
+        </div>
+        <div className="coresense-backdrop-veil absolute inset-0" />
+        <div className="home-backdrop-dim absolute inset-0" />
+      </div>
+
+      <div
+        ref={containerRef}
+        className="scrollbar-none relative z-10 flex h-full flex-col overflow-y-auto px-[clamp(1.5rem,4vw,5rem)] pb-[clamp(1rem,2.5vh,2.25rem)] pt-[calc(5rem+clamp(0.75rem,2vh,1.5rem))]"
+      >
+        {installedGames.length > 0 ? (
+          <>
+            <section className="coresense-launcher-section shrink-0">
+              <div className="mb-[clamp(0.45rem,1vh,0.8rem)] flex items-center justify-between gap-4">
+                <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-white/58">
+                  {installedGames.some((game) => latestLibraryActivity(game) > 0)
+                    ? t('home.continuePlaying')
+                    : t('home.featuredInstalled')}
+                </p>
+                {activity && (
+                  <div className="flex items-center gap-2 text-[10px] text-white/55">
+                    <ActivityInline
+                      label={t('home.activity7Days')}
+                      activity={activity.sevenDays}
+                      hasHistory={activity.recordedSessionCount > 0}
+                      language={language}
+                    />
+                    <ActivityInline
+                      label={t('home.activity30Days')}
+                      activity={activity.thirtyDays}
+                      hasHistory={activity.recordedSessionCount > 0}
+                      language={language}
+                    />
+                  </div>
+                )}
+              </div>
+              <div
+                data-navigation-grid
+                data-grid-columns={launcherGames.length}
+                data-grid-exit-y="true"
+                style={{
+                  gridTemplateColumns: `repeat(${launcherGames.length}, minmax(0, var(--coresense-launcher-size)))`
+                }}
+                className="coresense-launcher-grid grid w-full min-w-0 items-start overflow-visible px-1 pb-3 pt-1"
+              >
+                {launcherGames.map((game, index) => {
+                  const active = selectedGame?.id === game.id
+                  const reflection = resolveHomeCardReflection(index, launcherReflectionIndex)
+                  const activeMotion =
+                    !reduceMotion && reflection?.distance === 0
+                      ? { y: -3, scale: 1.035 }
+                      : { y: 0, scale: 1 }
+                  return (
+                    <motion.button
+                      key={game.id}
+                      data-focusable
+                      data-game-card="true"
+                      data-game-id={game.id}
+                      data-grid-index={index}
+                      data-home-game-card="true"
+                      data-coresense-launcher="true"
+                      data-active={active ? 'true' : undefined}
+                      aria-label={game.name}
+                      onFocus={() => {
+                        onSelectGame(game)
+                        updateLauncherInteraction(game.id, true, 'focus')
+                      }}
+                      onBlur={(event) => {
+                        const next = event.relatedTarget
+                        if (
+                          next instanceof Element &&
+                          next.closest('[data-coresense-launcher="true"]')
+                        ) {
+                          return
+                        }
+                        updateLauncherInteraction(game.id, false, 'focus')
+                      }}
+                      onMouseEnter={() => {
+                        onSelectGame(game)
+                        updateLauncherInteraction(game.id, true, 'pointer')
+                      }}
+                      onMouseMove={() => {
+                        onSelectGame(game)
+                        updateLauncherInteraction(game.id, true, 'pointer')
+                      }}
+                      onMouseLeave={(event) => {
+                        const next = event.relatedTarget
+                        if (
+                          next instanceof Element &&
+                          next.closest('[data-coresense-launcher="true"]')
+                        ) {
+                          return
+                        }
+                        updateLauncherInteraction(game.id, false, 'pointer')
+                      }}
+                      onClick={() => onOpenGame(game)}
+                      animate={activeMotion}
+                      transition={
+                        reduceMotion
+                          ? { duration: 0 }
+                          : { type: 'spring', stiffness: 420, damping: 30 }
+                      }
+                      className="coresense-launcher group relative shrink-0 scroll-m-[clamp(1rem,4vh,2.5rem)] text-left outline-none"
+                    >
+                      <span
+                        className="coresense-launcher-art home-card-convex relative isolate block overflow-hidden border border-white/10 bg-black/35 shadow-card"
+                      >
+                        <GameImage
+                          gameId={game.id}
+                          name={game.name}
+                          orientation="vertical"
+                          fit="cover"
+                          className="h-full w-full object-cover object-top"
+                        />
+                        {reflection && (
+                          <HomeCardReflection reflection={reflection} />
+                        )}
+                        <span className="absolute inset-0 z-20 bg-gradient-to-t from-black/45 via-transparent to-white/[0.08]" />
+                        <span className="absolute bottom-2 right-2 z-20 flex h-7 w-7 items-center justify-center rounded-full bg-white text-black opacity-0 shadow-lg transition-opacity group-hover:opacity-100 group-data-[focused=true]:opacity-100">
+                          <Play size={11} fill="currentColor" />
+                        </span>
+                      </span>
+                      <span className="mt-2 block max-w-full truncate text-xs font-semibold text-white/72 transition-colors group-hover:text-white group-data-[focused=true]:text-white">
+                        {game.name}
+                      </span>
+                    </motion.button>
+                  )
+                })}
+              </div>
+            </section>
+
+            <div className="coresense-spotlight flex min-h-[5rem] flex-1 items-end py-[clamp(0.75rem,2.5vh,2.25rem)]">
+              {selectedGame && (
+                <motion.button
+                  key={selectedGame.id}
+                  data-focusable
+                  data-coresense-primary="true"
+                  onClick={() => onOpenGame(selectedGame)}
+                  initial={{ opacity: 0, x: -18 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
+                  className="coresense-identity group flex max-w-[min(48rem,82vw)] items-center gap-[clamp(0.8rem,1.6vw,1.35rem)] rounded-[clamp(0.9rem,1.4vw,1.25rem)] border border-white/10 bg-black/35 p-[clamp(0.7rem,1.3vw,1rem)] pr-[clamp(1rem,2vw,1.6rem)] text-left shadow-[0_18px_50px_rgba(0,0,0,0.28)] backdrop-blur-xl"
+                >
+                  <span className="coresense-identity-icon block shrink-0 overflow-hidden rounded-[24%] border border-white/15 bg-black/40 shadow-2xl">
+                    <GameImage
+                      gameId={selectedGame.id}
+                      name={selectedGame.name}
+                      orientation="vertical"
+                      fit="cover"
+                      className="h-full w-full object-cover object-top"
+                    />
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-[9px] font-bold uppercase tracking-[0.24em] text-accent">
+                      {providerLabel}
+                    </span>
+                    <span className="mt-0.5 line-clamp-2 text-[clamp(1.25rem,2.2vw,2rem)] font-bold leading-tight tracking-tight text-white drop-shadow-lg">
+                      {selectedGame.name}
+                    </span>
+                    <span className="mt-1.5 flex min-w-0 items-center gap-2 text-[11px] text-white/58">
+                      <Timer size={12} className="shrink-0 text-accent" />
+                      <span className="truncate">
+                        {formatPlaytime(selectedGame, t) ?? t('details.notPlayed')}
+                        {selectedPublishers.length > 0 ? ` · ${selectedPublishers.join(' · ')}` : ''}
+                      </span>
+                    </span>
+                  </span>
+                  <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-white text-black shadow-[0_10px_32px_rgba(0,0,0,0.35)] transition-transform group-hover:scale-105 group-data-[focused=true]:scale-105">
+                    <Play size={16} fill="currentColor" />
+                  </span>
+                </motion.button>
+              )}
+            </div>
+
+            {recommendations.length > 0 && selectedGame && (
+              <section className="coresense-recommendations shrink-0">
+                <div className="mb-[clamp(0.45rem,1vh,0.75rem)] flex items-end justify-between gap-4">
+                  <div>
+                    <h2 className="text-[clamp(0.85rem,1.15vw,1.05rem)] font-semibold tracking-wide text-white">
+                      {t('home.coresense.similar')}
+                    </h2>
+                    <p className="mt-0.5 text-[10px] text-white/48">
+                      {t('home.coresense.because', { game: selectedGame.name })}
+                    </p>
+                  </div>
+                </div>
+                <div
+                  data-navigation-grid
+                  data-grid-columns={recommendations.length}
+                  data-grid-exit-y="true"
+                  style={{
+                    gridTemplateColumns: `repeat(${recommendations.length}, minmax(0, 1fr))`
+                  }}
+                  className="coresense-recommendation-grid grid w-full min-w-0 px-1 pb-2 pt-1"
+                >
+                  {recommendations.map(({ product, relationship }, index) => (
+                    <motion.button
+                      key={product.id}
+                      data-focusable
+                      data-grid-index={index}
+                      data-coresense-recommendation={product.id}
+                      onClick={() => onOpenStoreProduct(product)}
+                      whileHover={{ y: -3, scale: 1.015 }}
+                      whileFocus={{ y: -3, scale: 1.015 }}
+                      transition={{ type: 'spring', stiffness: 380, damping: 28 }}
+                      aria-label={`${product.name}, ${relationshipLabel(relationship, t)}, ${product.bestOffer?.formattedPrice ?? t('store.openStore')}`}
+                      className="coresense-store-card group relative shrink-0 overflow-hidden rounded-[clamp(0.6rem,1vw,0.9rem)] border border-white/10 bg-black/35 text-left shadow-card outline-none backdrop-blur-lg"
+                    >
+                      <span className="relative block aspect-[16/7.5] overflow-hidden">
+                        <GameImage
+                          gameId={product.id}
+                          name={product.name}
+                          orientation="horizontal"
+                          fit="cover"
+                          previewUrl={product.headerUrl ?? product.heroUrl ?? product.portraitUrl}
+                          className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-[1.035] group-data-[focused=true]:scale-[1.035]"
+                        />
+                        <span className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/5 to-black/15" />
+                        {(product.bestOffer?.discountPercent ?? 0) > 0 && (
+                          <span className="absolute left-2 top-2 rounded-md bg-emerald-400 px-1.5 py-0.5 text-[9px] font-black text-black">
+                            -{product.bestOffer?.discountPercent}%
+                          </span>
+                        )}
+                      </span>
+                      <span className="flex items-center justify-between gap-3 px-3 py-2.5">
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-xs font-bold text-white">{product.name}</span>
+                          <span className="mt-0.5 block truncate text-[9px] text-white/48">
+                            {relationshipLabel(relationship, t)} ·{' '}
+                            {product.bestOffer?.sourceLabel ?? t('store.openStore')}
+                          </span>
+                        </span>
+                        <span className="flex shrink-0 items-center gap-1.5 text-[11px] font-bold text-white">
+                          {product.bestOffer?.formattedPrice ?? ''}
+                          <ExternalLink size={11} className="text-accent" />
+                        </span>
+                      </span>
+                    </motion.button>
+                  ))}
+                </div>
+              </section>
+            )}
+          </>
+        ) : (
+          <div className="flex flex-1 items-center justify-center text-sm text-muted">
+            {t('home.noInstalledGames')}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function ActivityMetric({
+  label,
+  activity,
+  hasHistory,
+  language,
+  t
+}: {
+  label: string
+  activity: LibraryActivityWindow
+  hasHistory: boolean
+  language: 'en' | 'de'
+  t: TFunction
+}): JSX.Element {
+  return (
+    <div className="w-[clamp(6.25rem,9vw,7.75rem)] rounded-xl border border-white/10 bg-black/45 px-3 py-2 text-left shadow-lg backdrop-blur-xl">
+      <p className="flex items-center gap-1.5 text-[9px] font-bold uppercase tracking-[0.14em] text-white/50">
+        <CalendarDays size={11} className="text-accent" />
+        {label}
+      </p>
+      <p className="mt-1 text-sm font-bold text-white">
+        {hasHistory ? formatActivityDuration(activity.playtimeSeconds, language) : '—'}
+      </p>
+      <p className="mt-0.5 truncate text-[9px] text-white/45">
+        {hasHistory
+          ? t(activity.sessionCount === 1 ? 'home.sessionCountSingle' : 'home.sessionCount', {
+              count: activity.sessionCount
+            })
+          : t('home.activityWaiting')}
+      </p>
+    </div>
+  )
+}
+
+function ActivityInline({
+  label,
+  activity,
+  hasHistory,
+  language
+}: {
+  label: string
+  activity: LibraryActivityWindow
+  hasHistory: boolean
+  language: 'en' | 'de'
+}): JSX.Element {
+  return (
+    <span className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-black/35 px-2.5 py-1 backdrop-blur-lg">
+      <CalendarDays size={10} className="text-accent" />
+      <span className="font-bold uppercase tracking-wider text-white/45">{label}</span>
+      <span className="font-semibold text-white/80">
+        {hasHistory ? formatActivityDuration(activity.playtimeSeconds, language) : '—'}
+      </span>
+    </span>
   )
 }
 
@@ -598,7 +1457,7 @@ function GameFocusSummary({
                 <FocusStat
                   icon={<Timer size={14} />}
                   label={t('details.yourPlaytime')}
-                  value={formatPlaytime(game.playtimeMinutes, t) ?? t('details.notPlayed')}
+                  value={formatPlaytime(game, t) ?? t('details.notPlayed')}
                 />
                 {completionAvailable && completionTimes.mainStoryMinutes && (
                   <FocusStat

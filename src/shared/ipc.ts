@@ -1,5 +1,6 @@
 export type ThemeId =
   | 'midnight'
+  | 'coresense'
   | 'aurora'
   | 'violet'
   | 'sakura'
@@ -12,9 +13,20 @@ export type ThemeId =
   | 'lime'
   | 'monochrome'
 export type UiDensity = 'standard' | 'compact'
-export type HomeLayoutId = 'orbit' | 'float'
+export type HomeLayoutId = 'orbit' | 'float' | 'coresense'
 export type GameCardSize = 'compact' | 'standard' | 'large'
 export type BackdropIntensity = 'subtle' | 'balanced' | 'vivid'
+export const PROFILE_AVATAR_IDS = [
+  'orbit',
+  'nova',
+  'pulse',
+  'drift',
+  'ember',
+  'pixel',
+  'custom',
+  'steam'
+] as const
+export type ProfileAvatarId = (typeof PROFILE_AVATAR_IDS)[number]
 export const NOTIFICATION_POSITIONS = ['top-right', 'top-center', 'bottom-right'] as const
 export type NotificationPosition = (typeof NOTIFICATION_POSITIONS)[number]
 export const NOTIFICATION_MOTIONS = ['slide', 'lift', 'scale'] as const
@@ -32,6 +44,51 @@ export type AudioPreset =
 export type StoreRegionId = 'eu' | 'us' | 'gb' | 'ca' | 'au'
 export type SystemPowerAction = 'sleep' | 'restart' | 'shutdown'
 export type AppControlAction = 'relaunch' | 'quit'
+export type GraphicsAdapterVendor = 'nvidia' | 'amd' | 'intel' | 'other'
+
+export interface InstalledGraphicsAdapter {
+  name: string
+  manufacturer: string
+  vendor: GraphicsAdapterVendor
+  driverVersion: string
+  driverDate?: string
+}
+
+export interface PendingWindowsUpdate {
+  id: string
+  title: string
+  kbArticleIds: string[]
+  severity?: string
+  rebootRequired: boolean
+  downloaded: boolean
+}
+
+export interface GraphicsDriverUpdate {
+  id: string
+  title: string
+  vendor: GraphicsAdapterVendor
+  driverClass: string
+  manufacturer: string
+  model: string
+  provider: string
+  driverDate?: string
+  matchedAdapterNames: string[]
+  rebootRequired: boolean
+  downloaded: boolean
+}
+
+export interface SystemUpdateSnapshot {
+  platform: 'windows' | 'unsupported'
+  state: 'ready' | 'partial' | 'error' | 'unsupported'
+  checkedAt: number
+  windowsUpdates: PendingWindowsUpdate[]
+  graphicsAdapters: InstalledGraphicsAdapter[]
+  graphicsDriverUpdates: GraphicsDriverUpdate[]
+  errors: {
+    updateScan?: 'windows-update-unavailable'
+    graphicsDetection?: 'graphics-detection-unavailable'
+  }
+}
 export const HARDWARE_CONTROL_BUTTONS = [
   'menu',
   'view',
@@ -83,9 +140,11 @@ export interface OrbitBackgroundServiceStatus {
 
 export interface OrbitSettings {
   theme: ThemeId
+  profileAvatar: ProfileAvatarId
   homeLayout: HomeLayoutId
   gameCardSize: GameCardSize
   backdropIntensity: BackdropIntensity
+  homeCardBubbleEffect: boolean
   uiDensity: UiDensity
   language: Language
   audioPreset: AudioPreset
@@ -130,6 +189,41 @@ export interface EpicAccount {
 }
 
 export type GameProvider = 'steam' | 'epic' | 'gog' | 'xbox' | 'ea' | 'ubisoft' | 'local'
+
+export type LauncherDownloadProvider = Extract<GameProvider, 'steam' | 'epic' | 'xbox'>
+export type LauncherDownloadPhase =
+  | 'downloading'
+  | 'updating'
+  | 'installing'
+  | 'verifying'
+  | 'paused'
+  | 'completed'
+  | 'error'
+export type LauncherDownloadConfidence = 'exact' | 'approximate' | 'heuristic'
+
+/** Ephemeral, path-free activity reported by a locally installed launcher. */
+export interface LauncherDownloadActivity {
+  id: string
+  provider: LauncherDownloadProvider
+  providerGameId: string
+  gameId?: string
+  title: string
+  phase: LauncherDownloadPhase
+  confidence: LauncherDownloadConfidence
+  /** Normalized 0..1 progress. Omitted when the launcher exposes no reliable total. */
+  progress?: number
+  bytesDownloaded?: number
+  bytesTotal?: number
+  bytesPerSecond?: number
+  etaSeconds?: number
+  updatedAt: number
+}
+
+export interface LauncherDownloadSnapshot {
+  revision: number
+  updatedAt: number
+  activities: LauncherDownloadActivity[]
+}
 
 export type GamePlatform = 'windows' | 'macos' | 'linux'
 
@@ -217,6 +311,8 @@ export type LocalGameBackupState = 'never' | 'success' | 'failed'
 
 export interface LocalGameConfig {
   executablePath: string
+  /** Parsed argv passed directly to the executable without a command shell. */
+  launchArguments?: string[]
   savePath?: string
   backupEnabled: boolean
   lastBackupAt?: number
@@ -239,6 +335,14 @@ export interface CustomGameDraft {
 export interface CustomGameCommitInput {
   draftId: string
   name: string
+  /** User-facing Windows argument string; parsed and validated in the main process. */
+  launchArguments?: string
+}
+
+export interface CustomGameLaunchArgumentsInput {
+  gameId: string
+  /** User-facing Windows argument string; parsed and validated in the main process. */
+  launchArguments?: string
 }
 
 export interface LocalGameBackupResult {
@@ -263,6 +367,9 @@ export interface LibraryGame {
   metadataUpdatedAt?: number
   metadataLocale?: string
   metadataSource?: string
+  /** Canonical playtime with second precision. Provider time is preferred when available. */
+  playtimeSeconds?: number
+  /** Compatibility/aggregate value derived from `playtimeSeconds`. */
   playtimeMinutes?: number
   lastPlayedTimestamp?: number
   lastStartedAt?: number
@@ -313,6 +420,29 @@ export interface LibraryProviderStatus {
   lastCheckedAt?: number
 }
 
+/** A completed game session observed by ORBIT itself. */
+export interface LibrarySessionRecord {
+  id: string
+  gameId: string
+  startedAt: number
+  endedAt: number
+  durationSeconds: number
+}
+
+export interface LibraryActivityWindow {
+  playtimeSeconds: number
+  sessionCount: number
+}
+
+export interface LibraryActivitySummary {
+  /** Best installed continuation target: ORBIT session first, provider activity second. */
+  continueGameId?: string
+  lastSession?: LibrarySessionRecord
+  sevenDays: LibraryActivityWindow
+  thirtyDays: LibraryActivityWindow
+  recordedSessionCount: number
+}
+
 export interface LibrarySnapshot {
   /** Cross-store canonical games used by Home and the combined library. */
   games: LibraryGame[]
@@ -321,6 +451,8 @@ export interface LibrarySnapshot {
   recentGameIds: string[]
   loadedAt: number
   isLoadingMetadata: boolean
+  /** Rolling local activity. Provider totals remain authoritative for lifetime playtime. */
+  activity?: LibraryActivitySummary
   /** Safe, user-facing provider diagnostics; no tokens, paths or account IDs. */
   providerStatuses?: LibraryProviderStatus[]
 }
@@ -345,6 +477,8 @@ export interface GameLaunchStatus {
   startedAt?: number
   detectedAt?: number
   endedAt?: number
+  sessionDurationSeconds?: number
+  totalPlaytimeSeconds?: number
   returnTask?: 'backing-up' | 'backup-complete' | 'backup-failed'
   message?: string
 }
@@ -377,6 +511,8 @@ export interface StoreProduct {
   name: string
   summary?: string
   genres?: string[]
+  developers?: string[]
+  publishers?: string[]
   supportedLanguages?: string[]
   discoverEligible?: boolean
   artworkStatus?: 'available' | 'missing' | 'pending'
@@ -513,11 +649,14 @@ export const IPC = {
   libraryStatsGet: 'library:stats:get',
   libraryRefresh: 'library:refresh',
   libraryUpdated: 'library:updated',
+  launcherDownloadsGet: 'launcher-downloads:get',
+  launcherDownloadsUpdated: 'launcher-downloads:updated',
   customGameBeginImport: 'library:custom:import:begin',
   customGameSelectArtwork: 'library:custom:artwork:select',
   customGameSelectSave: 'library:custom:save:select',
   customGameClearSave: 'library:custom:save:clear',
   customGameCommit: 'library:custom:commit',
+  customGameSetLaunchArguments: 'library:custom:launch-arguments:set',
   customGameCancel: 'library:custom:cancel',
   customGameRemove: 'library:custom:remove',
   customGameBackup: 'library:custom:backup',
@@ -530,6 +669,8 @@ export const IPC = {
   gameAchievementsResolve: 'game:achievements:resolve',
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
+  profileAvatarGetCustom: 'profile-avatar:custom:get',
+  profileAvatarSelectCustom: 'profile-avatar:custom:select',
   appVersion: 'app:version',
   backgroundServiceGetStatus: 'background-service:status:get',
   backgroundServiceControl: 'background-service:control',
@@ -555,6 +696,8 @@ export const IPC = {
   storeSetRegion: 'store:region:set',
   syncGet: 'sync:get',
   syncUpdated: 'sync:updated',
+  systemUpdatesCheck: 'system:updates:check',
+  systemOpenUpdateSettings: 'system:updates:open-settings',
   systemPower: 'system:power',
   appControl: 'app:control',
   openExternal: 'shell:open-external'

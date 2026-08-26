@@ -11,6 +11,7 @@ import {
   Loader2,
   Play,
   ShieldCheck,
+  SlidersHorizontal,
   Sparkles,
   Timer,
   Trophy,
@@ -20,10 +21,12 @@ import {
 import type {
   GameAchievementsSnapshot,
   GameCompletionTimes,
+  ImageUpdate,
   LibraryGame
 } from '@shared/ipc'
 import { GameImage } from './GameImage'
 import { ArtworkPicker } from './ArtworkPicker'
+import { LaunchOptionsDialog } from './LaunchOptionsDialog'
 import { useBackHandler } from '@renderer/hooks/useBackHandler'
 import { useLaunchGame } from '@renderer/hooks/useLaunchGame'
 import { useT } from '@renderer/i18n/useT'
@@ -53,8 +56,10 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
   const closeGame = useGameDetailStore((state) => state.closeGame)
   const launch = useLaunchGame()
   const detailRootRef = useRef<HTMLDivElement>(null)
+  const returnFocusRef = useRef<HTMLElement | null>(null)
   const launchRef = useRef<HTMLButtonElement>(null)
   const artworkRef = useRef<HTMLButtonElement>(null)
+  const launchOptionsRef = useRef<HTMLButtonElement>(null)
   const [completionTimes, setCompletionTimes] = useState<GameCompletionTimes | null>(
     game.metadata.completionTimes ?? null
   )
@@ -65,13 +70,18 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
   const [backupFeedback, setBackupFeedback] = useState<'success' | 'failed' | null>(null)
   const [confirmRemove, setConfirmRemove] = useState(false)
   const [artworkPickerOpen, setArtworkPickerOpen] = useState(false)
-  const [hasArtworkOverride, setHasArtworkOverride] = useState(false)
+  const [launchOptionsOpen, setLaunchOptionsOpen] = useState(false)
+  const [hasArtworkOverrides, setHasArtworkOverrides] = useState({
+    vertical: false,
+    horizontal: false
+  })
   const [artworkFeedback, setArtworkFeedback] = useState<'updated' | 'reset' | 'failed' | null>(null)
 
   useBackHandler(closeGame)
 
   useEffect(() => {
     const previousFocus = document.activeElement as HTMLElement | null
+    returnFocusRef.current = previousFocus
     const frame = requestAnimationFrame(() => focusElement(launchRef.current))
     return () => {
       cancelAnimationFrame(frame)
@@ -123,18 +133,37 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
 
   useEffect(() => {
     let active = true
+    const generations = { vertical: 0, horizontal: 0 }
     setArtworkFeedback(null)
-    setHasArtworkOverride(false)
-    void window.api.image
-      .hasCustom(game.id)
-      .then((custom) => {
-        if (active) setHasArtworkOverride(custom)
-      })
-      .catch(() => {
-        if (active) setHasArtworkOverride(false)
-      })
+    setHasArtworkOverrides({ vertical: false, horizontal: false })
+    const refreshOrientation = (orientation: 'vertical' | 'horizontal'): void => {
+      const generation = ++generations[orientation]
+      void window.api.image
+        .hasCustom(game.id, orientation)
+        .then((hasCustom) => {
+          if (!active || generations[orientation] !== generation) return
+          setHasArtworkOverrides((current) => ({ ...current, [orientation]: hasCustom }))
+        })
+        .catch(() => {
+          if (!active || generations[orientation] !== generation) return
+          setHasArtworkOverrides((current) => ({ ...current, [orientation]: false }))
+        })
+    }
+    refreshOrientation('vertical')
+    refreshOrientation('horizontal')
+    const dispose = window.api.image.onUpdated((update: ImageUpdate) => {
+      if (
+        update.gameId === game.id &&
+        (update.orientation === 'vertical' || update.orientation === 'horizontal')
+      ) {
+        refreshOrientation(update.orientation)
+      }
+    })
     return () => {
       active = false
+      generations.vertical++
+      generations.horizontal++
+      dispose()
     }
   }, [game.id])
 
@@ -147,12 +176,12 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
   useEffect(() => {
     const root = detailRootRef.current
     if (!root) return
-    if (artworkPickerOpen) root.setAttribute('inert', '')
+    if (artworkPickerOpen || launchOptionsOpen) root.setAttribute('inert', '')
     else root.removeAttribute('inert')
     return () => root.removeAttribute('inert')
-  }, [artworkPickerOpen])
+  }, [artworkPickerOpen, launchOptionsOpen])
 
-  const playtime = formatPlaytime(game.playtimeMinutes, t) ?? t('details.notPlayed')
+  const playtime = formatPlaytime(game, t) ?? t('details.notPlayed')
   const summary = game.metadata.summary ?? game.metadata.description
   const developer = game.metadata.developers?.[0]
   const genreText = useMemo(() => game.metadata.genres?.slice(0, 3).join(' · '), [game.metadata.genres])
@@ -177,6 +206,7 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
 
   const handleBackup = async (): Promise<void> => {
     if (!local?.backupEnabled || backupBusy) return
+    const actionOrigin = document.activeElement as HTMLElement | null
     setBackupBusy(true)
     setBackupFeedback(null)
     try {
@@ -186,6 +216,9 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
       setBackupFeedback('failed')
     } finally {
       setBackupBusy(false)
+      requestAnimationFrame(() => {
+        if (actionOrigin?.isConnected) focusElement(actionOrigin)
+      })
     }
   }
 
@@ -194,10 +227,51 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
       setConfirmRemove(true)
       return
     }
+    const allGameCards = Array.from(
+      document.querySelectorAll<HTMLElement>('[data-game-card="true"]')
+    )
+    const originCard = returnFocusRef.current?.closest<HTMLElement>('[data-game-card="true"]')
+    const gridCard =
+      originCard?.closest('[data-navigation-grid]')
+        ? originCard
+        : allGameCards.find(
+            (candidate) =>
+              candidate.dataset.gameId === game.id &&
+              Boolean(candidate.closest('[data-navigation-grid]'))
+          )
+    const visibleCards = gridCard
+      ? Array.from(
+          gridCard
+            .closest('[data-navigation-grid]')
+            ?.querySelectorAll<HTMLElement>('[data-game-card="true"]') ?? []
+        )
+      : []
+    const currentIndex = gridCard ? visibleCards.indexOf(gridCard) : -1
+    const fallbackCard =
+      currentIndex >= 0
+        ? (visibleCards[currentIndex + 1] ?? visibleCards[currentIndex - 1] ?? null)
+        : null
+    const fallbackSource = document.querySelector<HTMLElement>(
+      '[data-library-source][aria-pressed="true"]'
+    )
+    const fallbackControl =
+      fallbackSource ??
+      document.querySelector<HTMLElement>('[data-top-nav] [aria-current="page"]') ??
+      allGameCards.find((candidate) => candidate.dataset.gameId !== game.id) ??
+      null
     try {
       const snapshot = await window.api.library.custom.remove(game.id)
       useLibraryStore.getState().applySnapshot(snapshot)
       closeGame()
+      requestAnimationFrame(() => {
+        focusElement(
+          fallbackCard?.isConnected
+            ? fallbackCard
+            : fallbackControl?.isConnected
+              ? fallbackControl
+              : null
+        )
+      })
     } catch {
       setConfirmRemove(false)
     }
@@ -208,24 +282,29 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
     requestAnimationFrame(() => focusElement(artworkRef.current))
   }
 
-  const handleArtworkApplied = (): void => {
-    setHasArtworkOverride(true)
+  const handleArtworkApplied = (orientation: 'vertical' | 'horizontal'): void => {
+    setHasArtworkOverrides((current) => ({ ...current, [orientation]: true }))
     setArtworkFeedback('updated')
     closeArtworkPicker()
   }
 
-  const handleArtworkReset = (): void => {
-    setHasArtworkOverride(false)
+  const handleArtworkReset = (orientation: 'vertical' | 'horizontal'): void => {
+    setHasArtworkOverrides((current) => ({ ...current, [orientation]: false }))
     setArtworkFeedback('reset')
     closeArtworkPicker()
+  }
+
+  const closeLaunchOptions = (): void => {
+    setLaunchOptionsOpen(false)
+    requestAnimationFrame(() => focusElement(launchOptionsRef.current))
   }
 
   return (
     <>
     <motion.div
       ref={detailRootRef}
-      data-focus-scope={artworkPickerOpen ? undefined : 'active'}
-      aria-hidden={artworkPickerOpen || undefined}
+      data-focus-scope={artworkPickerOpen || launchOptionsOpen ? undefined : 'active'}
+      aria-hidden={artworkPickerOpen || launchOptionsOpen || undefined}
       role="dialog"
       aria-modal="true"
       aria-label={game.name}
@@ -328,7 +407,9 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
                         </p>
                       )}
                       {local.backupEnabled && (
-                        <p className="mt-1 text-[10px] text-white/45">{lastBackupLabel}</p>
+                        <p aria-live="polite" className="mt-1 text-[10px] text-white/45">
+                          {lastBackupLabel}
+                        </p>
                       )}
                     </div>
                   </div>
@@ -391,12 +472,25 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
                   <button
                     data-focusable
                     data-disabled={backupBusy ? 'true' : undefined}
+                    aria-busy={backupBusy}
                     disabled={backupBusy}
                     onClick={() => void handleBackup()}
                     className="flex items-center gap-2 rounded-full border border-white/15 bg-white/[0.07] px-4 py-3 text-sm font-semibold text-white backdrop-blur-md transition-colors hover:bg-white/15"
                   >
                     {backupBusy ? <Loader2 size={16} className="animate-spin" /> : <Archive size={16} />}
                     {backupBusy ? t('details.backupRunning') : t('details.backupNow')}
+                  </button>
+                )}
+
+                {local && (
+                  <button
+                    ref={launchOptionsRef}
+                    data-focusable
+                    onClick={() => setLaunchOptionsOpen(true)}
+                    className="flex items-center gap-2 rounded-full border border-white/15 bg-white/[0.07] px-4 py-3 text-sm font-semibold text-white backdrop-blur-md transition-colors hover:bg-white/15"
+                  >
+                    <SlidersHorizontal size={16} />
+                    {t('details.launchOptions')}
                   </button>
                 )}
 
@@ -481,10 +575,22 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
       <ArtworkPicker
         gameId={game.id}
         gameName={game.name}
-        hasOverride={hasArtworkOverride}
+        hasOverrides={hasArtworkOverrides}
         onApplied={handleArtworkApplied}
         onReset={handleArtworkReset}
         onClose={closeArtworkPicker}
+      />
+    )}
+    {launchOptionsOpen && local && (
+      <LaunchOptionsDialog
+        gameId={game.id}
+        gameName={game.name}
+        initialArguments={local.launchArguments}
+        onSaved={(snapshot) => {
+          useLibraryStore.getState().applySnapshot(snapshot)
+          closeLaunchOptions()
+        }}
+        onClose={closeLaunchOptions}
       />
     )}
     </>

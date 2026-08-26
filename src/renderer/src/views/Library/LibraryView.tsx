@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { AnimatePresence } from 'framer-motion'
-import { Search, Loader2, Plus } from 'lucide-react'
+import { AnimatePresence, motion } from 'framer-motion'
+import { CircleAlert, Loader2, Plus, RefreshCw, Search, X } from 'lucide-react'
 import { useAutoFocus } from '@renderer/hooks/useAutoFocus'
 import { useLibraryStore } from '@renderer/state/libraryStore'
 import {
@@ -14,6 +14,8 @@ import { useNavigationStore } from '@renderer/state/navigationStore'
 import { usePreferencesStore } from '@renderer/state/preferencesStore'
 import { GameCard } from '@renderer/components/GameCard'
 import { CustomGameWizard } from '@renderer/components/CustomGameWizard'
+import { ControllerButtonHint } from '@renderer/components/ControllerButtonHint'
+import { useExpandableViewSearch } from '@renderer/hooks/useExpandableViewSearch'
 import { useT } from '@renderer/i18n/useT'
 import { focusElement } from '@renderer/lib/spatialNavigation'
 import { LIBRARY_SEARCH_EVENT } from '@renderer/lib/librarySearch'
@@ -32,7 +34,11 @@ export function LibraryView(): JSX.Element {
   const containerRef = useAutoFocus<HTMLDivElement>()
   const account = useAuthStore((s) => s.account)
   const epicAccount = useEpicAuthStore((s) => s.account)
-  const { games, providerGames, isLoadingMetadata, loadedAt } = useLibraryStore((s) => s.snapshot)
+  const { games, providerGames, isLoadingMetadata, loadedAt, providerStatuses } = useLibraryStore(
+    (s) => s.snapshot
+  )
+  const isRefreshing = useLibraryStore((s) => s.isRefreshing)
+  const refreshLibrary = useLibraryStore((s) => s.refresh)
   const source = useLibraryFilterStore((s) => s.source)
   const setSource = useLibraryFilterStore((s) => s.setSource)
   const isActive = useNavigationStore((s) => s.mainView === 'library')
@@ -44,8 +50,32 @@ export function LibraryView(): JSX.Element {
   const [renderLimit, setRenderLimit] = useState(INITIAL_RENDER_LIMIT)
   const revealLockedRef = useRef(false)
   const revealUnlockTimerRef = useRef<ReturnType<typeof setTimeout>>()
-  const searchRef = useRef<HTMLInputElement>(null)
   const t = useT()
+  const {
+    expanded: searchExpanded,
+    inputRef: searchRef,
+    expand: expandSearch,
+    collapse: collapseSearch
+  } = useExpandableViewSearch({
+    active: isActive,
+    containerRef,
+    eventName: LIBRARY_SEARCH_EVENT,
+    onCollapse: () => setQuery('')
+  })
+  const steamStatus = providerStatuses?.find((status) => status.provider === 'steam')
+  const showSteamSyncNotice = Boolean(
+    account &&
+      (source === 'all' || source === 'steam') &&
+      steamStatus &&
+      (steamStatus.state === 'partial' || steamStatus.state === 'error')
+  )
+  const steamSyncMessage =
+    steamStatus?.issue === 'metadata-pending'
+      ? t('library.sync.pending', { count: steamStatus.pendingCount ?? 0 })
+      : steamStatus?.issue === 'online-library-unavailable' ||
+          steamStatus?.issue === 'no-games-found'
+        ? t('library.sync.visibility')
+        : t('library.sync.partial')
 
   const sourceCounts = useMemo(
     () => ({
@@ -101,6 +131,7 @@ export function LibraryView(): JSX.Element {
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
+      if (document.activeElement === searchRef.current) return
       const active = document.activeElement as HTMLElement | null
       const firstGame = containerRef.current?.querySelector<HTMLElement>('[data-game-card="true"]')
       const activeSource = containerRef.current?.querySelector<HTMLElement>(
@@ -115,19 +146,6 @@ export function LibraryView(): JSX.Element {
     })
     return () => cancelAnimationFrame(frame)
   }, [containerRef, source])
-
-  useEffect(() => {
-    if (!isActive) return
-    const focusSearch = (): void => {
-      const input = searchRef.current
-      if (!input) return
-      focusElement(input)
-      input.click()
-      input.select()
-    }
-    window.addEventListener(LIBRARY_SEARCH_EVENT, focusSearch)
-    return () => window.removeEventListener(LIBRARY_SEARCH_EVENT, focusSearch)
-  }, [isActive])
 
   function sourceLabel(value: LibrarySource): string {
     if (value === 'steam') return t('library.source.steam')
@@ -156,14 +174,16 @@ export function LibraryView(): JSX.Element {
           className="scrollbar-none flex max-w-full shrink-0 items-center gap-1 overflow-x-auto rounded-full border border-white/10 bg-black/25 p-1"
           aria-label={t('library.source.label')}
         >
-          <span className="mx-1 rounded-md border border-white/15 px-1.5 py-0.5 text-[10px] font-bold text-muted">
-            LT
-          </span>
+          <ControllerButtonHint
+            button="leftTrigger"
+            className="mx-1 rounded-md border border-white/15 px-1.5 py-0.5 text-[10px] font-bold text-muted"
+          />
           {LIBRARY_SOURCE_ORDER.map((value) => (
             <button
               key={value}
               data-focusable
               data-library-source={value}
+              data-search-focus-fallback={source === value ? 'true' : undefined}
               aria-pressed={source === value}
               onClick={() => setSource(value)}
               className={`rounded-full px-3 py-2 text-xs font-semibold transition-colors ${
@@ -178,30 +198,66 @@ export function LibraryView(): JSX.Element {
               </span>
             </button>
           ))}
-          <span className="mx-1 rounded-md border border-white/15 px-1.5 py-0.5 text-[10px] font-bold text-muted">
-            RT
-          </span>
+          <ControllerButtonHint
+            button="rightTrigger"
+            className="mx-1 rounded-md border border-white/15 px-1.5 py-0.5 text-[10px] font-bold text-muted"
+          />
         </div>
         <div className="flex min-w-0 flex-1 items-center gap-2">
-          <div className="flex min-w-0 flex-1 items-center gap-2 rounded-full border border-white/[0.06] bg-white/5 px-3 py-2.5">
-            <Search size={16} className="shrink-0 text-muted" />
-            <input
-              ref={searchRef}
-              data-focusable
-              data-library-search
-              type="search"
-              inputMode="search"
-              enterKeyHint="search"
-              autoComplete="off"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder={t('library.search')}
-              className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted"
-            />
-            <span className="flex h-6 min-w-6 shrink-0 items-center justify-center rounded-md border border-white/15 bg-black/25 px-1.5 text-[10px] font-black text-white/70">
-              Y
-            </span>
-          </div>
+          <motion.div
+            layout
+            transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
+            className={searchExpanded ? 'min-w-0 flex-1' : 'shrink-0'}
+          >
+            {searchExpanded ? (
+              <div className="view-search-shell flex min-w-0 items-center gap-2 rounded-full border border-white/[0.06] bg-white/5 px-3 py-2.5">
+                <Search size={16} className="shrink-0 text-muted" />
+                <input
+                  ref={searchRef}
+                  data-focusable
+                  data-view-search
+                  data-library-search
+                  type="search"
+                  inputMode="search"
+                  enterKeyHint="search"
+                  autoComplete="off"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  aria-label={t('library.search')}
+                  placeholder={t('library.search')}
+                  className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted"
+                />
+                <ControllerButtonHint
+                  button="north"
+                  className="flex h-6 min-w-6 shrink-0 items-center justify-center rounded-md border border-white/15 bg-black/25 px-1.5 text-[10px] font-black text-white/70"
+                />
+                <button
+                  data-focusable
+                  type="button"
+                  onClick={collapseSearch}
+                  aria-label={t('search.close')}
+                  className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-muted transition-colors hover:bg-white/10 hover:text-white"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                tabIndex={-1}
+                aria-label={t('library.search')}
+                aria-keyshortcuts="Y"
+                onClick={expandSearch}
+                className="flex h-10 items-center gap-2 rounded-full border border-white/[0.06] bg-white/5 px-3 text-muted transition-colors hover:bg-white/10 hover:text-white"
+              >
+                <Search size={16} />
+                <ControllerButtonHint
+                  button="north"
+                  className="flex h-6 min-w-6 items-center justify-center rounded-md border border-white/15 bg-black/25 px-1.5 text-[10px] font-black text-white/70"
+                />
+              </button>
+            )}
+          </motion.div>
           <button
             data-focusable
             type="button"
@@ -219,6 +275,29 @@ export function LibraryView(): JSX.Element {
           </div>
         )}
       </div>
+
+      {showSteamSyncNotice && (
+        <div
+          role="status"
+          className="flex flex-wrap items-center gap-3 rounded-xl border border-amber-300/20 bg-amber-300/[0.07] px-4 py-3 text-amber-50"
+        >
+          <CircleAlert size={18} className="shrink-0 text-amber-300" />
+          <div className="min-w-[14rem] flex-1">
+            <p className="text-sm font-bold">{t('library.sync.title')}</p>
+            <p className="mt-0.5 text-xs leading-relaxed text-amber-50/70">{steamSyncMessage}</p>
+          </div>
+          <button
+            data-focusable
+            type="button"
+            disabled={isRefreshing}
+            onClick={() => void refreshLibrary()}
+            className="flex shrink-0 items-center gap-2 rounded-full border border-amber-200/25 bg-amber-100/10 px-3 py-2 text-xs font-bold text-amber-50 transition-colors hover:bg-amber-100/15 disabled:cursor-wait disabled:opacity-60"
+          >
+            <RefreshCw size={14} className={isRefreshing ? 'animate-spin' : undefined} />
+            {t('library.sync.retry')}
+          </button>
+        </div>
+      )}
 
       {filtered.length === 0 ? (
         <div className="flex min-h-[14rem] flex-col items-center justify-center rounded-xl2 border border-dashed border-white/10 bg-white/[0.025] px-6 text-center">

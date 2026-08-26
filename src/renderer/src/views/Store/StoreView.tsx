@@ -20,6 +20,8 @@ import { useBackHandler } from '@renderer/hooks/useBackHandler'
 import { focusElement } from '@renderer/lib/spatialNavigation'
 import { STORE_SEARCH_EVENT } from '@renderer/lib/librarySearch'
 import { GameImage } from '@renderer/components/GameImage'
+import { ControllerButtonHint } from '@renderer/components/ControllerButtonHint'
+import { useExpandableViewSearch } from '@renderer/hooks/useExpandableViewSearch'
 import { useStoreStore } from '@renderer/state/storeStore'
 import { useLibraryStore } from '@renderer/state/libraryStore'
 import { useNavigationStore } from '@renderer/state/navigationStore'
@@ -34,6 +36,7 @@ import type {
   StoreProduct,
   StoreRegionId
 } from '@shared/ipc'
+import { latestLibraryActivity } from '@shared/libraryTime'
 
 const STORE_PAGES: Array<{ id: StorePage; key: TranslationKey; icon: typeof Sparkles }> = [
   { id: 'discover', key: 'store.page.discover', icon: Sparkles },
@@ -70,7 +73,7 @@ function canonicalGenre(value: string): string {
 
 function gameIdentityWeight(game: LibraryGame): number {
   const playtime = Math.min(Math.log2(1 + (game.playtimeMinutes ?? 0) / 60) * 5, 28)
-  const lastActivity = game.lastStartedAt ?? game.lastPlayedTimestamp ?? 0
+  const lastActivity = latestLibraryActivity(game)
   const ageDays = lastActivity ? (Date.now() - lastActivity) / 86_400_000 : Infinity
   const recency = ageDays < 30 ? 16 : ageDays < 180 ? 9 : ageDays < 365 ? 4 : 0
   return 1 + playtime + recency + (game.installed ? 5 : 0)
@@ -108,7 +111,6 @@ function personalizedProductScore(product: StoreProduct, profile: Map<string, nu
 
 export function StoreView(): JSX.Element {
   const containerRef = useAutoFocus<HTMLDivElement>()
-  const searchRef = useRef<HTMLInputElement>(null)
   const t = useT()
   const snapshot = useStoreStore((state) => state.snapshot)
   const initialized = useStoreStore((state) => state.initialized)
@@ -130,6 +132,17 @@ export function StoreView(): JSX.Element {
   const lastOpenedProductId = useRef<string | null>(null)
   const libraryGames = useLibraryStore((state) => state.snapshot.games)
   const isActive = useNavigationStore((state) => state.mainView === 'store')
+  const {
+    expanded: searchExpanded,
+    inputRef: searchRef,
+    expand: expandSearch,
+    collapse: collapseSearch
+  } = useExpandableViewSearch({
+    active: isActive,
+    containerRef,
+    eventName: STORE_SEARCH_EVENT,
+    onCollapse: () => setQuery('')
+  })
   const identityProfile = useMemo(
     () => genreProfile(libraryGames, snapshot.products),
     [libraryGames, snapshot.products]
@@ -168,19 +181,6 @@ export function StoreView(): JSX.Element {
     const timer = window.setTimeout(() => void searchStore(normalized), 320)
     return () => window.clearTimeout(timer)
   }, [clearStoreSearch, query, searchStore])
-
-  useEffect(() => {
-    if (!isActive) return
-    const focusSearch = (): void => {
-      const input = searchRef.current
-      if (!input) return
-      focusElement(input)
-      input.click()
-      input.select()
-    }
-    window.addEventListener(STORE_SEARCH_EVENT, focusSearch)
-    return () => window.removeEventListener(STORE_SEARCH_EVENT, focusSearch)
-  }, [isActive])
 
   const products = useMemo(() => {
     const normalizedQuery = activeQuery.toLocaleLowerCase()
@@ -272,6 +272,7 @@ export function StoreView(): JSX.Element {
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
+      if (document.activeElement === searchRef.current) return
       const tab = containerRef.current?.querySelector<HTMLElement>(`[data-store-page="${page}"]`)
       focusElement(tab ?? null)
     })
@@ -318,9 +319,10 @@ export function StoreView(): JSX.Element {
         className="store-toolbar mb-[clamp(0.75rem,1.8vh,1.15rem)] shrink-0"
       >
         <div className="scrollbar-none flex max-w-full items-center gap-1 overflow-x-auto rounded-full border border-white/10 bg-black/25 p-1">
-          <span className="mx-1 rounded-md border border-white/15 px-1.5 py-0.5 text-[10px] font-bold text-muted">
-            LT
-          </span>
+          <ControllerButtonHint
+            button="leftTrigger"
+            className="mx-1 rounded-md border border-white/15 px-1.5 py-0.5 text-[10px] font-bold text-muted"
+          />
           {STORE_PAGES.map((item) => {
             const Icon = item.icon
             const active = page === item.id
@@ -329,6 +331,7 @@ export function StoreView(): JSX.Element {
                 key={item.id}
                 data-focusable
                 data-store-page={item.id}
+                data-search-focus-fallback={active ? 'true' : undefined}
                 aria-pressed={active}
                 onClick={() => setPage(item.id)}
                 whileTap={{ scale: 0.96 }}
@@ -348,34 +351,70 @@ export function StoreView(): JSX.Element {
               </motion.button>
             )
           })}
-          <span className="mx-1 rounded-md border border-white/15 px-1.5 py-0.5 text-[10px] font-bold text-muted">
-            RT
-          </span>
+          <ControllerButtonHint
+            button="rightTrigger"
+            className="mx-1 rounded-md border border-white/15 px-1.5 py-0.5 text-[10px] font-bold text-muted"
+          />
         </div>
 
-        <label className="store-search-shell flex min-w-0 items-center gap-2 rounded-full border border-white/[0.07] bg-white/5 px-4 py-2.5">
-          {isSearching ? (
-            <Loader2 size={15} className="shrink-0 animate-spin text-accent" />
+        <motion.div
+          layout
+          transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
+          className={searchExpanded ? 'min-w-0 w-full' : 'w-fit min-w-0 justify-self-start'}
+        >
+          {searchExpanded ? (
+            <div className="view-search-shell flex min-w-0 items-center gap-2 rounded-full border border-white/[0.07] bg-white/5 px-4 py-2.5">
+              {isSearching ? (
+                <Loader2 size={15} className="shrink-0 animate-spin text-accent" />
+              ) : (
+                <Search size={15} className="shrink-0 text-muted" />
+              )}
+              <input
+                ref={searchRef}
+                data-focusable
+                data-view-search
+                data-store-search
+                type="search"
+                inputMode="search"
+                enterKeyHint="search"
+                autoComplete="off"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                aria-label={t('store.search')}
+                placeholder={t('store.search')}
+                className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted"
+              />
+              <ControllerButtonHint
+                button="north"
+                className="flex h-6 min-w-6 shrink-0 items-center justify-center rounded-md border border-white/15 bg-black/25 px-1.5 text-[10px] font-black text-white/70"
+              />
+              <button
+                data-focusable
+                type="button"
+                onClick={collapseSearch}
+                aria-label={t('search.close')}
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-muted transition-colors hover:bg-white/10 hover:text-white"
+              >
+                <X size={14} />
+              </button>
+            </div>
           ) : (
-            <Search size={15} className="shrink-0 text-muted" />
+            <button
+              type="button"
+              tabIndex={-1}
+              aria-label={t('store.search')}
+              aria-keyshortcuts="Y"
+              onClick={expandSearch}
+              className="flex h-10 items-center gap-2 rounded-full border border-white/[0.07] bg-white/5 px-3 text-muted transition-colors hover:bg-white/10 hover:text-white"
+            >
+              <Search size={15} />
+              <ControllerButtonHint
+                button="north"
+                className="flex h-6 min-w-6 items-center justify-center rounded-md border border-white/15 bg-black/25 px-1.5 text-[10px] font-black text-white/70"
+              />
+            </button>
           )}
-          <input
-            ref={searchRef}
-            data-focusable
-            data-store-search
-            type="search"
-            inputMode="search"
-            enterKeyHint="search"
-            autoComplete="off"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder={t('store.search')}
-            className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted"
-          />
-          <span className="flex h-6 min-w-6 shrink-0 items-center justify-center rounded-md border border-white/15 bg-black/25 px-1.5 text-[10px] font-black text-white/70">
-            Y
-          </span>
-        </label>
+        </motion.div>
 
         <div className="flex items-center justify-end gap-2">
         <button

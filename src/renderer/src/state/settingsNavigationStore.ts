@@ -1,12 +1,19 @@
 import { create } from 'zustand'
 
-export type SettingsPage = 'appearance' | 'experience' | 'libraries' | 'hardware' | 'system'
+export type SettingsPage =
+  | 'appearance'
+  | 'experience'
+  | 'libraries'
+  | 'hardware'
+  | 'updates'
+  | 'system'
 
 export const SETTINGS_PAGE_ORDER: SettingsPage[] = [
   'appearance',
   'experience',
   'libraries',
   'hardware',
+  'updates',
   'system'
 ]
 

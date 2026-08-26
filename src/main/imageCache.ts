@@ -34,6 +34,7 @@ const TRANSIENT_RETRY_MAX_MS = 6 * 60 * 60 * 1000
 const ORPHAN_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_ORPHAN_DELETIONS_PER_RUN = 25
 const GENERATED_CACHE_FILE = /-(?:vertical|horizontal|icon)-[a-f0-9]{16}\.(?:jpg|png|webp)$/i
+const CUSTOM_CACHE_FILE = /^custom-(?:cover|background)-[a-f0-9]{12}-[a-f0-9]{16}\.png$/i
 // Keep background artwork decoding below the point where it competes with the
 // controller UI on handheld CPUs. Delta sync is continuous, so latency matters
 // less here than stable frame times.
@@ -131,9 +132,12 @@ async function cleanupOrphanedCacheFiles(): Promise<void> {
   try {
     ensureCacheDir()
     const referenced = new Set(
-      Object.values(manifestEntries)
-        .map(cachedFileName)
-        .filter((fileName): fileName is string => Boolean(fileName))
+      [
+        ...Object.values(manifestEntries)
+          .map(cachedFileName)
+          .filter((fileName): fileName is string => Boolean(fileName)),
+        ...customArtworkService.referencedFileNames()
+      ]
     )
     const cutoff = Date.now() - ORPHAN_RETENTION_MS
     const files = await readdir(CACHE_DIR, { withFileTypes: true })
@@ -143,13 +147,16 @@ async function cleanupOrphanedCacheFiles(): Promise<void> {
       if (
         !file.isFile() ||
         referenced.has(file.name) ||
-        (!GENERATED_CACHE_FILE.test(file.name) && !file.name.endsWith('.tmp'))
+        (!GENERATED_CACHE_FILE.test(file.name) &&
+          !CUSTOM_CACHE_FILE.test(file.name) &&
+          !file.name.endsWith('.tmp'))
       ) continue
       const filePath = join(CACHE_DIR, file.name)
       const fileStat = await stat(filePath).catch(() => null)
-      const nowReferenced = Object.values(manifestEntries).some(
-        (entry) => cachedFileName(entry) === file.name
-      )
+      const nowReferenced =
+        Object.values(manifestEntries).some(
+          (entry) => cachedFileName(entry) === file.name
+        ) || customArtworkService.referencedFileNames().includes(file.name)
       if (fileStat && fileStat.mtimeMs < cutoff && !nowReferenced) {
         await unlink(filePath).catch(() => undefined)
         deleted++
@@ -807,8 +814,8 @@ export const artworkService = new ArtworkService()
 // Kept as a function for the IPC boundary; resolution is instant and any stale
 // or missing asset is upgraded by ArtworkService's bounded background queue.
 export function resolveImage(game: LibraryGame, orientation: ImageOrientation): ResolvedImage | null {
-  if (orientation === 'vertical') {
-    const customArtwork = customArtworkService.resolve(game.id)
+  if (orientation !== 'icon') {
+    const customArtwork = customArtworkService.resolve(game.id, orientation)
     if (customArtwork) return customArtwork
   }
   return artworkService.resolve(game, orientation)

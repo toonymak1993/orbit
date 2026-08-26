@@ -46,10 +46,12 @@ function launchWindowsApplication(applicationId: string): Promise<void> {
   return launchDetached('explorer.exe', [`shell:AppsFolder\\${applicationId}`])
 }
 
-function launchDetached(executable: string, args: string[]): Promise<void> {
+function launchDetached(executable: string, args: readonly string[], cwd?: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, {
+      cwd,
       detached: true,
+      shell: false,
       stdio: 'ignore',
       windowsHide: true
     })
@@ -87,7 +89,9 @@ export async function launchGame(game: LibraryGame): Promise<void> {
     if (!executable || !executable.toLocaleLowerCase('en-US').endsWith('.exe') || !existsSync(executable)) {
       throw new Error('The custom game executable is no longer available')
     }
-    await launchDetached(executable, [])
+    const installDir = game.installDir?.trim()
+    const cwd = installDir && existsSync(installDir) ? installDir : path.dirname(executable)
+    await launchDetached(executable, game.local?.launchArguments ?? [], cwd)
     return
   }
 

@@ -8,6 +8,7 @@ import type {
   HardwareControlHoldSeconds,
   NotificationMotion,
   NotificationPosition,
+  ProfileAvatarId,
   ThemeId,
   UiDensity,
   Language
@@ -16,9 +17,12 @@ import { setUiAudioPreset } from '@renderer/lib/uiAudio'
 
 interface PreferencesState {
   theme: ThemeId
+  profileAvatar: ProfileAvatarId
+  customAvatarUrl?: string
   homeLayout: HomeLayoutId
   gameCardSize: GameCardSize
   backdropIntensity: BackdropIntensity
+  homeCardBubbleEffect: boolean
   uiDensity: UiDensity
   language: Language
   audioPreset: AudioPreset
@@ -35,9 +39,12 @@ interface PreferencesState {
   hydrated: boolean
   hydrate: () => Promise<void>
   setTheme: (theme: ThemeId) => Promise<void>
+  setProfileAvatar: (profileAvatar: ProfileAvatarId) => Promise<void>
+  selectCustomAvatar: () => Promise<boolean>
   setHomeLayout: (homeLayout: HomeLayoutId) => Promise<void>
   setGameCardSize: (gameCardSize: GameCardSize) => Promise<void>
   setBackdropIntensity: (backdropIntensity: BackdropIntensity) => Promise<void>
+  setHomeCardBubbleEffect: (enabled: boolean) => Promise<void>
   setDensity: (density: UiDensity) => Promise<void>
   setLanguage: (language: Language) => Promise<void>
   setAudioPreset: (audioPreset: AudioPreset) => Promise<void>
@@ -55,6 +62,7 @@ interface PreferencesState {
 
 export const THEME_OPTIONS: { id: ThemeId; label: string }[] = [
   { id: 'midnight', label: 'Midnight' },
+  { id: 'coresense', label: 'CoreSense' },
   { id: 'aurora', label: 'Aurora' },
   { id: 'violet', label: 'Violet' },
   { id: 'sakura', label: 'Sakura' },
@@ -70,7 +78,8 @@ export const THEME_OPTIONS: { id: ThemeId; label: string }[] = [
 
 export const HOME_LAYOUT_OPTIONS: { id: HomeLayoutId; label: string }[] = [
   { id: 'orbit', label: 'ORBIT' },
-  { id: 'float', label: 'FLOAT' }
+  { id: 'float', label: 'FLOAT' },
+  { id: 'coresense', label: 'CoreSense' }
 ]
 
 export const GAME_CARD_SIZE_OPTIONS: GameCardSize[] = ['compact', 'standard', 'large']
@@ -100,11 +109,18 @@ function applyDomAttributes(
   document.documentElement.setAttribute('data-backdrop-intensity', backdropIntensity)
 }
 
+function applyHomeCardBubbleEffect(enabled: boolean): void {
+  document.documentElement.setAttribute('data-home-card-bubbles', enabled ? 'on' : 'off')
+}
+
 export const usePreferencesStore = create<PreferencesState>((set, get) => ({
   theme: 'midnight',
+  profileAvatar: 'orbit',
+  customAvatarUrl: undefined,
   homeLayout: 'orbit',
   gameCardSize: 'standard',
   backdropIntensity: 'balanced',
+  homeCardBubbleEffect: true,
   uiDensity: 'standard',
   language: 'en',
   audioPreset: 'orbit',
@@ -121,10 +137,14 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
   hydrated: false,
 
   hydrate: async () => {
-    const settings = await window.api.settings.get()
+    const [settings, customAvatarUrl] = await Promise.all([
+      window.api.settings.get(),
+      window.api.profileAvatar.getCustom()
+    ])
     const homeLayout = settings.homeLayout ?? 'orbit'
     const gameCardSize = settings.gameCardSize ?? 'standard'
     const backdropIntensity = settings.backdropIntensity ?? 'balanced'
+    const homeCardBubbleEffect = settings.homeCardBubbleEffect ?? true
     document.documentElement.lang = settings.language
     applyDomAttributes(
       settings.theme,
@@ -133,17 +153,24 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
       gameCardSize,
       backdropIntensity
     )
+    applyHomeCardBubbleEffect(homeCardBubbleEffect)
     setUiAudioPreset(settings.audioPreset)
     set({
       theme: settings.theme,
+      profileAvatar:
+        settings.profileAvatar === 'custom' && !customAvatarUrl
+          ? 'orbit'
+          : (settings.profileAvatar ?? 'orbit'),
+      customAvatarUrl: customAvatarUrl ?? undefined,
       homeLayout,
       gameCardSize,
       backdropIntensity,
+      homeCardBubbleEffect,
       uiDensity: settings.uiDensity,
       language: settings.language,
       audioPreset: settings.audioPreset,
       showStoreTab: settings.showStoreTab,
-      showHomeBanners: homeLayout === 'float' ? false : settings.showHomeBanners,
+      showHomeBanners: homeLayout === 'orbit' ? settings.showHomeBanners : false,
       showAchievements: settings.showAchievements,
       closeLaunchersAfterGame: settings.closeLaunchersAfterGame ?? false,
       notificationsEnabled: settings.notificationsEnabled ?? true,
@@ -166,6 +193,20 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
     )
     set({ theme })
     await window.api.settings.set({ theme })
+  },
+
+  setProfileAvatar: async (profileAvatar) => {
+    if (profileAvatar === 'custom' && !get().customAvatarUrl) return
+    set({ profileAvatar })
+    await window.api.settings.set({ profileAvatar })
+  },
+
+  selectCustomAvatar: async () => {
+    const customAvatarUrl = await window.api.profileAvatar.selectCustom()
+    if (!customAvatarUrl) return false
+    set({ customAvatarUrl, profileAvatar: 'custom' })
+    await window.api.settings.set({ profileAvatar: 'custom' })
+    return true
   },
 
   setHomeLayout: async (homeLayout) => {
@@ -205,6 +246,12 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
     await window.api.settings.set({ backdropIntensity })
   },
 
+  setHomeCardBubbleEffect: async (homeCardBubbleEffect) => {
+    applyHomeCardBubbleEffect(homeCardBubbleEffect)
+    set({ homeCardBubbleEffect })
+    await window.api.settings.set({ homeCardBubbleEffect })
+  },
+
   setDensity: async (uiDensity) => {
     applyDomAttributes(
       get().theme,
@@ -235,7 +282,7 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
   },
 
   setShowHomeBanners: async (showHomeBanners) => {
-    if (get().homeLayout === 'float') return
+    if (get().homeLayout !== 'orbit') return
     set({ showHomeBanners })
     await window.api.settings.set({ showHomeBanners })
   },

@@ -1,13 +1,20 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { getVdfValue, parseVdf, vdfObject, vdfString, type VdfObject } from './vdf'
+import { getVdfValue, parseVdf, vdfObject, vdfString } from './vdf'
+import { parseSteamAppManifest } from './steamManifest'
 
 export interface InstalledSteamApp {
   appId: number
   name: string
   installDir: string
   updateAvailable: boolean
+  playtimeSeconds?: number
+  lastPlayedTimestamp?: number
+}
+
+export interface SteamLocalAppActivity {
+  playtimeSeconds?: number
   lastPlayedTimestamp?: number
 }
 
@@ -67,8 +74,11 @@ export function getSteamAppsDirectories(): string[] {
     .filter((steamappsDir) => existsSync(steamappsDir))
 }
 
-function getLocalLastPlayed(steamPath: string, steamId?: string): Map<number, number> {
-  const result = new Map<number, number>()
+function getLocalAppActivity(
+  steamPath: string,
+  steamId?: string
+): Map<number, SteamLocalAppActivity> {
+  const result = new Map<number, SteamLocalAppActivity>()
   if (!steamId || !/^\d{17}$/.test(steamId)) return result
 
   let accountId: string
@@ -92,8 +102,20 @@ function getLocalLastPlayed(steamPath: string, steamId?: string): Map<number, nu
 
     for (const [rawAppId, value] of Object.entries(apps)) {
       if (!/^\d+$/.test(rawAppId)) continue
-      const lastPlayed = Number(vdfString(getVdfValue(vdfObject(value), 'LastPlayed')))
-      if (Number.isFinite(lastPlayed) && lastPlayed > 0) result.set(Number(rawAppId), lastPlayed)
+      const app = vdfObject(value)
+      const lastPlayed = Number(vdfString(getVdfValue(app, 'LastPlayed')))
+      const playtimeMinutes = Number(vdfString(getVdfValue(app, 'Playtime')))
+      const activity: SteamLocalAppActivity = {
+        lastPlayedTimestamp:
+          Number.isFinite(lastPlayed) && lastPlayed > 0 ? lastPlayed : undefined,
+        playtimeSeconds:
+          Number.isFinite(playtimeMinutes) && playtimeMinutes >= 0
+            ? Math.round(playtimeMinutes * 60)
+            : undefined
+      }
+      if (activity.lastPlayedTimestamp !== undefined || activity.playtimeSeconds !== undefined) {
+        result.set(Number(rawAppId), activity)
+      }
     }
   } catch {
     // A corrupt local config must not prevent installed-game discovery.
@@ -102,9 +124,10 @@ function getLocalLastPlayed(steamPath: string, steamId?: string): Map<number, nu
   return result
 }
 
-function manifestRoot(source: string): VdfObject {
-  const parsed = parseVdf(source)
-  return vdfObject(getVdfValue(parsed, 'AppState')) ?? parsed
+/** Reads Steam's own per-account activity cache, including uninstalled library games. */
+export function scanSteamLocalActivity(steamId?: string): Map<number, SteamLocalAppActivity> {
+  const steamPath = getSteamInstallPath()
+  return steamPath ? getLocalAppActivity(steamPath, steamId) : new Map()
 }
 
 /**
@@ -117,7 +140,7 @@ export function scanInstalledSteamApps(steamId?: string): Map<number, InstalledS
   const steamPath = getSteamInstallPath()
   if (!steamPath) return result
 
-  const lastPlayed = getLocalLastPlayed(steamPath, steamId)
+  const localActivity = getLocalAppActivity(steamPath, steamId)
   for (const libraryPath of getLibraryFolders(steamPath)) {
     const steamappsDir = join(libraryPath, 'steamapps')
     if (!existsSync(steamappsDir)) continue
@@ -132,21 +155,15 @@ export function scanInstalledSteamApps(steamId?: string): Map<number, InstalledS
     for (const file of files) {
       if (!file.startsWith('appmanifest_') || !file.endsWith('.acf')) continue
       try {
-        const manifest = manifestRoot(readFileSync(join(steamappsDir, file), 'utf8'))
-        const appId = Number(vdfString(getVdfValue(manifest, 'appid')))
-        const stateFlags = Number(vdfString(getVdfValue(manifest, 'StateFlags')))
-        const bytesToDownload = Number(vdfString(getVdfValue(manifest, 'BytesToDownload')))
-        const bytesDownloaded = Number(vdfString(getVdfValue(manifest, 'BytesDownloaded')))
-        const userConfig = vdfObject(getVdfValue(manifest, 'UserConfig'))
-        const name =
-          vdfString(getVdfValue(manifest, 'name')) ?? vdfString(getVdfValue(userConfig, 'name'))
-        const installDirName = vdfString(getVdfValue(manifest, 'installdir'))
+        const manifest = parseSteamAppManifest(readFileSync(join(steamappsDir, file), 'utf8'))
+        const { appId, stateFlags, bytesToDownload, bytesDownloaded, name, installDirName } =
+          manifest
 
         if (
-          !Number.isInteger(appId) ||
+          !appId ||
           appId <= 0 ||
           appId === STEAM_REDISTRIBUTABLES_APP_ID ||
-          !Number.isFinite(stateFlags) ||
+          stateFlags === undefined ||
           (stateFlags & FULLY_INSTALLED_FLAG) === 0 ||
           !name ||
           !installDirName
@@ -157,17 +174,19 @@ export function scanInstalledSteamApps(steamId?: string): Map<number, InstalledS
         const installDir = join(steamappsDir, 'common', installDirName)
         if (!existsSync(installDir)) continue
         const hasPendingDownload =
-          Number.isFinite(bytesToDownload) &&
-          Number.isFinite(bytesDownloaded) &&
+          bytesToDownload !== undefined &&
+          bytesDownloaded !== undefined &&
           bytesToDownload > 0 &&
           bytesDownloaded < bytesToDownload
 
+        const activity = localActivity.get(appId)
         result.set(appId, {
           appId,
           name: name.trim(),
           installDir,
           updateAvailable: (stateFlags & UPDATE_REQUIRED_FLAG) !== 0 || hasPendingDownload,
-          lastPlayedTimestamp: lastPlayed.get(appId)
+          playtimeSeconds: activity?.playtimeSeconds,
+          lastPlayedTimestamp: activity?.lastPlayedTimestamp
         })
       } catch {
         // One unreadable/corrupt manifest must not abort the remaining library.

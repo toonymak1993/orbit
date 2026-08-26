@@ -9,6 +9,9 @@ import type { TranslationKey } from '@renderer/i18n/translations'
 import { SyncStatusIndicator } from './SyncStatusIndicator'
 import { usePreferencesStore } from '@renderer/state/preferencesStore'
 import { PowerMenu } from './PowerMenu'
+import { ControllerButtonHint } from './ControllerButtonHint'
+import { PROFILE_AVATAR_OPTIONS, ProfileAvatar } from './ProfileAvatar'
+import { DownloadActivityIsland } from './DownloadActivityIsland'
 
 const items: { id: MainView; labelKey: TranslationKey; icon: typeof Home }[] = [
   { id: 'home', labelKey: 'nav.home', icon: Home },
@@ -26,6 +29,8 @@ export function TopBar(): JSX.Element {
   const epicAccount = useEpicAuthStore((s) => s.account)
   const t = useT()
   const showStoreTab = usePreferencesStore((state) => state.showStoreTab)
+  const profileAvatar = usePreferencesStore((state) => state.profileAvatar)
+  const customAvatarUrl = usePreferencesStore((state) => state.customAvatarUrl)
   const navFocusControls = useAnimationControls()
   const [clock, setClock] = useState(() =>
     new Date().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })
@@ -44,11 +49,18 @@ export function TopBar(): JSX.Element {
 
   return (
     <header className="absolute inset-x-0 top-0 z-40 flex h-20 items-center px-4 xl:px-8">
-      <div className="relative z-10 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl2 bg-gradient-to-br from-accent to-accent-2 text-sm font-bold text-black shadow-glow">
-        O
-      </div>
+      <ProfileAvatar
+        avatarId={profileAvatar}
+        steamAvatarUrl={account?.avatarUrl}
+        customAvatarUrl={customAvatarUrl}
+        label={t(
+          PROFILE_AVATAR_OPTIONS.find((option) => option.id === profileAvatar)?.labelKey ??
+            'settings.avatar.orbit'
+        )}
+        className="relative z-10 h-10 w-10 text-lg"
+      />
 
-      <div className="absolute left-1/2 z-10 -translate-x-1/2">
+      <div className="absolute left-1/2 top-1/2 z-10 -translate-x-1/2 -translate-y-1/2">
         <motion.nav
           data-top-nav
           initial={false}
@@ -66,13 +78,12 @@ export function TopBar(): JSX.Element {
               }
             })
           }}
-          className="flex items-center justify-center gap-1 rounded-full border border-white/[0.09] bg-black/20 p-1 shadow-[0_12px_40px_rgba(0,0,0,0.22)] backdrop-blur-xl xl:gap-1.5"
+          className="relative z-10 flex items-center justify-center gap-1 rounded-full border border-white/[0.09] bg-black/20 p-1 shadow-[0_12px_40px_rgba(0,0,0,0.22)] backdrop-blur-xl xl:gap-1.5"
         >
-          <span
+          <ControllerButtonHint
+            button="leftBumper"
             className="ml-1 rounded-md border border-white/10 bg-black/20 px-1.5 py-1 text-[9px] font-bold tracking-wide text-muted/70"
-          >
-            LB
-          </span>
+          />
         {items.map((item) => {
           const Icon = item.icon
           const active = mainView === item.id
@@ -138,14 +149,16 @@ export function TopBar(): JSX.Element {
             </motion.button>
           )
         })}
-          <span
+          <ControllerButtonHint
+            button="rightBumper"
             className="mr-1 rounded-md border border-white/10 bg-black/20 px-1.5 py-1 text-[9px] font-bold tracking-wide text-muted/70"
-          >
-            RB
-          </span>
+          />
           <span aria-hidden="true" className="mx-0.5 h-5 w-px bg-white/10" />
           <PowerMenu />
         </motion.nav>
+        <div className="absolute left-1/2 top-full -translate-x-1/2">
+          <DownloadActivityIsland />
+        </div>
       </div>
 
       <div className="absolute right-4 top-1/2 z-20 flex -translate-y-1/2 items-center gap-3 text-sm text-muted xl:right-8">

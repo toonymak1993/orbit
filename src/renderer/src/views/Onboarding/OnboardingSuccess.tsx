@@ -16,6 +16,7 @@ import {
   Play,
   Sparkles,
   Trophy,
+  UserRound,
   Volume2
 } from 'lucide-react'
 import type {
@@ -25,15 +26,18 @@ import type {
   HomeLayoutId,
   LibraryGame,
   LibraryStats,
+  ProfileAvatarId,
   StoreRegionId,
   SyncPipelineProgress,
   ThemeId,
   UiDensity
 } from '@shared/ipc'
+import { latestLibraryActivity } from '@shared/libraryTime'
 import { FocusableButton } from '@renderer/components/FocusableButton'
 import { GameImage } from '@renderer/components/GameImage'
 import { HardwareControlPanel } from '@renderer/components/HardwareControlPanel'
 import { OrbitBackgroundServicePanel } from '@renderer/components/OrbitBackgroundServicePanel'
+import { ProfileAvatarPicker } from '@renderer/components/ProfileAvatar'
 import { useAutoFocus } from '@renderer/hooks/useAutoFocus'
 import { useBackHandler } from '@renderer/hooks/useBackHandler'
 import { useT } from '@renderer/i18n/useT'
@@ -51,6 +55,7 @@ import {
   usePreferencesStore
 } from '@renderer/state/preferencesStore'
 import { useSyncStore } from '@renderer/state/syncStore'
+import { useControllerButtonLabels } from '@renderer/state/controllerStore'
 import { OnboardingBackdrop, OrbitMark } from './OnboardingChrome'
 
 type SetupPage = 'libraries' | 'personalize' | 'hardware' | 'ready'
@@ -65,6 +70,7 @@ const PAGE_ORDER: SetupPage[] = ['libraries', 'personalize', 'hardware', 'ready'
 
 const THEME_SWATCH: Record<ThemeId, string> = {
   midnight: 'from-[#3fd0ff] to-[#8b5cf6]',
+  coresense: 'from-[#08275f] via-[#4a94ff] to-[#71daff]',
   aurora: 'from-[#2dd4bf] to-[#818cf8]',
   violet: 'from-[#a78bfa] to-[#f472b6]',
   sakura: 'from-[#fb71ad] to-[#c4b5fd]',
@@ -76,6 +82,12 @@ const THEME_SWATCH: Record<ThemeId, string> = {
   ice: 'from-[#bae6fd] to-[#60a5fa]',
   lime: 'from-[#a3e635] to-[#2dd4bf]',
   monochrome: 'from-[#f4f4f5] to-[#71717a]'
+}
+
+const HOME_LAYOUT_SHORT_KEYS: Record<HomeLayoutId, TranslationKey> = {
+  orbit: 'settings.homeLayout.orbitShort',
+  float: 'settings.homeLayout.floatShort',
+  coresense: 'settings.homeLayout.coresenseShort'
 }
 
 const AUDIO_OPTIONS: Array<{ id: AudioPreset; labelKey: TranslationKey }> = [
@@ -151,6 +163,7 @@ export function OnboardingSuccess({
 }: Props): JSX.Element {
   const containerRef = useAutoFocus<HTMLDivElement>()
   const t = useT()
+  const controllerLabels = useControllerButtonLabels()
   const [page, setPage] = useState<SetupPage>('libraries')
   const [region, setRegion] = useState<StoreRegionId>('eu')
   const [backgroundIndex, setBackgroundIndex] = useState(0)
@@ -171,6 +184,8 @@ export function OnboardingSuccess({
   const syncStatus = useSyncStore((state) => state.status)
   const {
     theme,
+    profileAvatar,
+    customAvatarUrl,
     homeLayout,
     gameCardSize,
     backdropIntensity,
@@ -178,6 +193,8 @@ export function OnboardingSuccess({
     language,
     audioPreset,
     setTheme,
+    setProfileAvatar,
+    selectCustomAvatar,
     setHomeLayout,
     setGameCardSize,
     setBackdropIntensity,
@@ -202,8 +219,7 @@ export function OnboardingSuccess({
         .sort(
           (left, right) =>
             Number(right.installed) - Number(left.installed) ||
-            (right.lastStartedAt ?? right.lastPlayedTimestamp ?? 0) -
-              (left.lastStartedAt ?? left.lastPlayedTimestamp ?? 0) ||
+            latestLibraryActivity(right) - latestLibraryActivity(left) ||
             (right.playtimeMinutes ?? 0) - (left.playtimeMinutes ?? 0)
         )
         .slice(0, 16),
@@ -465,6 +481,9 @@ export function OnboardingSuccess({
                 <PersonalizePage
                   games={backgroundGames}
                   theme={theme}
+                  profileAvatar={profileAvatar}
+                  steamAvatarUrl={account?.avatarUrl}
+                  customAvatarUrl={customAvatarUrl}
                   homeLayout={homeLayout}
                   gameCardSize={gameCardSize}
                   backdropIntensity={backdropIntensity}
@@ -473,6 +492,8 @@ export function OnboardingSuccess({
                   region={region}
                   audioPreset={audioPreset}
                   onTheme={(value) => void setTheme(value)}
+                  onProfileAvatar={(value) => void setProfileAvatar(value)}
+                  onSelectCustomAvatar={selectCustomAvatar}
                   onHomeLayout={(value) => void setHomeLayout(value)}
                   onGameCardSize={(value) => void setGameCardSize(value)}
                   onBackdropIntensity={(value) => void setBackdropIntensity(value)}
@@ -518,7 +539,7 @@ export function OnboardingSuccess({
           <div className="hidden text-center text-xs text-white/35 md:block">
             {page === 'ready' && !entryUnlocked
               ? t('onboarding.setup.gateWaiting')
-              : t('onboarding.setup.controllerHint')}
+              : t('onboarding.setup.controllerHint', { confirm: controllerLabels.south })}
           </div>
 
           {page !== 'ready' ? (
@@ -778,6 +799,9 @@ function ProviderCard({
 interface PersonalizePageProps {
   games: LibraryGame[]
   theme: ThemeId
+  profileAvatar: ProfileAvatarId
+  steamAvatarUrl?: string
+  customAvatarUrl?: string
   homeLayout: HomeLayoutId
   gameCardSize: GameCardSize
   backdropIntensity: BackdropIntensity
@@ -786,6 +810,8 @@ interface PersonalizePageProps {
   region: StoreRegionId
   audioPreset: AudioPreset
   onTheme: (value: ThemeId) => void
+  onProfileAvatar: (value: ProfileAvatarId) => void
+  onSelectCustomAvatar: () => Promise<boolean>
   onHomeLayout: (value: HomeLayoutId) => void
   onGameCardSize: (value: GameCardSize) => void
   onBackdropIntensity: (value: BackdropIntensity) => void
@@ -798,6 +824,9 @@ interface PersonalizePageProps {
 function PersonalizePage({
   games,
   theme,
+  profileAvatar,
+  steamAvatarUrl,
+  customAvatarUrl,
   homeLayout,
   gameCardSize,
   backdropIntensity,
@@ -806,6 +835,8 @@ function PersonalizePage({
   region,
   audioPreset,
   onTheme,
+  onProfileAvatar,
+  onSelectCustomAvatar,
   onHomeLayout,
   onGameCardSize,
   onBackdropIntensity,
@@ -828,15 +859,26 @@ function PersonalizePage({
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[0.9fr_1.1fr]">
         <div className="space-y-4">
+          <SetupPanel icon={<UserRound size={16} />} title={t('onboarding.setup.avatarTitle')}>
+            <ProfileAvatarPicker
+              selected={profileAvatar}
+              steamAvatarUrl={steamAvatarUrl}
+              customAvatarUrl={customAvatarUrl}
+              onChange={onProfileAvatar}
+              onSelectCustom={onSelectCustomAvatar}
+              compact
+              primary
+            />
+          </SetupPanel>
+
           <SetupPanel icon={<LayoutTemplate size={16} />} title={t('settings.homeLayout.title')}>
-            <div className="grid grid-cols-2 gap-2">
-              {HOME_LAYOUT_OPTIONS.map((option, index) => {
+            <div className="grid grid-cols-3 gap-2">
+              {HOME_LAYOUT_OPTIONS.map((option) => {
                 const active = homeLayout === option.id
                 return (
                   <button
                     key={option.id}
                     data-focusable
-                    data-onboarding-primary={index === 0 ? true : undefined}
                     type="button"
                     aria-pressed={active}
                     onClick={() => onHomeLayout(option.id)}
@@ -848,11 +890,7 @@ function PersonalizePage({
                   >
                     <span className="block text-sm font-bold tracking-wide">{option.label}</span>
                     <span className="mt-1 block text-[9px] leading-snug text-white/38">
-                      {t(
-                        option.id === 'float'
-                          ? 'settings.homeLayout.floatShort'
-                          : 'settings.homeLayout.orbitShort'
-                      )}
+                      {t(HOME_LAYOUT_SHORT_KEYS[option.id])}
                     </span>
                   </button>
                 )
@@ -861,7 +899,7 @@ function PersonalizePage({
           </SetupPanel>
 
           <SetupPanel icon={<Palette size={16} />} title={t('settings.theme.title')}>
-            <div className="grid grid-cols-6 gap-2">
+            <div className="grid grid-cols-5 gap-2 sm:grid-cols-7">
               {THEME_OPTIONS.map((option) => {
                 const active = theme === option.id
                 return (
@@ -1071,56 +1109,103 @@ function HomePreview({
           <span>Store</span>
           <span>Settings</span>
         </div>
-        {homeLayout === 'float' ? (
-          <div className="mt-[5%] flex h-[clamp(2.2rem,4vw,3.3rem)] items-center gap-3 rounded-[calc(var(--radius-card)*0.5)] border border-white/10 bg-surface/75 px-3">
-            <span className="h-6 w-6 rounded-lg bg-accent/70" />
-            <span className="min-w-0 flex-1 truncate text-[9px] font-bold">
-              {featured?.name ?? 'Your latest adventure'}
-            </span>
-            <span className="rounded-full bg-white/[0.07] px-2 py-1 text-[6px] text-white/50">
-              {themeName}
-            </span>
+        {homeLayout === 'coresense' ? (
+          <div className="mt-[4%] flex h-[72%] flex-col justify-between">
+            <div
+              className={`grid items-start ${uiDensity === 'compact' ? 'gap-1.5' : 'gap-2'}`}
+              style={{ gridTemplateColumns: `repeat(${cardCount}, minmax(0, 1fr))` }}
+            >
+              {Array.from({ length: cardCount }, (_, index) => {
+                const game = cards[index]
+                return (
+                  <div
+                    key={game?.id ?? index}
+                    className={`aspect-square overflow-hidden rounded-[calc(var(--radius-card)*0.45)] border ${
+                      index === 0 ? 'border-accent shadow-glow' : 'border-white/10'
+                    } bg-surface-2`}
+                  >
+                    {game && (
+                      <GameImage
+                        gameId={game.id}
+                        name={game.name}
+                        orientation="icon"
+                        previewUrl={game.metadata.iconUrl}
+                        fit="cover"
+                        className="h-full w-full object-cover"
+                      />
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+            <div className="flex items-end justify-between gap-4">
+              <div className="flex items-center gap-2 rounded-[calc(var(--radius-card)*0.5)] border border-white/10 bg-black/35 p-2 pr-4">
+                <span className="h-8 w-8 rounded-lg bg-accent/75" />
+                <span className="max-w-[8rem] truncate text-[8px] font-bold">
+                  {featured?.name ?? 'Your latest adventure'}
+                </span>
+              </div>
+              <div className="flex gap-1.5">
+                {[0, 1, 2].map((index) => (
+                  <span key={index} className="h-7 w-12 rounded-md border border-white/10 bg-white/10" />
+                ))}
+              </div>
+            </div>
           </div>
         ) : (
-          <div className="mt-[5%] grid grid-cols-[1.15fr_0.85fr] gap-2">
-            <div className="flex h-[clamp(2.7rem,7vw,5.5rem)] flex-col justify-end rounded-[calc(var(--radius-card)*0.62)] border border-white/10 bg-surface/75 p-3">
-              <span className="text-[6px] font-bold uppercase tracking-widest text-accent">Jump Back</span>
-              <span className="truncate text-xs font-bold">{featured?.name ?? 'Your latest adventure'}</span>
-            </div>
-            <div className="flex h-[clamp(2.7rem,7vw,5.5rem)] items-end rounded-[calc(var(--radius-card)*0.62)] border border-white/10 bg-surface/70 p-3 text-[8px] font-semibold">
-              {themeName}
-            </div>
-          </div>
-        )}
-        <div
-          className={`${homeLayout === 'float' ? 'mt-[4%]' : 'mt-[5%]'} grid ${
-            uiDensity === 'compact' ? 'gap-1.5' : 'gap-2'
-          }`}
-          style={{ gridTemplateColumns: `repeat(${cardCount}, minmax(0, 1fr))` }}
-        >
-          {Array.from({ length: cardCount }, (_, index) => {
-            const game = cards[index]
-            return (
-              <div
-                key={game?.id ?? index}
-                className={`${homeLayout === 'float' ? 'aspect-[2/3]' : 'aspect-[1.08]'} overflow-hidden rounded-[calc(var(--radius-card)*0.45)] border ${
-                  index === 0 ? 'border-accent shadow-glow' : 'border-white/10'
-                } bg-surface-2`}
-              >
-                {game && (
-                  <GameImage
-                    gameId={game.id}
-                    name={game.name}
-                    orientation="vertical"
-                    previewUrl={game.metadata.artwork?.vertical?.[0]}
-                    fit="cover"
-                    className="h-full w-full object-cover object-top"
-                  />
-                )}
+          <>
+            {homeLayout === 'float' ? (
+              <div className="mt-[5%] flex h-[clamp(2.2rem,4vw,3.3rem)] items-center gap-3 rounded-[calc(var(--radius-card)*0.5)] border border-white/10 bg-surface/75 px-3">
+                <span className="h-6 w-6 rounded-lg bg-accent/70" />
+                <span className="min-w-0 flex-1 truncate text-[9px] font-bold">
+                  {featured?.name ?? 'Your latest adventure'}
+                </span>
+                <span className="rounded-full bg-white/[0.07] px-2 py-1 text-[6px] text-white/50">
+                  {themeName}
+                </span>
               </div>
-            )
-          })}
-        </div>
+            ) : (
+              <div className="mt-[5%] grid grid-cols-[1.15fr_0.85fr] gap-2">
+                <div className="flex h-[clamp(2.7rem,7vw,5.5rem)] flex-col justify-end rounded-[calc(var(--radius-card)*0.62)] border border-white/10 bg-surface/75 p-3">
+                  <span className="text-[6px] font-bold uppercase tracking-widest text-accent">Jump Back</span>
+                  <span className="truncate text-xs font-bold">{featured?.name ?? 'Your latest adventure'}</span>
+                </div>
+                <div className="flex h-[clamp(2.7rem,7vw,5.5rem)] items-end rounded-[calc(var(--radius-card)*0.62)] border border-white/10 bg-surface/70 p-3 text-[8px] font-semibold">
+                  {themeName}
+                </div>
+              </div>
+            )}
+            <div
+              className={`${homeLayout === 'float' ? 'mt-[4%]' : 'mt-[5%]'} grid ${
+                uiDensity === 'compact' ? 'gap-1.5' : 'gap-2'
+              }`}
+              style={{ gridTemplateColumns: `repeat(${cardCount}, minmax(0, 1fr))` }}
+            >
+              {Array.from({ length: cardCount }, (_, index) => {
+                const game = cards[index]
+                return (
+                  <div
+                    key={game?.id ?? index}
+                    className={`${homeLayout === 'float' ? 'aspect-[2/3]' : 'aspect-[1.08]'} overflow-hidden rounded-[calc(var(--radius-card)*0.45)] border ${
+                      index === 0 ? 'border-accent shadow-glow' : 'border-white/10'
+                    } bg-surface-2`}
+                  >
+                    {game && (
+                      <GameImage
+                        gameId={game.id}
+                        name={game.name}
+                        orientation="vertical"
+                        previewUrl={game.metadata.artwork?.vertical?.[0]}
+                        fit="cover"
+                        className="h-full w-full object-cover object-top"
+                      />
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          </>
+        )}
       </div>
     </div>
   )

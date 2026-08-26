@@ -38,8 +38,28 @@ interface ScoredProcess {
   visible: boolean
 }
 
+export interface CompletedGameSession {
+  detectedAt: number
+  endedAt: number
+  durationSeconds: number
+}
+
+export interface CompletedGameSessionResult {
+  totalPlaytimeSeconds?: number
+}
+
+export interface GameSessionCallbacks {
+  onGameConfirmed?: (game: LibraryGame, detectedAt: number) => void | Promise<void>
+  onSessionCompleted?: (
+    game: LibraryGame,
+    session: CompletedGameSession
+  ) => CompletedGameSessionResult | void | Promise<CompletedGameSessionResult | void>
+  onGameEnded?: (game: LibraryGame) => Promise<LocalGameBackupResult>
+}
+
 const PROCESS_SAMPLE_INTERVAL_MS = 250
 const SNAPSHOT_TIMEOUT_MS = 2_000
+const PROCESS_STALL_TIMEOUT_MS = 6_000
 const BASELINE_TIMEOUT_MS = 3_000
 const STARTUP_TIMEOUT_MS = 4 * 60_000
 const CANDIDATE_STABILITY_MS = 650
@@ -402,9 +422,13 @@ class WindowsProcessSampler extends EventEmitter {
   private reader: ReadlineInterface | null = null
   private processesByPid = new Map<number, WindowsProcess>()
   private latest: ProcessSnapshot = { sequence: 0, capturedAt: 0, processes: [] }
+  private failure: Error | null = null
+  private stopping = false
 
   start(): void {
     if (process.platform !== 'win32' || this.child) return
+    this.failure = null
+    this.stopping = false
     const child = spawn(
       'powershell.exe',
       [
@@ -417,10 +441,25 @@ class WindowsProcessSampler extends EventEmitter {
       { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }
     )
     this.child = child
-    child.once('error', () => {
+    const fail = (error: Error): void => {
+      if (this.stopping || this.failure) return
+      this.failure = error
+      this.reader?.close()
+      this.reader = null
       this.child = null
+      this.emit('failed', error)
+    }
+    child.once('error', (error) => fail(new Error(`Process monitor failed: ${error.message}`)))
+    child.once('exit', (code, signal) => {
+      if (!this.stopping) {
+        fail(new Error(`Process monitor stopped (${code ?? signal ?? 'unknown'})`))
+      }
     })
-    if (!child.stdout) return
+    if (!child.stdout) {
+      fail(new Error('Process monitor has no output stream'))
+      child.kill()
+      return
+    }
     const reader = createInterface({ input: child.stdout })
     this.reader = reader
     reader.on('line', (line) => {
@@ -463,29 +502,44 @@ class WindowsProcessSampler extends EventEmitter {
   }
 
   waitForNext(afterSequence: number, timeoutMs: number): Promise<ProcessSnapshot> {
+    if (this.failure) return Promise.reject(this.failure)
     if (this.latest.sequence > afterSequence) return Promise.resolve(this.latest)
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       let settled = false
+      const cleanup = (): void => {
+        clearTimeout(timer)
+        this.removeListener('snapshot', onSnapshot)
+        this.removeListener('failed', onFailure)
+      }
       const finish = (snapshot: ProcessSnapshot): void => {
         if (settled) return
         settled = true
-        clearTimeout(timer)
-        this.removeListener('snapshot', onSnapshot)
+        cleanup()
         resolve(snapshot)
       }
       const onSnapshot = (snapshot: ProcessSnapshot): void => {
         if (snapshot.sequence > afterSequence) finish(snapshot)
       }
+      const onFailure = (error: Error): void => {
+        if (settled) return
+        settled = true
+        cleanup()
+        reject(error)
+      }
       const timer = setTimeout(() => finish(this.latest), timeoutMs)
       this.on('snapshot', onSnapshot)
+      this.once('failed', onFailure)
     })
   }
 
   stop(): void {
+    this.stopping = true
+    this.emit('failed', new Error('Process monitor stopped'))
     this.reader?.close()
     this.reader = null
     this.child?.kill()
     this.child = null
+    this.failure = null
     this.removeAllListeners()
   }
 }
@@ -634,7 +688,7 @@ export class GameSessionManager extends EventEmitter {
 
   constructor(
     private readonly mainWindow: BrowserWindow,
-    private readonly onGameEnded?: (game: LibraryGame) => Promise<LocalGameBackupResult>
+    private readonly callbacks: GameSessionCallbacks = {}
   ) {
     super()
   }
@@ -666,9 +720,21 @@ export class GameSessionManager extends EventEmitter {
 
     const sampler = new WindowsProcessSampler()
     this.sampler = sampler
-    sampler.start()
-    const baselinePromise = sampler.waitForNext(0, BASELINE_TIMEOUT_MS)
-    const [baseline] = await Promise.all([baselinePromise, wait(SPLASH_LEAD_IN_MS)])
+    let baseline: ProcessSnapshot
+    try {
+      sampler.start()
+      const baselinePromise = sampler.waitForNext(0, BASELINE_TIMEOUT_MS)
+      const [initialBaseline] = await Promise.all([baselinePromise, wait(SPLASH_LEAD_IN_MS)])
+      baseline = initialBaseline
+    } catch (error) {
+      sampler.stop()
+      if (this.sampler === sampler) this.sampler = null
+      await this.fail(
+        token,
+        error instanceof Error ? error.message : 'Game process monitor unavailable'
+      )
+      return
+    }
 
     try {
       await launchGame(game)
@@ -706,6 +772,7 @@ export class GameSessionManager extends EventEmitter {
     const primaryProcessKeys = new Set<string>()
     const candidateSeenAt = new Map<string, number>()
     let sequence = baseline.sequence
+    let lastFreshSnapshotAt = Date.now()
     let detectedAt: number | undefined
     let primaryStableSince: number | undefined
     let sessionConfirmed = false
@@ -717,18 +784,29 @@ export class GameSessionManager extends EventEmitter {
     try {
       while (token === this.activeToken) {
         const snapshot = await sampler.waitForNext(sequence, SNAPSHOT_TIMEOUT_MS)
-        if (snapshot.sequence <= sequence) continue
-        sequence = snapshot.sequence
-        lastProcesses = snapshot.processes
         const now = Date.now()
-        const processesByPid = new Map(
-          lastProcesses.map((candidate) => [processId(candidate), candidate] as const)
-        )
 
         if (!detectedAt && !this.launchTargetRevealed) {
           if (now - startedAt < LAUNCH_SHIELD_TIMEOUT_MS) this.maintainLaunchShield(token)
           else this.revealLauncher()
         }
+        if (!detectedAt && now >= startupDeadline) {
+          await this.fail(token, 'No game process was detected')
+          return
+        }
+        if (snapshot.sequence <= sequence) {
+          if (now - lastFreshSnapshotAt >= PROCESS_STALL_TIMEOUT_MS) {
+            await this.fail(token, 'Game process monitor stopped responding')
+            return
+          }
+          continue
+        }
+        sequence = snapshot.sequence
+        lastFreshSnapshotAt = now
+        lastProcesses = snapshot.processes
+        const processesByPid = new Map(
+          lastProcesses.map((candidate) => [processId(candidate), candidate] as const)
+        )
 
         for (const candidate of lastProcesses) {
           if (!isLauncherRootProcess(candidate)) continue
@@ -749,7 +827,7 @@ export class GameSessionManager extends EventEmitter {
             const seenAt = candidateSeenAt.get(best.key) ?? now
             candidateSeenAt.set(best.key, seenAt)
             if (now - seenAt >= CANDIDATE_STABILITY_MS) {
-              detectedAt = now
+              detectedAt = seenAt
               primaryStableSince = now
               sessionConfirmed = false
               trackedPids.add(best.pid)
@@ -772,10 +850,6 @@ export class GameSessionManager extends EventEmitter {
             candidateSeenAt.clear()
           }
 
-          if (!detectedAt && now >= startupDeadline) {
-            await this.fail(token, 'No game process was detected')
-            return
-          }
           continue
         }
 
@@ -811,7 +885,14 @@ export class GameSessionManager extends EventEmitter {
             }
           }
           primaryStableSince ??= now
-          if (now - primaryStableSince >= GAME_CONFIRMATION_MS) sessionConfirmed = true
+          if (now - primaryStableSince >= GAME_CONFIRMATION_MS && !sessionConfirmed) {
+            sessionConfirmed = true
+            try {
+              await this.callbacks.onGameConfirmed?.(game, detectedAt)
+            } catch {
+              // Recency persistence must never break session monitoring.
+            }
+          }
           missingSince = undefined
         } else {
           if (!sessionConfirmed) {
@@ -848,6 +929,7 @@ export class GameSessionManager extends EventEmitter {
               game,
               startedAt,
               detectedAt,
+              missingSince,
               lastProcesses,
               ownedLauncherFamilies
             )
@@ -855,10 +937,39 @@ export class GameSessionManager extends EventEmitter {
           }
         }
       }
+    } catch (error) {
+      if (token === this.activeToken) {
+        await this.fail(
+          token,
+          error instanceof Error ? error.message : 'Game process monitor unavailable'
+        )
+      }
     } finally {
       sampler.stop()
       if (this.sampler === sampler) this.sampler = null
     }
+  }
+
+  finalizeForShutdown(): { gameId: string; durationSeconds: number; endedAt: number } | null {
+    const status = this.getStatus()
+    const endedAt = status.endedAt ?? Date.now()
+    const durationSeconds =
+      status.sessionDurationSeconds ??
+      (status.detectedAt ? Math.max(1, Math.round((endedAt - status.detectedAt) / 1_000)) : 0)
+    const completed =
+      Boolean(status.gameId && status.detectedAt) &&
+      (status.phase === 'running' || status.phase === 'returning') &&
+      durationSeconds * 1_000 >= GAME_CONFIRMATION_MS
+        ? { gameId: status.gameId as string, durationSeconds, endedAt }
+        : null
+
+    this.activeToken++
+    this.sampler?.stop()
+    this.sampler = null
+    this.releaseLaunchShield(false)
+    this.status = { phase: 'idle' }
+    this.removeAllListeners()
+    return completed
   }
 
   private async returnToOrbit(
@@ -866,11 +977,19 @@ export class GameSessionManager extends EventEmitter {
     game: LibraryGame,
     startedAt: number,
     detectedAt: number,
+    endedAt: number,
     processes: WindowsProcess[],
     ownedLauncherFamilies: ReadonlySet<LauncherFamily>
   ): Promise<void> {
     if (token !== this.activeToken) return
-    const shouldBackup = Boolean(game.local?.backupEnabled && game.local.savePath && this.onGameEnded)
+    const completedSession = {
+      detectedAt,
+      endedAt,
+      durationSeconds: Math.max(1, Math.round((endedAt - detectedAt) / 1_000))
+    }
+    const shouldBackup = Boolean(
+      game.local?.backupEnabled && game.local.savePath && this.callbacks.onGameEnded
+    )
     this.update({
       phase: 'returning',
       gameId: game.id,
@@ -878,17 +997,30 @@ export class GameSessionManager extends EventEmitter {
       provider: game.provider,
       startedAt,
       detectedAt,
-      endedAt: Date.now(),
+      endedAt,
+      sessionDurationSeconds: completedSession.durationSeconds,
       returnTask: shouldBackup ? 'backing-up' : undefined
     })
     await this.focusOrbit(token)
+    try {
+      const result = await this.callbacks.onSessionCompleted?.(game, completedSession)
+      if (token === this.activeToken) {
+        this.update({
+          ...this.status,
+          sessionDurationSeconds: completedSession.durationSeconds,
+          totalPlaytimeSeconds: result?.totalPlaytimeSeconds
+        })
+      }
+    } catch {
+      // Playtime persistence failure must not trap the user outside ORBIT.
+    }
     if (settingsStore.store.closeLaunchersAfterGame) {
       void closeLauncherProcesses(processes, ownedLauncherFamilies)
     }
-    if (shouldBackup && this.onGameEnded) {
+    if (shouldBackup && this.callbacks.onGameEnded) {
       let result: LocalGameBackupResult
       try {
-        result = await this.onGameEnded(game)
+        result = await this.callbacks.onGameEnded(game)
       } catch {
         result = { state: 'failed', completedAt: Date.now() }
       }

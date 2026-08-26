@@ -86,7 +86,7 @@ export async function searchAllStores(
         recommendationScore,
         priceUpdatedAt: now,
         providerPricesUpdatedAt: now,
-        providerPipelineVersion: 4,
+        providerPipelineVersion: 5,
         updatedAt: now
       }]
     })

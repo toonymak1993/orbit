@@ -1,28 +1,41 @@
-import { motion } from 'framer-motion'
+import { motion, useReducedMotion } from 'framer-motion'
 import { Download, Play } from 'lucide-react'
 import type { LibraryGame } from '@shared/ipc'
 import { GameImage } from './GameImage'
 import { useT } from '@renderer/i18n/useT'
 import { formatPlaytime } from '@renderer/lib/playtime'
 import { useGameDetailStore } from '@renderer/state/gameDetailStore'
+import {
+  HomeCardReflection,
+  type HomeCardReflectionState
+} from './HomeCardReflection'
 
 interface Props {
   game: LibraryGame
   navigationIndex?: number
-  onActiveChange?: (active: boolean) => void
+  homeReflection?: HomeCardReflectionState | null
+  onActiveChange?: (active: boolean, source: 'focus' | 'pointer') => void
   variant?: 'poster' | 'home' | 'float'
 }
 
 export function GameCard({
   game,
   navigationIndex,
+  homeReflection,
   onActiveChange,
   variant = 'poster'
 }: Props): JSX.Element {
   const t = useT()
-  const playtime = formatPlaytime(game.playtimeMinutes, t)
+  const reduceMotion = useReducedMotion()
+  const playtime = formatPlaytime(game, t)
   const openGame = useGameDetailStore((state) => state.openGame)
   const isHomeCard = variant === 'home' || variant === 'float'
+  const activeMotion = reduceMotion ? { scale: 1, y: 0 } : { scale: 1.025, y: -1 }
+  const homeMotion = isHomeCard
+    ? homeReflection?.distance === 0
+      ? activeMotion
+      : { scale: 1, y: 0 }
+    : undefined
 
   return (
     <motion.button
@@ -37,20 +50,30 @@ export function GameCard({
           : game.name
       }
       onClick={() => openGame(game.id)}
-      onMouseEnter={() => onActiveChange?.(true)}
+      onMouseEnter={() => onActiveChange?.(true, 'pointer')}
+      onMouseMove={() => onActiveChange?.(true, 'pointer')}
       onMouseLeave={(event) => {
-        if (document.activeElement !== event.currentTarget) onActiveChange?.(false)
+        const next = event.relatedTarget
+        if (next instanceof Element && next.closest('[data-home-game-card="true"]')) return
+        onActiveChange?.(false, 'pointer')
       }}
-      onFocus={() => onActiveChange?.(true)}
+      onFocus={() => onActiveChange?.(true, 'focus')}
       onBlur={(event) => {
         const next = event.relatedTarget as HTMLElement | null
         if (isHomeCard && next?.matches('[data-home-game-card="true"]')) return
-        onActiveChange?.(false)
+        onActiveChange?.(false, 'focus')
       }}
-      whileHover={{ scale: 1.025, y: -1 }}
-      whileFocus={{ scale: 1.025, y: -1 }}
-      transition={{ duration: 0.115, ease: [0.22, 1, 0.36, 1] }}
+      animate={homeMotion}
+      whileHover={isHomeCard ? undefined : activeMotion}
+      whileFocus={isHomeCard ? undefined : activeMotion}
+      transition={
+        reduceMotion
+          ? { duration: 0 }
+          : { duration: 0.115, ease: [0.22, 1, 0.36, 1] }
+      }
       className={`group relative isolate w-full scroll-m-[clamp(1rem,4vh,2.5rem)] overflow-hidden rounded-xl2 bg-surface-2 text-left shadow-card ${
+        isHomeCard ? 'home-card-convex ' : ''
+      }${
         variant === 'home' ? 'aspect-[1/1.08]' : 'aspect-[2/3]'
       }`}
     >
@@ -60,11 +83,11 @@ export function GameCard({
         orientation="vertical"
         className={`h-full w-full object-cover ${isHomeCard ? 'object-top' : ''}`}
       />
-      {isHomeCard && (
-        <div aria-hidden="true" className="game-card-shine pointer-events-none absolute inset-y-0 z-10" />
+      {isHomeCard && homeReflection && (
+        <HomeCardReflection reflection={homeReflection} />
       )}
-      <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/90 via-black/10 to-transparent opacity-0 transition-opacity group-hover:opacity-100 group-data-[focused=true]:opacity-100" />
-      <div className="pointer-events-none absolute inset-0 flex flex-col justify-end p-3 opacity-0 transition-opacity group-hover:opacity-100 group-data-[focused=true]:opacity-100">
+      <div className="pointer-events-none absolute inset-0 z-20 bg-gradient-to-t from-black/90 via-black/10 to-transparent opacity-0 transition-opacity group-hover:opacity-100 group-data-[focused=true]:opacity-100" />
+      <div className="pointer-events-none absolute inset-0 z-20 flex flex-col justify-end p-3 opacity-0 transition-opacity group-hover:opacity-100 group-data-[focused=true]:opacity-100">
         <p className="line-clamp-2 text-sm font-semibold text-white">{game.name}</p>
         {playtime && <p className="text-xs text-muted">{playtime}</p>}
       </div>
@@ -78,7 +101,7 @@ export function GameCard({
         </div>
       )}
       <div
-        className={`pointer-events-none absolute right-2 flex h-8 w-8 items-center justify-center rounded-full bg-accent text-black opacity-0 transition-opacity group-hover:opacity-100 group-data-[focused=true]:opacity-100 ${
+        className={`pointer-events-none absolute right-2 z-20 flex h-8 w-8 items-center justify-center rounded-full bg-accent text-black opacity-0 transition-opacity group-hover:opacity-100 group-data-[focused=true]:opacity-100 ${
           game.updateAvailable ? 'top-11' : 'top-2'
         }`}
       >

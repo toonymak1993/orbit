@@ -221,10 +221,11 @@ function toArtworkCandidates(assets: SteamGridDbAsset[]): SteamGridDbArtworkCand
 export async function fetchSteamGridDbArtworkCandidates(
   appId: number | undefined,
   apiKey: string,
-  gameName?: string
+  gameName?: string,
+  orientation: SteamGridDbOrientation = 'vertical'
 ): Promise<ArtworkNetworkAttempt<SteamGridDbArtworkCandidate[]>> {
   if (appId) {
-    const directAssets = await fetchAssets(`steam/${appId}`, apiKey, 'vertical')
+    const directAssets = await fetchAssets(`steam/${appId}`, apiKey, orientation)
     if (directAssets.state === 'unavailable') return directAssets
     if (directAssets.state === 'success') {
       const candidates = toArtworkCandidates(directAssets.value)
@@ -235,7 +236,7 @@ export async function fetchSteamGridDbArtworkCandidates(
   if (!gameName?.trim()) return { state: 'missing' }
   const gameId = await searchGameId(gameName, apiKey)
   if (gameId.state !== 'success') return gameId
-  const nameAssets = await fetchAssets(`game/${gameId.value}`, apiKey, 'vertical')
+  const nameAssets = await fetchAssets(`game/${gameId.value}`, apiKey, orientation)
   if (nameAssets.state !== 'success') return nameAssets
   const candidates = toArtworkCandidates(nameAssets.value)
   return candidates.length > 0

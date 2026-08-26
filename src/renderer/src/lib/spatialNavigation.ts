@@ -18,6 +18,9 @@ export function findNextFocus(
   current: HTMLElement,
   direction: NavDirection
 ): HTMLElement | null {
+  const coreSenseTarget = findCoreSenseTarget(current, direction)
+  if (coreSenseTarget) return coreSenseTarget
+
   const shelfRow = Number(current.dataset.storeShelfRow)
   const shelfColumn = Number(current.dataset.storeShelfColumn)
   if (
@@ -47,6 +50,51 @@ export function findNextFocus(
 }
 
 /**
+ * CoreSense has three intentionally separated vertical layers. Their large,
+ * asymmetric rectangles make a purely geometric jump ambiguous on some
+ * aspect ratios, so the D-pad contract is explicit while horizontal movement
+ * inside both grids continues to use the shared O(1) grid path.
+ */
+function findCoreSenseTarget(
+  current: HTMLElement,
+  direction: NavDirection
+): HTMLElement | null {
+  const coreSenseHome = document.querySelector('[data-home-layout="coresense"]')
+  if (coreSenseHome && direction === 'down' && current.closest('[data-top-nav]')) {
+    return (
+      document.querySelector<HTMLElement>('[data-coresense-launcher][data-active="true"]') ??
+      document.querySelector<HTMLElement>('[data-coresense-launcher]')
+    )
+  }
+
+  if (direction === 'up' && current.matches('[data-coresense-launcher]')) {
+    return document.querySelector<HTMLElement>('[data-top-nav] [aria-current="page"]')
+  }
+
+  if (direction === 'down' && current.matches('[data-coresense-launcher]')) {
+    return document.querySelector<HTMLElement>('[data-coresense-primary="true"]')
+  }
+
+  if (current.matches('[data-coresense-primary="true"]')) {
+    if (direction === 'down') {
+      return document.querySelector<HTMLElement>('[data-coresense-recommendation]')
+    }
+    if (direction === 'up') {
+      return (
+        document.querySelector<HTMLElement>('[data-coresense-launcher][data-active="true"]') ??
+        document.querySelector<HTMLElement>('[data-coresense-launcher]')
+      )
+    }
+  }
+
+  if (direction === 'up' && current.matches('[data-coresense-recommendation]')) {
+    return document.querySelector<HTMLElement>('[data-coresense-primary="true"]')
+  }
+
+  return null
+}
+
+/**
  * Large libraries must not run nearest-neighbour geometry against hundreds of
  * cards for every D-pad repeat. Grid position is deterministic, so moving in a
  * library grid is an O(1) DOM lookup. Returning `undefined` hands navigation
@@ -68,7 +116,15 @@ function findGridNeighbour(
   if (direction === 'down') targetIndex = index + columns
 
   if (targetIndex !== null) {
-    return grid.querySelector<HTMLElement>(`[data-grid-index="${targetIndex}"]`)
+    const target = grid.querySelector<HTMLElement>(`[data-grid-index="${targetIndex}"]`)
+    if (
+      !target &&
+      grid.dataset.gridExitY === 'true' &&
+      (direction === 'up' || direction === 'down')
+    ) {
+      return undefined
+    }
+    return target
   }
 
   // From the first row, Up should still be able to reach filters/top navigation.

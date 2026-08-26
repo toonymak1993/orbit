@@ -9,12 +9,18 @@ $releaseDir = Join-Path $repoRoot 'release'
 $releaseMetadata = Get-Content -LiteralPath (Join-Path $repoRoot 'resources\release-manifest.json') -Raw | ConvertFrom-Json
 $displayVersion = [string]$releaseMetadata.displayVersion
 $packageVersion = [string]$releaseMetadata.packageVersion
+$releaseChannel = ([string]$releaseMetadata.channel).Trim().ToLowerInvariant()
+if ($releaseChannel -notin @('beta', 'stable')) {
+  throw "Unsupported ORBIT release channel: $releaseChannel"
+}
+$artifactPrefix = if ($releaseChannel -eq 'beta') { 'ORBIT-Beta' } else { 'ORBIT' }
+$releaseLabel = if ($releaseChannel -eq 'beta') { 'beta' } else { 'stable release' }
 $windowsFileVersion = [string]$releaseMetadata.windowsFileVersion
 $xboxPackageVersion = [string]$releaseMetadata.xboxPackageVersion
 $xboxMinimumWindowsVersion = [version][string]$releaseMetadata.xboxMode.minimumWindowsVersion
 $releaseSequence = [int]$releaseMetadata.releaseSequence
-$packagePath = Join-Path $releaseDir "ORBIT-Beta-XboxMode-$displayVersion-x64.appx"
-$installerPath = Join-Path $releaseDir "ORBIT-Beta-XboxMode-Setup-$displayVersion-x64.exe"
+$packagePath = Join-Path $releaseDir "$artifactPrefix-XboxMode-$displayVersion-x64.appx"
+$installerPath = Join-Path $releaseDir "$artifactPrefix-XboxMode-Setup-$displayVersion-x64.exe"
 $certificatePath = Join-Path $releaseDir 'ORBIT-Development.cer'
 $installScriptPath = Join-Path $releaseDir 'Install-OrbitXboxMode.ps1'
 $installBatchPath = Join-Path $releaseDir 'Install-OrbitXboxMode.bat'
@@ -57,6 +63,9 @@ try {
   if ($signature.Status -ne 'Valid') {
     throw "Invalid AppX signature: $($signature.Status) - $($signature.StatusMessage)"
   }
+  if (!$signature.TimeStamperCertificate) {
+    throw 'The AppX signature has no trusted timestamp.'
+  }
 
   $installerSignature = Get-AuthenticodeSignature -FilePath $installerPath
   if (!$installerSignature.SignerCertificate -or $installerSignature.SignerCertificate.Thumbprint -ne $certificateMetadata.thumbprint) {
@@ -64,6 +73,9 @@ try {
   }
   if ($installerSignature.Status -ne 'Valid') {
     throw "Invalid setup signature: $($installerSignature.Status) - $($installerSignature.StatusMessage)"
+  }
+  if (!$installerSignature.TimeStamperCertificate) {
+    throw 'The one-click setup signature has no trusted timestamp.'
   }
 
   $makeAppx = Get-ChildItem (Join-Path $repoRoot '.tools\windows-sdk-buildtools') -Recurse -Filter makeappx.exe -ErrorAction Stop |
@@ -123,6 +135,7 @@ try {
   $packagedRelease = Get-Content -LiteralPath (Join-Path $inspectionDir 'app\resources\release-manifest.json') -Raw | ConvertFrom-Json
   if (
     $packagedRelease.displayVersion -ne $displayVersion -or
+    $packagedRelease.channel -ne $releaseChannel -or
     !$packagedRelease.xboxMode.enabled -or
     $packagedRelease.xboxPackageVersion -ne $xboxPackageVersion -or
     $packagedRelease.xboxMode.minimumWindowsVersion -ne $xboxMinimumWindowsVersion.ToString() -or
@@ -131,7 +144,7 @@ try {
     $packagedRelease.xboxMode.appExtension -ne 'windows.gamingApp' -or
     $packagedRelease.xboxMode.customCapability -ne 'Microsoft.appCategory.gamingHome_8wekyb3d8bbwe'
   ) {
-    throw "The packaged release manifest does not describe Xbox Mode beta $displayVersion."
+    throw "The packaged release manifest does not describe Xbox Mode $releaseLabel $displayVersion."
   }
 
   $registration = Get-Content -LiteralPath (Join-Path $inspectionDir 'Public\registration.json') -Raw | ConvertFrom-Json
@@ -140,7 +153,8 @@ try {
     $registration.product -ne 'ORBIT' -or
     $registration.role -ne 'gaming-home' -or
     $registration.applicationId -ne 'ORBIT' -or
-    $registration.version -ne $xboxPackageVersion
+    $registration.version -ne $xboxPackageVersion -or
+    $registration.channel -ne $releaseChannel
   ) {
     throw 'The Gaming Home registration metadata does not match the package identity.'
   }
@@ -151,7 +165,7 @@ try {
   $sccdCapability = $sccd.SelectSingleNode("/s:CustomCapabilityDescriptor/s:CustomCapabilities/s:CustomCapability[@Name='Microsoft.appCategory.gamingHome_8wekyb3d8bbwe']", $sccdNamespace)
   $sccdAuthorizedEntities = $sccd.SelectSingleNode('/s:CustomCapabilityDescriptor/s:AuthorizedEntities', $sccdNamespace)
   if (!$sccdCapability -or !$sccdAuthorizedEntities -or $sccdAuthorizedEntities.AllowAny -ne 'true') {
-    throw 'The Xbox beta custom-capability descriptor is invalid.'
+    throw 'The Xbox Mode custom-capability descriptor is invalid.'
   }
 
   & $installScriptPath -PackagePath $packagePath -CertificatePath $certificatePath -ValidateOnly
@@ -169,7 +183,7 @@ try {
     displayVersion = $displayVersion
     packageVersion = $packageVersion
     releaseSequence = $releaseSequence
-    channel = 'beta'
+    channel = $releaseChannel
     packageIdentity = 'ORBIT.GamingHome'
     applicationId = 'ORBIT'
     xboxMode = $true
@@ -185,6 +199,7 @@ try {
         signatureStatus = $signature.Status.ToString()
         signer = $signature.SignerCertificate.Subject
         signerThumbprint = $signature.SignerCertificate.Thumbprint
+        timestampSigner = $signature.TimeStamperCertificate.Subject
       },
       [ordered]@{
         role = 'one-click-installer'
@@ -195,6 +210,7 @@ try {
         signatureStatus = $installerSignature.Status.ToString()
         signer = $installerSignature.SignerCertificate.Subject
         signerThumbprint = $installerSignature.SignerCertificate.Thumbprint
+        timestampSigner = $installerSignature.TimeStamperCertificate.Subject
       },
       [ordered]@{
         role = 'public-certificate'
@@ -215,9 +231,9 @@ try {
   } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $releaseDir 'xbox-distribution-manifest.json') -Encoding UTF8
 
   @"
-ORBIT $displayVersion - Xbox Mode beta
+ORBIT $displayVersion - Xbox Mode $releaseLabel
 
-Recommended: run ORBIT-Beta-XboxMode-Setup-$displayVersion-x64.exe. It is a self-contained installer.
+Recommended: run $artifactPrefix-XboxMode-Setup-$displayVersion-x64.exe. It is a self-contained installer.
 
 ZIP fallback:
 1. Keep all files from the ZIP in the same folder.
@@ -229,7 +245,7 @@ ZIP fallback:
 Requirements: Windows 11 version 24H2 (build 10.0.26100.0) or newer. Xbox Mode availability still depends
 on Microsoft's supported markets, device policy, and phased Windows feature rollout. ORBIT deliberately does
 not hard-code an Xbox app version or write the selected Gaming Home app directly.
-This community beta is signed with the self-signed ORBIT certificate. Verify its thumbprint before trusting it.
+This ORBIT $releaseLabel is signed with the self-signed ORBIT certificate. Verify its thumbprint before trusting it.
 Expected certificate thumbprint: $($certificate.Thumbprint)
 "@ | Set-Content -LiteralPath $readmePath -Encoding UTF8
 

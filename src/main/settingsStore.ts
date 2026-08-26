@@ -3,9 +3,11 @@ import type { OrbitSettings } from '@shared/ipc'
 
 const defaults: OrbitSettings = {
   theme: 'midnight',
+  profileAvatar: 'orbit',
   homeLayout: 'orbit',
   gameCardSize: 'standard',
   backdropIntensity: 'balanced',
+  homeCardBubbleEffect: true,
   uiDensity: 'standard',
   language: 'en',
   audioPreset: 'orbit',

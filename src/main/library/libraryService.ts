@@ -30,7 +30,9 @@ import { customArtworkService } from '../customArtwork'
 /** Coordinates every store into one cache and one three-pipeline sync session. */
 export class UnifiedLibraryService extends EventEmitter {
   private refreshInFlight: Promise<LibrarySnapshot> | null = null
+  private refreshQueued = false
   private snapshotEmitTimer: ReturnType<typeof setTimeout> | undefined
+  private playtimeSyncTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
   constructor() {
     super()
@@ -79,14 +81,25 @@ export class UnifiedLibraryService extends EventEmitter {
     }
   }
 
-  async refresh(): Promise<LibrarySnapshot> {
-    if (this.refreshInFlight) return this.refreshInFlight
-    this.refreshInFlight = this.doRefresh()
-    try {
-      return await this.refreshInFlight
-    } finally {
-      this.refreshInFlight = null
+  refresh(): Promise<LibrarySnapshot> {
+    if (this.refreshInFlight) {
+      this.refreshQueued = true
+      return this.refreshInFlight
     }
+
+    const run = async (): Promise<LibrarySnapshot> => {
+      let snapshot = this.getSnapshot()
+      do {
+        this.refreshQueued = false
+        snapshot = await this.doRefresh()
+      } while (this.refreshQueued)
+      return snapshot
+    }
+    const refresh = run().finally(() => {
+      if (this.refreshInFlight === refresh) this.refreshInFlight = null
+    })
+    this.refreshInFlight = refresh
+    return refresh
   }
 
   async resolveCompletionTimes(gameId: string): Promise<GameCompletionTimes | null> {
@@ -110,8 +123,38 @@ export class UnifiedLibraryService extends EventEmitter {
     return achievementService.resolve(game)
   }
 
-  markGameStarted(gameId: string): void {
-    if (gameRepository.markStarted(gameId)) this.emitSnapshot()
+  markGameStarted(gameId: string, startedAt?: number): void {
+    if (gameRepository.markStarted(gameId, startedAt)) this.emitSnapshot()
+  }
+
+  recordGameSession(
+    gameId: string,
+    durationSeconds: number,
+    endedAt: number
+  ): { totalPlaytimeSeconds?: number } | undefined {
+    const game = gameRepository.getGame(gameId)
+    if (!game || !gameRepository.recordGameSession(gameId, durationSeconds, endedAt)) return undefined
+    this.emitSnapshot()
+
+    const result = { totalPlaytimeSeconds: gameRepository.getGame(gameId)?.playtimeSeconds }
+
+    const existingTimer = this.playtimeSyncTimers.get(gameId)
+    if (existingTimer) clearTimeout(existingTimer)
+    if ((game.provider !== 'steam' || !game.appId) && game.provider !== 'epic') return result
+
+    // Give the store client a short window to publish its final total. ORBIT's
+    // local seconds remain visible immediately and are reconciled in-place.
+    const timer = setTimeout(() => {
+      this.playtimeSyncTimers.delete(gameId)
+      if (game.provider === 'steam' && game.appId) {
+        void steamLibraryService.refreshPlaytime(steamAuthManager, game.appId)
+      } else if (game.provider === 'epic') {
+        void epicLibraryService.refreshPlaytime(epicAuthManager, game.providerGameId)
+      }
+    }, 3_000)
+    timer.unref()
+    this.playtimeSyncTimers.set(gameId, timer)
+    return result
   }
 
   beginCustomGameImport(
@@ -145,16 +188,36 @@ export class UnifiedLibraryService extends EventEmitter {
   }
 
   async commitCustomGame(input: CustomGameCommitInput): Promise<LibrarySnapshot> {
-    const record = await customLibraryService.commit(input.draftId, input.name)
+    const record = await customLibraryService.commit(
+      input.draftId,
+      input.name,
+      input.launchArguments
+    )
     const game = gameRepository.upsertLocalGame(record)
     artworkService.syncProvider([game], 'local')
     this.emitSnapshot()
     return this.getSnapshot()
   }
 
-  removeCustomGame(gameId: string): LibrarySnapshot {
+  updateCustomGameLaunchArguments(
+    gameId: string,
+    launchArguments: readonly string[]
+  ): LibrarySnapshot {
+    if (!gameRepository.updateLocalGameLaunchArguments(gameId, launchArguments)) {
+      throw new Error('Custom game is not available')
+    }
+    this.emitSnapshot()
+    return this.getSnapshot()
+  }
+
+  async removeCustomGame(gameId: string): Promise<LibrarySnapshot> {
+    const game = gameRepository.getGame(gameId)
+    if (!game || game.provider !== 'local') throw new Error('Custom game is not available')
+    await Promise.all([
+      customArtworkService.reset(gameId, 'vertical'),
+      customArtworkService.reset(gameId, 'horizontal')
+    ])
     if (!gameRepository.removeLocalGame(gameId)) throw new Error('Custom game is not available')
-    void customArtworkService.reset(gameId)
     this.emitSnapshot()
     return this.getSnapshot()
   }

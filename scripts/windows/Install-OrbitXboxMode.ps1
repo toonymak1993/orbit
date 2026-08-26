@@ -22,6 +22,7 @@ $diagnosticPath = Join-Path $diagnosticDirectory 'xbox-mode-diagnostics.json'
 
 function Get-DefaultXboxPackagePath {
   $candidates = @(
+    Get-ChildItem -LiteralPath $PSScriptRoot -Filter 'ORBIT-XboxMode-*-x64.appx' -File -ErrorAction SilentlyContinue
     Get-ChildItem -LiteralPath $PSScriptRoot -Filter 'ORBIT-Beta-XboxMode-*-x64.appx' -File -ErrorAction SilentlyContinue
   )
   if ($candidates.Count -ne 1) {
@@ -213,7 +214,7 @@ function Get-OrbitPackageContract {
     $sccdCapability = $sccd.SelectSingleNode("/s:CustomCapabilityDescriptor/s:CustomCapabilities/s:CustomCapability[@Name='$expectedGamingCapability']", $sccdNamespace)
     $authorizedEntities = $sccd.SelectSingleNode('/s:CustomCapabilityDescriptor/s:AuthorizedEntities', $sccdNamespace)
     if (!$sccdCapability -or !$authorizedEntities -or $authorizedEntities.GetAttribute('AllowAny') -ne 'true') {
-      throw 'The AppX does not contain the expected Xbox beta custom-capability descriptor.'
+      throw 'The AppX does not contain the expected Xbox Mode custom-capability descriptor.'
     }
 
     return $contract
@@ -396,7 +397,7 @@ try {
   $resolvedCertificate = Resolve-RequiredFile $CertificatePath 'ORBIT certificate' '.cer'
   $windows = Get-WindowsBuildInfo
   if ($windows.InstallationType -ne 'Client') { throw "Xbox Mode requires Windows client; this installation reports $($windows.InstallationType)." }
-  if (![Environment]::Is64BitOperatingSystem) { throw 'The ORBIT Xbox Mode beta requires 64-bit Windows.' }
+  if (![Environment]::Is64BitOperatingSystem) { throw 'ORBIT Xbox Mode requires 64-bit Windows.' }
   if ($windows.Version -lt $minimumXboxModeVersion) {
     throw "Xbox Mode requires Windows 11 version 24H2 (build $minimumXboxModeVersion) or newer. This PC reports $($windows.Version)."
   }
@@ -483,7 +484,7 @@ try {
   $trustedCertificatePath = "Cert:\LocalMachine\TrustedPeople\$($certificate.Thumbprint)"
   $certificateWasTrusted = Test-Path -LiteralPath $trustedCertificatePath
   if (!$certificateWasTrusted) {
-    Write-Host "Trusting the exact ORBIT beta certificate in LocalMachine\TrustedPeople: $($certificate.Thumbprint)"
+    Write-Host "Trusting the exact ORBIT signing certificate in LocalMachine\TrustedPeople: $($certificate.Thumbprint)"
     Add-ValidatedCertificateTrust $certificate
     $certificateAdded = $true
   }
@@ -498,7 +499,7 @@ try {
   $diagnostics.prerequisites.developerModeInitiallyEnabled = $developerModePropertyExisted -and $developerModeOriginalValue -eq 1
 
   if (!$developerModePropertyExisted -or $developerModeOriginalValue -ne 1) {
-    Write-Host 'Enabling Windows Developer Mode for the community-beta Gaming Home capability...'
+    Write-Host 'Enabling Windows Developer Mode for the Gaming Home capability...'
     if (!(Test-Path -LiteralPath $developerModeKey)) { New-Item -Path $developerModeKey -Force | Out-Null }
     New-ItemProperty -Path $developerModeKey -Name AllowDevelopmentWithoutDevLicense -PropertyType DWord -Value 1 -Force | Out-Null
     $developerModeChanged = $true

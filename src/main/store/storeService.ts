@@ -25,7 +25,7 @@ import { normalizeStoreTitle } from './storeProviderUtils'
 const PRICE_TTL_MS = 30 * 60 * 1000
 const INTERACTIVE_COMPARE_FRESH_MS = 60 * 1000
 const MAX_DETAIL_REFRESH_PER_SESSION = 120
-const PROVIDER_PIPELINE_VERSION = 4
+const PROVIDER_PIPELINE_VERSION = 5
 const REQUEST_GAP_MS = 220
 const SEARCH_CACHE_TTL_MS = 10 * 60 * 1000
 

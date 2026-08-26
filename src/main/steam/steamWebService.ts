@@ -1,12 +1,17 @@
 import { fetchWithElectronNet } from '../networkFetch'
+import {
+  parseSteamOwnedGamesPayload,
+  parseSteamUserTokenFromHtml
+} from './steamWebParsers'
 
 const STEAM_API_ROOT = 'https://api.steampowered.com'
 const STEAM_STORE_ROOT = 'https://store.steampowered.com'
 
 export interface SteamOwnedGame {
   appId: number
-  name: string
+  name?: string
   iconUrl?: string
+  playtimeSeconds?: number
   playtimeMinutes?: number
   lastPlayedTimestamp?: number
 }
@@ -42,16 +47,29 @@ function retryDelay(response: Response, attempt: number): number {
 async function fetchWithRetry(
   url: string | URL,
   init?: RequestInit,
-  fetcher: SteamSessionFetch = fetchWithElectronNet
+  fetcher: SteamSessionFetch = fetchWithElectronNet,
+  maxAttempts = 5,
+  timeoutMs = 20_000
 ): Promise<Response> {
   let lastResponse: Response | undefined
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const response = await fetcher(url, { ...init, signal: AbortSignal.timeout(20_000) })
+  let transportFailures = 0
+  const attempts = Math.max(1, Math.min(Math.trunc(maxAttempts), 5))
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    let response: Response
+    try {
+      response = await fetcher(url, { ...init, signal: AbortSignal.timeout(timeoutMs) })
+    } catch (error) {
+      transportFailures++
+      if (transportFailures >= Math.min(3, attempts) || attempt >= attempts - 1) throw error
+      await delay(Math.min(1_000 * 2 ** attempt, 8_000))
+      continue
+    }
     lastResponse = response
     if (response.status !== 429 && response.status < 500) return response
-    if (attempt < 4) await delay(retryDelay(response, attempt))
+    if (attempt < attempts - 1) await delay(retryDelay(response, attempt))
   }
-  return lastResponse as Response
+  if (!lastResponse) throw new Error('Steam request failed before receiving a response')
+  return lastResponse
 }
 
 function decodeJavascriptString(value: string): string {
@@ -126,6 +144,7 @@ export async function fetchSteamCommunityGames(
       appId,
       name,
       iconUrl: xmlElement(record, 'logo'),
+      playtimeSeconds: Number.isFinite(hours) ? Math.round((hours as number) * 3_600) : undefined,
       playtimeMinutes: Number.isFinite(hours) ? Math.round((hours as number) * 60) : undefined
     })
   }
@@ -138,24 +157,39 @@ export async function fetchSteamCommunityGames(
  */
 export async function getSteamUserToken(
   expectedSteamId: string,
-  sessionFetch: SteamSessionFetch
+  sessionFetch: SteamSessionFetch,
+  maxAttempts = 5,
+  timeoutMs = 20_000
 ): Promise<SteamUserToken> {
   const response = await fetchWithRetry(
     `${STEAM_STORE_ROOT}/explore/`,
     { headers: { Referer: `${STEAM_STORE_ROOT}/` } },
-    sessionFetch
+    sessionFetch,
+    maxAttempts,
+    timeoutMs
   )
   if (!response.ok || response.url.includes('/login')) {
     throw new Error(`Steam store session unavailable (${response.status})`)
   }
 
   const source = await response.text()
-  const steamId = source.match(/["']steamid["']\s*:\s*["'](\d+)["']/i)?.[1]
+  const parsed = parseSteamUserTokenFromHtml(source)
+  if (parsed) {
+    if (parsed.steamId !== expectedSteamId) {
+      throw new Error('Steam web session belongs to another account')
+    }
+    return parsed
+  }
+
+  // Compatibility with older Store markup that embedded a raw JS object.
+  const legacySteamId = source.match(/["']steamid["']\s*:\s*["'](\d+)["']/i)?.[1]
   const rawToken = source.match(/["']webapi_token["']\s*:\s*["']([^"'&]+)["']/i)?.[1]
-  const accessToken = rawToken ? decodeJavascriptString(rawToken) : undefined
-  if (!steamId || !accessToken) throw new Error('Steam web access token was not present')
-  if (steamId !== expectedSteamId) throw new Error('Steam web session belongs to another account')
-  return { steamId, accessToken }
+  const legacyToken = rawToken ? decodeJavascriptString(rawToken) : undefined
+  if (!legacySteamId || !legacyToken) throw new Error('Steam web access token was not present')
+  if (legacySteamId !== expectedSteamId) {
+    throw new Error('Steam web session belongs to another account')
+  }
+  return { steamId: legacySteamId, accessToken: legacyToken }
 }
 
 export async function fetchOwnedGamesWithToken(
@@ -173,30 +207,34 @@ export async function fetchOwnedGamesWithToken(
 
   const response = await fetchWithRetry(url)
   if (!response.ok) throw new Error(`GetOwnedGames failed (${response.status})`)
-  const json = (await response.json()) as {
-    response?: {
-      games?: Array<{
-        appid: number
-        name?: string
-        img_icon_url?: string
-        playtime_forever?: number
-        rtime_last_played?: number
-      }>
+  let parsed
+  try {
+    parsed = parseSteamOwnedGamesPayload(await response.json())
+  } catch {
+    // App-info enrichment has historically produced truncated lists for some
+    // accounts. Retry identities-only so a missing title/icon can never make
+    // an otherwise owned app disappear.
+    url.searchParams.set('include_appinfo', 'false')
+    const identityResponse = await fetchWithRetry(url)
+    if (!identityResponse.ok) {
+      throw new Error(`GetOwnedGames identity fallback failed (${identityResponse.status})`)
     }
+    parsed = parseSteamOwnedGamesPayload(await identityResponse.json())
   }
-
-  if (!Array.isArray(json.response?.games)) throw new Error('GetOwnedGames returned no game list')
   const games = new Map<number, SteamOwnedGame>()
-  for (const game of json.response.games) {
-    if (!Number.isInteger(game.appid) || !game.name?.trim()) continue
-    games.set(game.appid, {
-      appId: game.appid,
-      name: game.name.trim(),
-      iconUrl: game.img_icon_url
-        ? `https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/${game.appid}/${game.img_icon_url}.jpg`
+  for (const game of parsed.games) {
+    games.set(game.appId, {
+      appId: game.appId,
+      name: game.name,
+      iconUrl: game.iconHash
+        ? `https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/${game.appId}/${game.iconHash}.jpg`
         : undefined,
-      playtimeMinutes: game.playtime_forever,
-      lastPlayedTimestamp: game.rtime_last_played || undefined
+      playtimeSeconds:
+        game.playtimeMinutes !== undefined
+          ? Math.max(0, Math.round(game.playtimeMinutes * 60))
+          : undefined,
+      playtimeMinutes: game.playtimeMinutes,
+      lastPlayedTimestamp: game.lastPlayedTimestamp
     })
   }
   return games
@@ -213,12 +251,15 @@ export async function fetchSteamClientGames(
   url.searchParams.set('language', language)
 
   const response = await fetchWithRetry(url)
-  if (!response.ok) return new Map()
+  if (!response.ok) throw new Error(`GetClientAppList failed (${response.status})`)
   const json = (await response.json()) as {
     response?: { apps?: Array<{ appid: number; app?: string; bytes_required?: string }> }
     apps?: Array<{ appid: number; app?: string; bytes_required?: string }>
   }
-  const entries = json.response?.apps ?? json.apps ?? []
+  const entries = json.response?.apps ?? json.apps
+  if (!Array.isArray(entries)) {
+    throw new Error('GetClientAppList returned no app list')
+  }
   const games = new Map<number, SteamClientGame>()
   for (const game of entries) {
     if (!Number.isInteger(game.appid) || !game.app?.trim()) continue
@@ -238,18 +279,27 @@ export async function fetchDynamicStoreData(
 ): Promise<DynamicStoreData> {
   const response = await fetchWithRetry(
     `${STEAM_STORE_ROOT}/dynamicstore/userdata/`,
-    { headers: { Referer: `${STEAM_STORE_ROOT}/` } },
+    { cache: 'no-store', headers: { 'Cache-Control': 'no-cache', Referer: `${STEAM_STORE_ROOT}/` } },
     sessionFetch
   )
   if (!response.ok) throw new Error(`Steam userdata failed (${response.status})`)
-  const json = (await response.json()) as {
+  const source = await response.text()
+  const body = source.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i)?.[1]
+  const json = JSON.parse(body === undefined ? source : decodeXmlText(body)) as {
     rgOwnedApps?: number[]
     rgRecentlyPlayedApps?: number[]
   }
+  if (!Array.isArray(json.rgOwnedApps)) {
+    throw new Error('Steam userdata returned no owned-app list')
+  }
   return {
-    ownedAppIds: Array.isArray(json.rgOwnedApps) ? [...new Set(json.rgOwnedApps)] : [],
+    ownedAppIds: [...new Set(json.rgOwnedApps)].filter(
+      (appId) => Number.isInteger(appId) && appId > 0 && appId <= 0xffffffff
+    ),
     recentlyPlayedAppIds: Array.isArray(json.rgRecentlyPlayedApps)
-      ? [...new Set(json.rgRecentlyPlayedApps)]
+      ? [...new Set(json.rgRecentlyPlayedApps)].filter(
+          (appId) => Number.isInteger(appId) && appId > 0 && appId <= 0xffffffff
+        )
       : []
   }
 }

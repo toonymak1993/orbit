@@ -1,10 +1,28 @@
 import type { TFunction } from '@renderer/i18n/useT'
+import type { LibraryGame } from '@shared/ipc'
 
-export function formatPlaytime(minutes: number | undefined, t: TFunction): string | null {
-  if (!minutes) return null
-  const hours = minutes / 60
-  if (hours >= 1) {
-    return t('playtime.hours', { hours: hours.toFixed(hours < 10 ? 1 : 0) })
+export function formatPlaytime(
+  game: Pick<LibraryGame, 'playtimeSeconds' | 'playtimeMinutes'>,
+  t: TFunction
+): string | null {
+  const totalSeconds = Math.max(
+    0,
+    Math.round(game.playtimeSeconds ?? (game.playtimeMinutes ?? 0) * 60)
+  )
+  if (totalSeconds <= 0) return null
+
+  const hours = Math.floor(totalSeconds / 3_600)
+  const minutes = Math.floor((totalSeconds % 3_600) / 60)
+  const seconds = totalSeconds % 60
+  if (hours > 0) {
+    return minutes > 0
+      ? t('playtime.hoursMinutes', { hours, minutes })
+      : t('playtime.hours', { hours })
   }
-  return t('playtime.minutes', { minutes })
+  if (minutes > 0) {
+    return seconds > 0
+      ? t('playtime.minutesSeconds', { minutes, seconds })
+      : t('playtime.minutes', { minutes })
+  }
+  return t('playtime.seconds', { seconds })
 }

@@ -11,15 +11,21 @@ $releaseDir = Join-Path $repoRoot 'release'
 $releaseMetadataPath = Join-Path $repoRoot 'resources\release-manifest.json'
 $releaseMetadata = Get-Content -LiteralPath $releaseMetadataPath -Raw | ConvertFrom-Json
 $displayVersion = [string]$releaseMetadata.displayVersion
+$releaseChannel = ([string]$releaseMetadata.channel).Trim().ToLowerInvariant()
+if ($releaseChannel -notin @('beta', 'stable')) {
+  throw "Unsupported ORBIT release channel: $releaseChannel"
+}
+$isBeta = $releaseChannel -eq 'beta'
+$artifactPrefix = if ($isBeta) { 'ORBIT-Beta' } else { 'ORBIT' }
 $windowsFileVersion = [string]$releaseMetadata.windowsFileVersion
 $xboxPackageVersion = [version][string]$releaseMetadata.xboxPackageVersion
 $xboxMinimumWindowsVersion = [version][string]$releaseMetadata.xboxMode.minimumWindowsVersion
 $appOutDir = Join-Path $releaseDir 'win-unpacked'
 $stageDir = Join-Path $releaseDir '_orbit-xbox-stage'
 $bundleDir = Join-Path $releaseDir '_orbit-xbox-bundle'
-$appxFileName = "ORBIT-Beta-XboxMode-$displayVersion-x64.appx"
-$bundleFileName = "ORBIT-Beta-XboxMode-$displayVersion-x64.zip"
-$oneClickInstallerFileName = "ORBIT-Beta-XboxMode-Setup-$displayVersion-x64.exe"
+$appxFileName = "$artifactPrefix-XboxMode-$displayVersion-x64.appx"
+$bundleFileName = "$artifactPrefix-XboxMode-$displayVersion-x64.zip"
+$oneClickInstallerFileName = "$artifactPrefix-XboxMode-Setup-$displayVersion-x64.exe"
 $appxPath = Join-Path $releaseDir $appxFileName
 $bundlePath = Join-Path $releaseDir $bundleFileName
 $oneClickInstallerPath = Join-Path $releaseDir $oneClickInstallerFileName
@@ -154,8 +160,8 @@ try {
   Copy-Item -Path (Join-Path $repoRoot 'build\xbox\Public\*') -Destination (Join-Path $stageDir 'Public') -Recurse -Force
 
   # Release metadata is the single version source. Stamp only the disposable
-  # staging copy so a package cannot accidentally ship stale identity or
-  # Gaming Home registration versions after the next beta bump.
+  # staging copy so a package cannot accidentally ship stale identity,
+  # channel, or Gaming Home registration data after the next release bump.
   $stagedManifestPath = Join-Path $stageDir 'AppxManifest.xml'
   [xml]$stagedManifest = Get-Content -LiteralPath $stagedManifestPath -Raw
   $manifestNamespace = [System.Xml.XmlNamespaceManager]::new($stagedManifest.NameTable)
@@ -171,6 +177,7 @@ try {
   $registrationPath = Join-Path $stageDir 'Public\registration.json'
   $registration = Get-Content -LiteralPath $registrationPath -Raw | ConvertFrom-Json
   $registration.version = $xboxPackageVersion.ToString()
+  $registration.channel = $releaseChannel
   $registration | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $registrationPath -Encoding UTF8
 
   $makeAppx = Get-WindowsSdkTool 'makeappx.exe'
@@ -179,7 +186,7 @@ try {
   & $makeAppx pack /o /d $stageDir /p $appxPath
   if ($LASTEXITCODE -ne 0) { throw 'MakeAppx failed to create the Xbox Mode package.' }
 
-  & $signTool sign /fd SHA256 /a /f $pfxPath /p $plainPassword /d ORBIT $appxPath
+  & $signTool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /a /f $pfxPath /p $plainPassword /d ORBIT $appxPath
   if ($LASTEXITCODE -ne 0) { throw 'SignTool failed to sign the Xbox Mode package.' }
 
   Copy-Item -LiteralPath $cerPath -Destination (Join-Path $releaseDir 'ORBIT-Development.cer') -Force
@@ -200,11 +207,12 @@ try {
     "/DINSTALL_SCRIPT_PATH=$(Join-Path $PSScriptRoot 'Install-OrbitXboxMode.ps1')" `
     "/DDISPLAY_VERSION=$displayVersion" `
     "/DFILE_VERSION=$windowsFileVersion" `
+    "/DIS_BETA=$([int]$isBeta)" `
     "/DOUTPUT_PATH=$oneClickInstallerPath" `
     (Join-Path $repoRoot 'build\xbox\OrbitXboxInstaller.nsi')
   if ($LASTEXITCODE -ne 0) { throw 'NSIS failed to create the one-click Xbox Mode setup.' }
 
-  & $signTool sign /fd SHA256 /a /f $pfxPath /p $plainPassword /d 'ORBIT Xbox Mode Setup' $oneClickInstallerPath
+  & $signTool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /a /f $pfxPath /p $plainPassword /d 'ORBIT Xbox Mode Setup' $oneClickInstallerPath
   if ($LASTEXITCODE -ne 0) { throw 'SignTool failed to sign the one-click Xbox Mode setup.' }
 
   & (Join-Path $PSScriptRoot 'Verify-OrbitXboxPackage.ps1')

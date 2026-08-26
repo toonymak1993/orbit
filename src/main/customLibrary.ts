@@ -12,7 +12,7 @@ import {
   stat,
   writeFile
 } from 'node:fs/promises'
-import { basename, dirname, extname, isAbsolute, join, normalize, parse, relative, resolve } from 'node:path'
+import { basename, dirname, extname, isAbsolute, join, parse, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { app, dialog, nativeImage, shell, type BrowserWindow } from 'electron'
 import type {
@@ -23,6 +23,10 @@ import type {
   LibraryGame,
   LocalGameBackupResult
 } from '@shared/ipc'
+import {
+  normalizeCustomLaunchArguments,
+  parseCustomLaunchArguments
+} from './customLaunchArguments'
 import { settingsStore } from './settingsStore'
 
 const DRAFT_TTL_MS = 30 * 60_000
@@ -45,6 +49,7 @@ export interface LocalGameRecordInput {
   name: string
   executablePath: string
   installDir: string
+  launchArguments?: string[]
   savePath?: string
   metadata: GameMetadata
 }
@@ -63,14 +68,6 @@ function isGerman(): boolean {
 
 function message(de: string, en: string): string {
   return isGerman() ? de : en
-}
-
-function normalizedExecutableIdentity(executablePath: string): string {
-  return normalize(executablePath).replace(/\\+$/, '').toLocaleLowerCase('en-US')
-}
-
-function providerGameId(executablePath: string): string {
-  return createHash('sha256').update(normalizedExecutableIdentity(executablePath)).digest('hex').slice(0, 32)
 }
 
 function cleanGameName(executablePath: string, installDir: string): string {
@@ -342,7 +339,11 @@ export class CustomLibraryService {
     this.drafts.delete(draftId)
   }
 
-  async commit(draftId: string, requestedName: string): Promise<LocalGameRecordInput> {
+  async commit(
+    draftId: string,
+    requestedName: string,
+    requestedLaunchArguments?: string
+  ): Promise<LocalGameRecordInput> {
     const draft = requireDraft(this.drafts, draftId)
     const name = requestedName.normalize('NFKC').replace(/[\u0000-\u001f\u007f]/g, '').trim()
     if (!name || name.length > 120) {
@@ -350,8 +351,13 @@ export class CustomLibraryService {
     }
 
     const executablePath = await validatedExecutable(draft.executablePath)
+    const launchArguments = parseCustomLaunchArguments(
+      normalizeCustomLaunchArguments(requestedLaunchArguments)
+    )
     if (draft.savePath) await lstat(draft.savePath)
-    const id = providerGameId(executablePath)
+    // Local entries use a durable identity independent of mutable launch
+    // options. This also lets one launcher EXE represent several mod profiles.
+    const id = draft.id
     const metadata = await persistArtwork(id, executablePath, draft.artworkPath)
     this.drafts.delete(draftId)
     return {
@@ -359,6 +365,7 @@ export class CustomLibraryService {
       name,
       executablePath,
       installDir: draft.installDir,
+      launchArguments: launchArguments.length > 0 ? launchArguments : undefined,
       savePath: draft.savePath,
       metadata
     }

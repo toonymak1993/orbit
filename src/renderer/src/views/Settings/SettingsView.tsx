@@ -6,6 +6,8 @@ import {
   Check,
   CheckCircle2,
   CircleAlert,
+  Download,
+  ExternalLink,
   AudioLines,
   Globe2,
   Gamepad2,
@@ -16,12 +18,14 @@ import {
   LibraryBig,
   Loader2,
   LogOut,
+  Monitor,
   Palette,
   RefreshCw,
   RotateCcw,
   ShieldCheck,
   SlidersHorizontal,
-  Trophy
+  Trophy,
+  UserRound
 } from 'lucide-react'
 import { useAutoFocus } from '@renderer/hooks/useAutoFocus'
 import {
@@ -44,9 +48,15 @@ import { FocusableButton } from '@renderer/components/FocusableButton'
 import { ApiKeyField } from '@renderer/components/ApiKeyField'
 import {
   HardwareControlPanel,
-  HARDWARE_CONTROL_BUTTON_LABEL_KEYS
+  hardwareControlButtonLabel
 } from '@renderer/components/HardwareControlPanel'
 import { OrbitBackgroundServicePanel } from '@renderer/components/OrbitBackgroundServicePanel'
+import { ControllerButtonHint } from '@renderer/components/ControllerButtonHint'
+import {
+  PROFILE_AVATAR_OPTIONS,
+  ProfileAvatarPicker
+} from '@renderer/components/ProfileAvatar'
+import { useControllerButtonLabels } from '@renderer/state/controllerStore'
 import { useT } from '@renderer/i18n/useT'
 import { focusElement } from '@renderer/lib/spatialNavigation'
 import { notify } from '@renderer/state/notificationStore'
@@ -55,6 +65,7 @@ import type {
   AudioPreset,
   BackdropIntensity,
   GameCardSize,
+  HomeLayoutId,
   LibraryDetectionMethod,
   LibraryGame,
   LibraryProviderConnection,
@@ -62,15 +73,19 @@ import type {
   LibraryProviderState,
   LibraryProviderStatus,
   LibraryStatusProvider,
+  GraphicsAdapterVendor,
   NotificationMotion,
   NotificationPosition,
   OrbitSettings,
   StoreRegionId,
+  SystemUpdateSnapshot,
+  ThemeId,
   UiDensity
 } from '@shared/ipc'
 
-const themeSwatch: Record<string, string> = {
+const themeSwatch: Record<ThemeId, string> = {
   midnight: 'from-[#3fd0ff] to-[#8b5cf6]',
+  coresense: 'from-[#08275f] via-[#4a94ff] to-[#71daff]',
   aurora: 'from-[#2dd4bf] to-[#818cf8]',
   violet: 'from-[#a78bfa] to-[#f472b6]',
   sakura: 'from-[#fb71ad] to-[#c4b5fd]',
@@ -82,6 +97,12 @@ const themeSwatch: Record<string, string> = {
   ice: 'from-[#bae6fd] to-[#60a5fa]',
   lime: 'from-[#a3e635] to-[#2dd4bf]',
   monochrome: 'from-[#f4f4f5] to-[#71717a]'
+}
+
+const HOME_LAYOUT_BODY_KEYS: Record<HomeLayoutId, TranslationKey> = {
+  orbit: 'settings.homeLayout.orbitBody',
+  float: 'settings.homeLayout.floatBody',
+  coresense: 'settings.homeLayout.coresenseBody'
 }
 
 const DENSITY_OPTIONS: {
@@ -194,6 +215,12 @@ const SETTINGS_PAGES: {
     icon: Gamepad2
   },
   {
+    id: 'updates',
+    labelKey: 'settings.page.updates',
+    bodyKey: 'settings.page.updatesBody',
+    icon: Download
+  },
+  {
     id: 'system',
     labelKey: 'settings.page.system',
     bodyKey: 'settings.page.systemBody',
@@ -247,6 +274,19 @@ const LIBRARY_ISSUE_KEYS: Record<LibraryProviderIssue, TranslationKey> = {
   'no-games-found': 'settings.libraryStatus.issue.noGames'
 }
 
+const GRAPHICS_VENDOR_KEYS: Record<GraphicsAdapterVendor, TranslationKey> = {
+  nvidia: 'settings.updates.vendor.nvidia',
+  amd: 'settings.updates.vendor.amd',
+  intel: 'settings.updates.vendor.intel',
+  other: 'settings.updates.vendor.other'
+}
+
+const GRAPHICS_VENDOR_URLS: Partial<Record<GraphicsAdapterVendor, string>> = {
+  nvidia: 'https://www.nvidia.com/Download/index.aspx',
+  amd: 'https://www.amd.com/en/support/download/drivers.html',
+  intel: 'https://www.intel.com/content/www/us/en/support/detect.html'
+}
+
 const pageVariants = {
   enter: (direction: 1 | -1) => ({ x: direction * 72, opacity: 0, scale: 0.985 }),
   center: { x: 0, opacity: 1, scale: 1 },
@@ -255,14 +295,18 @@ const pageVariants = {
 
 export function SettingsView(): JSX.Element {
   const containerRef = useAutoFocus<HTMLDivElement>()
+  const controllerLabels = useControllerButtonLabels()
   const t = useT()
   const setPhase = useNavigationStore((s) => s.setPhase)
   const setOnboardingStep = useNavigationStore((s) => s.setOnboardingStep)
   const {
     theme,
+    profileAvatar,
+    customAvatarUrl,
     homeLayout,
     gameCardSize,
     backdropIntensity,
+    homeCardBubbleEffect,
     uiDensity,
     language,
     audioPreset,
@@ -277,9 +321,12 @@ export function SettingsView(): JSX.Element {
     hardwareControlButton,
     hardwareControlHoldSeconds,
     setTheme,
+    setProfileAvatar,
+    selectCustomAvatar,
     setHomeLayout,
     setGameCardSize,
     setBackdropIntensity,
+    setHomeCardBubbleEffect,
     setDensity,
     setLanguage,
     setAudioPreset,
@@ -332,20 +379,30 @@ export function SettingsView(): JSX.Element {
   const [version, setVersion] = useState('')
   const [settings, setSettings] = useState<OrbitSettings | null>(null)
   const [regionSaveState, setRegionSaveState] = useState<'idle' | 'saving' | 'error'>('idle')
+  const [updateSnapshot, setUpdateSnapshot] = useState<SystemUpdateSnapshot | null>(null)
+  const [updateCheckState, setUpdateCheckState] = useState<'idle' | 'checking' | 'error'>('idle')
+  const updateCheckInFlight = useRef(false)
+  const pendingUpdateCount =
+    (updateSnapshot?.windowsUpdates.length ?? 0) +
+    (updateSnapshot?.graphicsDriverUpdates.length ?? 0)
   const activePage = SETTINGS_PAGES.find((item) => item.id === page) ?? SETTINGS_PAGES[0]
   const activePageIndex = SETTINGS_PAGES.indexOf(activePage)
   const pageHighlights =
     page === 'appearance'
       ? [
           {
+            label: t('settings.avatar.title'),
+            value:
+              t(
+                PROFILE_AVATAR_OPTIONS.find((item) => item.id === profileAvatar)?.labelKey ??
+                  'settings.avatar.orbit'
+              )
+          },
+          {
             label: t('settings.summary.theme'),
             value: THEME_OPTIONS.find((item) => item.id === theme)?.label ?? theme
           },
-          { label: t('settings.summary.home'), value: homeLayout.toUpperCase() },
-          {
-            label: t('settings.summary.cards'),
-            value: t(GAME_CARD_SIZE_COPY[gameCardSize].labelKey)
-          }
+          { label: t('settings.summary.home'), value: homeLayout.toUpperCase() }
         ]
       : page === 'experience'
         ? [
@@ -397,7 +454,11 @@ export function SettingsView(): JSX.Element {
                 },
                 {
                   label: t('settings.summary.trigger'),
-                  value: t(HARDWARE_CONTROL_BUTTON_LABEL_KEYS[hardwareControlButton])
+                  value: hardwareControlButtonLabel(
+                    hardwareControlButton,
+                    t,
+                    controllerLabels
+                  )
                 },
                 {
                   label: t('settings.summary.hold'),
@@ -406,10 +467,33 @@ export function SettingsView(): JSX.Element {
                   })
                 }
               ]
+            : page === 'updates'
+              ? [
+                  {
+                    label: t('settings.summary.pending'),
+                    value: updateSnapshot
+                      ? pendingUpdateCount > 0
+                        ? t('settings.summary.updateCount', { count: pendingUpdateCount })
+                        : t('settings.summary.upToDate')
+                      : t('settings.summary.notChecked')
+                  },
+                  {
+                    label: t('settings.summary.graphics'),
+                    value: t('settings.summary.adapterCount', {
+                      count: updateSnapshot?.graphicsAdapters.length ?? 0
+                    })
+                  },
+                  {
+                    label: t('settings.summary.lastCheck'),
+                    value: updateSnapshot
+                      ? formatUpdateDate(updateSnapshot.checkedAt, language)
+                      : t('settings.summary.notChecked')
+                  }
+                ]
             : [
               {
                 label: t('settings.summary.version'),
-                value: version || '0.1.0-beta.3'
+                value: version || '—'
               },
               {
                 label: t('settings.summary.setup'),
@@ -421,6 +505,11 @@ export function SettingsView(): JSX.Element {
     void window.api.app.getVersion().then(setVersion)
     void window.api.settings.get().then(setSettings)
   }, [])
+
+  useEffect(() => {
+    if (page !== 'updates' || updateSnapshot || updateCheckInFlight.current) return
+    void checkSystemUpdates()
+  }, [page, updateSnapshot])
 
   useEffect(() => {
     if (previousAccountSignature.current === accountSignature) return
@@ -452,6 +541,21 @@ export function SettingsView(): JSX.Element {
     }
   }
 
+  async function checkSystemUpdates(): Promise<void> {
+    if (updateCheckInFlight.current) return
+    updateCheckInFlight.current = true
+    setUpdateCheckState('checking')
+    try {
+      const snapshot = await window.api.system.checkUpdates()
+      setUpdateSnapshot(snapshot)
+      setUpdateCheckState('idle')
+    } catch {
+      setUpdateCheckState('error')
+    } finally {
+      updateCheckInFlight.current = false
+    }
+  }
+
   return (
     <div ref={containerRef} className="flex h-full flex-col gap-5 overflow-hidden px-8 pb-8 pt-[6.5rem]">
       <div className="flex shrink-0 items-center justify-center">
@@ -459,9 +563,10 @@ export function SettingsView(): JSX.Element {
           className="flex items-center gap-1 rounded-full border border-white/10 bg-black/25 p-1"
           aria-label={t('settings.page.label')}
         >
-          <span className="mx-1 rounded-md border border-white/15 px-1.5 py-0.5 text-[10px] font-bold text-muted">
-            LT
-          </span>
+          <ControllerButtonHint
+            button="leftTrigger"
+            className="mx-1 rounded-md border border-white/15 px-1.5 py-0.5 text-[10px] font-bold text-muted"
+          />
           {SETTINGS_PAGES.map((item) => {
             const Icon = item.icon
             const active = page === item.id
@@ -492,9 +597,10 @@ export function SettingsView(): JSX.Element {
               </motion.button>
             )
           })}
-          <span className="mx-1 rounded-md border border-white/15 px-1.5 py-0.5 text-[10px] font-bold text-muted">
-            RT
-          </span>
+          <ControllerButtonHint
+            button="rightTrigger"
+            className="mx-1 rounded-md border border-white/15 px-1.5 py-0.5 text-[10px] font-bold text-muted"
+          />
         </div>
       </div>
 
@@ -519,13 +625,25 @@ export function SettingsView(): JSX.Element {
               index={activePageIndex + 1}
               total={SETTINGS_PAGES.length}
               highlights={pageHighlights}
-              autoSaveLabel={t('settings.autoSave')}
+              autoSaveLabel={t(
+                page === 'updates' ? 'settings.updates.localCheck' : 'settings.autoSave'
+              )}
             />
 
             {page === 'appearance' && (
               <div className="mt-5 space-y-5">
-                <SettingsSection index="01" icon={Palette} title={t('settings.theme.title')}>
-                  <div className="grid grid-cols-4 gap-2 sm:grid-cols-6 xl:grid-cols-12">
+                <SettingsSection index="01" icon={UserRound} title={t('settings.avatar.title')}>
+                  <ProfileAvatarPicker
+                    selected={profileAvatar}
+                    steamAvatarUrl={account?.avatarUrl}
+                    customAvatarUrl={customAvatarUrl}
+                    onChange={(value) => void setProfileAvatar(value)}
+                    onSelectCustom={selectCustomAvatar}
+                  />
+                </SettingsSection>
+
+                <SettingsSection index="02" icon={Palette} title={t('settings.theme.title')}>
+                  <div className="grid grid-cols-4 gap-2 sm:grid-cols-7 xl:grid-cols-[repeat(13,minmax(0,1fr))]">
                     {THEME_OPTIONS.map((option) => (
                       <motion.button
                         key={option.id}
@@ -565,9 +683,20 @@ export function SettingsView(): JSX.Element {
                       </motion.button>
                     ))}
                   </div>
+                  <div className="mt-4 border-t border-white/[0.07] pt-4">
+                    <SettingsToggle
+                      id="homeCardBubbleEffect"
+                      active={homeCardBubbleEffect}
+                      title={t('settings.theme.bubbleCards')}
+                      description={t('settings.theme.bubbleCardsBody')}
+                      defaultActive
+                      onChange={(active) => void setHomeCardBubbleEffect(active)}
+                      t={t}
+                    />
+                  </div>
                 </SettingsSection>
 
-                <SettingsSection index="02" icon={Layers3} title={t('settings.presentation.title')}>
+                <SettingsSection index="03" icon={Layers3} title={t('settings.presentation.title')}>
                   <p className="mb-4 max-w-3xl text-xs leading-relaxed text-muted">
                     {t('settings.presentation.body')}
                   </p>
@@ -626,14 +755,13 @@ export function SettingsView(): JSX.Element {
                   </div>
                 </SettingsSection>
 
-                <SettingsSection index="03" icon={LayoutTemplate} title={t('settings.homeLayout.title')}>
+                <SettingsSection index="04" icon={LayoutTemplate} title={t('settings.homeLayout.title')}>
                   <p className="mb-4 text-xs leading-relaxed text-muted">
                     {t('settings.homeLayout.body')}
                   </p>
-                  <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                  <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
                     {HOME_LAYOUT_OPTIONS.map((option) => {
                       const active = homeLayout === option.id
-                      const isFloat = option.id === 'float'
                       return (
                         <motion.button
                           key={option.id}
@@ -643,6 +771,7 @@ export function SettingsView(): JSX.Element {
                           onClick={() => void setHomeLayout(option.id)}
                           whileHover={{ y: -2 }}
                           whileTap={{ scale: 0.985 }}
+                          data-home-style-option={option.id}
                           className={`rounded-2xl border p-3 text-left transition-colors ${
                             active
                               ? 'border-accent/70 bg-accent/12'
@@ -650,52 +779,13 @@ export function SettingsView(): JSX.Element {
                           }`}
                         >
                           <div className="mb-3 flex h-24 gap-2 overflow-hidden rounded-xl border border-white/[0.07] bg-black/45 p-3">
-                            {isFloat ? (
-                              <>
-                                <div className="flex flex-1 flex-col gap-2">
-                                  <div className="h-5 rounded-md border border-white/10 bg-white/[0.06]" />
-                                  <div className="flex flex-1 items-end gap-2">
-                                    {[0, 1, 2, 3].map((index) => (
-                                      <div
-                                        key={index}
-                                        className={`h-full flex-1 rounded-md bg-gradient-to-b ${
-                                          index === 0
-                                            ? 'from-accent/75 to-accent-2/55'
-                                            : 'from-white/15 to-white/[0.04]'
-                                        }`}
-                                      />
-                                    ))}
-                                  </div>
-                                </div>
-                              </>
-                            ) : (
-                              <div className="flex flex-1 flex-col gap-2">
-                                <div className="grid h-9 grid-cols-[1.3fr_0.7fr] gap-2">
-                                  <div className="rounded-md bg-gradient-to-r from-accent/45 to-white/[0.05]" />
-                                  <div className="rounded-md bg-white/[0.07]" />
-                                </div>
-                                <div className="flex flex-1 gap-2">
-                                  {[0, 1, 2, 3, 4].map((index) => (
-                                    <div
-                                      key={index}
-                                      className={`flex-1 rounded-md ${
-                                        index === 0 ? 'bg-accent/70' : 'bg-white/[0.08]'
-                                      }`}
-                                    />
-                                  ))}
-                                </div>
-                              </div>
-                            )}
+                            <HomeLayoutPreview layout={option.id} />
                           </div>
                           <div className="flex items-start justify-between gap-3">
                             <div>
                               <p className="font-bold tracking-wide">{option.label}</p>
                               <p className="mt-1 text-xs leading-relaxed text-white/42">
-                                {t(
-                                  isFloat
-                                    ? 'settings.homeLayout.floatBody'
-                                    : 'settings.homeLayout.orbitBody'
-                                )}
+                                {t(HOME_LAYOUT_BODY_KEYS[option.id])}
                               </p>
                             </div>
                             {option.id === 'orbit' && (
@@ -721,7 +811,10 @@ export function SettingsView(): JSX.Element {
                       id="showStoreTab"
                       active={showStoreTab}
                       title={t('settings.visibility.store')}
-                      description={t('settings.visibility.storeBody')}
+                      description={t('settings.visibility.storeBody', {
+                        previous: controllerLabels.leftBumper,
+                        next: controllerLabels.rightBumper
+                      })}
                       defaultActive
                       onChange={(active) => void setShowStoreTab(active)}
                       t={t}
@@ -731,12 +824,12 @@ export function SettingsView(): JSX.Element {
                       active={showHomeBanners}
                       title={t('settings.visibility.homeBanners')}
                       description={t(
-                        homeLayout === 'float'
-                          ? 'settings.visibility.homeBannersFloat'
+                        homeLayout !== 'orbit'
+                          ? 'settings.visibility.homeBannersAlternative'
                           : 'settings.visibility.homeBannersBody'
                       )}
                       defaultActive
-                      disabled={homeLayout === 'float'}
+                      disabled={homeLayout !== 'orbit'}
                       onChange={(active) => void setShowHomeBanners(active)}
                       t={t}
                     />
@@ -1087,6 +1180,15 @@ export function SettingsView(): JSX.Element {
               </div>
             )}
 
+            {page === 'updates' && (
+              <SystemUpdatesPanel
+                snapshot={updateSnapshot}
+                checkState={updateCheckState}
+                language={language}
+                onCheck={() => void checkSystemUpdates()}
+              />
+            )}
+
             {page === 'system' && (
               <div className="mt-5 space-y-5">
                 <SettingsSection index="01" icon={RotateCcw} title={t('settings.onboarding.title')}>
@@ -1116,7 +1218,7 @@ export function SettingsView(): JSX.Element {
 
                 <SettingsSection index="02" icon={AppWindow} title={t('settings.about.title')}>
                   <p className="text-sm text-muted">
-                    {t('settings.about.version', { version: version || '0.1.0-beta.3' })}
+                    {t('settings.about.version', { version: version || '—' })}
                   </p>
                 </SettingsSection>
               </div>
@@ -1126,6 +1228,326 @@ export function SettingsView(): JSX.Element {
       </div>
     </div>
   )
+}
+
+function SystemUpdatesPanel({
+  snapshot,
+  checkState,
+  language,
+  onCheck
+}: {
+  snapshot: SystemUpdateSnapshot | null
+  checkState: 'idle' | 'checking' | 'error'
+  language: 'en' | 'de'
+  onCheck: () => void
+}): JSX.Element {
+  const t = useT()
+  const checking = checkState === 'checking'
+  const requestFailed = checkState === 'error'
+  const scanUnavailable = Boolean(snapshot?.errors.updateScan)
+  const vendorLinks = Array.from(
+    new Set(
+      (snapshot?.graphicsAdapters ?? [])
+        .map((adapter) => adapter.vendor)
+        .filter((vendor) => Boolean(GRAPHICS_VENDOR_URLS[vendor]))
+    )
+  )
+
+  return (
+    <div className="mt-5 space-y-5">
+      {snapshot?.platform === 'unsupported' && (
+        <div className="flex items-center gap-3 rounded-xl border border-amber-300/20 bg-amber-300/[0.07] px-4 py-3 text-sm text-amber-100">
+          <CircleAlert size={17} className="shrink-0" />
+          {t('settings.updates.unsupported')}
+        </div>
+      )}
+
+      {snapshot?.state === 'partial' && (
+        <div className="flex items-center gap-3 rounded-xl border border-amber-300/20 bg-amber-300/[0.07] px-4 py-3 text-sm text-amber-100">
+          <CircleAlert size={17} className="shrink-0" />
+          {t('settings.updates.partial')}
+        </div>
+      )}
+
+      {requestFailed && (
+        <div className="flex items-center gap-3 rounded-xl border border-rose-300/20 bg-rose-300/[0.07] px-4 py-3 text-sm text-rose-100">
+          <CircleAlert size={17} className="shrink-0" />
+          {t('settings.updates.checkFailed')}
+        </div>
+      )}
+
+      <SettingsSection index="01" icon={Download} title={t('settings.updates.windowsTitle')}>
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <p className="max-w-3xl text-sm leading-relaxed text-muted">
+            {t('settings.updates.windowsBody')}
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <FocusableButton
+              variant="ghost"
+              disabled={checking || snapshot?.platform === 'unsupported'}
+              onClick={onCheck}
+              className="shrink-0 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <span className="flex items-center gap-2">
+                <RefreshCw size={14} className={checking ? 'animate-spin' : ''} />
+                {checking
+                  ? t('settings.updates.checking')
+                  : t(snapshot ? 'settings.updates.checkAgain' : 'settings.updates.check')}
+              </span>
+            </FocusableButton>
+            <FocusableButton
+              variant="ghost"
+              onClick={() => void window.api.system.openUpdateSettings()}
+              className="shrink-0"
+            >
+              <span className="flex items-center gap-2">
+                <ExternalLink size={14} />
+                {t('settings.updates.openWindows')}
+              </span>
+            </FocusableButton>
+          </div>
+        </div>
+
+        <div className="mt-4 space-y-2">
+          {checking && !snapshot && (
+            <UpdateMessage icon="loading" text={t('settings.updates.checking')} />
+          )}
+          {!checking && !snapshot && !requestFailed && (
+            <UpdateMessage icon="idle" text={t('settings.updates.notChecked')} />
+          )}
+          {scanUnavailable && (
+            <UpdateMessage icon="error" text={t('settings.updates.scanError')} />
+          )}
+          {snapshot && !snapshot.errors.updateScan && snapshot.windowsUpdates.length === 0 && (
+            <UpdateMessage icon="success" text={t('settings.updates.noneWindows')} />
+          )}
+          {snapshot?.windowsUpdates.map((update) => (
+            <article
+              key={update.id}
+              className="rounded-xl border border-white/[0.07] bg-black/20 px-4 py-3"
+            >
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-semibold leading-snug text-white/85">{update.title}</p>
+                  <div className="mt-2 flex flex-wrap gap-2 text-[10px] font-semibold uppercase tracking-wide text-white/42">
+                    {update.kbArticleIds.length > 0 && (
+                      <span>
+                        {t('settings.updates.kb', { ids: update.kbArticleIds.join(', KB') })}
+                      </span>
+                    )}
+                    {update.severity && <span>{update.severity}</span>}
+                    {update.downloaded && <span>{t('settings.updates.downloaded')}</span>}
+                    {update.rebootRequired && (
+                      <span className="text-amber-200/80">{t('settings.updates.reboot')}</span>
+                    )}
+                  </div>
+                </div>
+                <span className="rounded-full border border-amber-300/20 bg-amber-300/10 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-amber-100">
+                  {t('settings.updates.pending', { count: 1 })}
+                </span>
+              </div>
+            </article>
+          ))}
+        </div>
+
+        {snapshot && (
+          <p className="mt-3 text-[10px] font-medium uppercase tracking-[0.12em] text-white/30">
+            {t('settings.updates.lastChecked', {
+              date: formatUpdateDate(snapshot.checkedAt, language, true)
+            })}
+          </p>
+        )}
+      </SettingsSection>
+
+      <SettingsSection index="02" icon={Monitor} title={t('settings.updates.graphicsTitle')}>
+        <p className="max-w-4xl text-sm leading-relaxed text-muted">
+          {t('settings.updates.graphicsBody')}
+        </p>
+
+        {snapshot?.errors.graphicsDetection && (
+          <div className="mt-4">
+            <UpdateMessage icon="error" text={t('settings.updates.graphicsError')} />
+          </div>
+        )}
+
+        {snapshot &&
+          !snapshot.errors.graphicsDetection &&
+          snapshot.graphicsAdapters.length === 0 && (
+            <div className="mt-4">
+              <UpdateMessage icon="idle" text={t('settings.updates.noAdapters')} />
+            </div>
+          )}
+
+        {snapshot && snapshot.graphicsAdapters.length > 0 && (
+          <div className="mt-5">
+            <p className="mb-2 text-[10px] font-bold uppercase tracking-[0.16em] text-white/35">
+              {t('settings.updates.detectedAdapters')}
+            </p>
+            <div className="grid gap-2 lg:grid-cols-2">
+              {snapshot.graphicsAdapters.map((adapter) => (
+                <article
+                  key={`${adapter.name}:${adapter.driverVersion}`}
+                  className="rounded-xl border border-white/[0.07] bg-black/20 px-4 py-3"
+                >
+                  <div className="flex items-start gap-3">
+                    <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.04] text-accent">
+                      <Monitor size={15} />
+                    </span>
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="text-sm font-semibold text-white/85">{adapter.name}</p>
+                        <VendorBadge vendor={adapter.vendor} />
+                      </div>
+                      <p className="mt-1 text-xs text-white/45">
+                        {t('settings.updates.installedDriver', {
+                          version: adapter.driverVersion || '—'
+                        })}
+                      </p>
+                      {adapter.driverDate && (
+                        <p className="mt-0.5 text-[10px] text-white/30">
+                          {t('settings.updates.driverDate', {
+                            date: formatUpdateDate(adapter.driverDate, language)
+                          })}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {snapshot && !snapshot.errors.updateScan && (
+          <div className="mt-5">
+            <p className="mb-2 text-[10px] font-bold uppercase tracking-[0.16em] text-white/35">
+              {t('settings.updates.availableDrivers')}
+            </p>
+            <div className="space-y-2">
+              {snapshot.graphicsDriverUpdates.length === 0 ? (
+                <UpdateMessage icon="success" text={t('settings.updates.noneDrivers')} />
+              ) : (
+                snapshot.graphicsDriverUpdates.map((update) => (
+                  <article
+                    key={update.id}
+                    className="rounded-xl border border-accent/15 bg-accent/[0.055] px-4 py-3"
+                  >
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="text-sm font-semibold leading-snug text-white/90">
+                            {update.title}
+                          </p>
+                          <VendorBadge vendor={update.vendor} />
+                        </div>
+                        {update.matchedAdapterNames.length > 0 && (
+                          <p className="mt-1 text-xs text-white/45">
+                            {t('settings.updates.matchedDevice', {
+                              device: update.matchedAdapterNames.join(', ')
+                            })}
+                          </p>
+                        )}
+                        <div className="mt-2 flex flex-wrap gap-2 text-[10px] font-semibold uppercase tracking-wide text-white/38">
+                          {update.provider && <span>{update.provider}</span>}
+                          {update.driverDate && (
+                            <span>{formatUpdateDate(update.driverDate, language)}</span>
+                          )}
+                          {update.downloaded && <span>{t('settings.updates.downloaded')}</span>}
+                          {update.rebootRequired && (
+                            <span className="text-amber-200/80">{t('settings.updates.reboot')}</span>
+                          )}
+                        </div>
+                      </div>
+                      <span className="rounded-full border border-accent/25 bg-accent/10 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-accent">
+                        {t('settings.updates.pending', { count: 1 })}
+                      </span>
+                    </div>
+                  </article>
+                ))
+              )}
+            </div>
+          </div>
+        )}
+
+        {vendorLinks.length > 0 && (
+          <div className="mt-5 border-t border-white/[0.06] pt-4">
+            <p className="mb-3 text-xs leading-relaxed text-white/38">
+              {t('settings.updates.vendorHint')}
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {vendorLinks.map((vendor) => (
+                <FocusableButton
+                  key={vendor}
+                  variant="ghost"
+                  onClick={() => void window.api.app.openExternal(GRAPHICS_VENDOR_URLS[vendor]!)}
+                  className="px-4 py-2 text-xs"
+                >
+                  <span className="flex items-center gap-2">
+                    <ExternalLink size={13} />
+                    {t('settings.updates.vendorPage', {
+                      vendor: t(GRAPHICS_VENDOR_KEYS[vendor])
+                    })}
+                  </span>
+                </FocusableButton>
+              ))}
+            </div>
+          </div>
+        )}
+      </SettingsSection>
+    </div>
+  )
+}
+
+function UpdateMessage({
+  icon,
+  text
+}: {
+  icon: 'loading' | 'idle' | 'success' | 'error'
+  text: string
+}): JSX.Element {
+  const Icon =
+    icon === 'loading'
+      ? Loader2
+      : icon === 'success'
+        ? CheckCircle2
+        : icon === 'error'
+          ? CircleAlert
+          : RefreshCw
+  const colorClass =
+    icon === 'success'
+      ? 'border-emerald-300/15 bg-emerald-300/[0.06] text-emerald-100'
+      : icon === 'error'
+        ? 'border-rose-300/15 bg-rose-300/[0.06] text-rose-100'
+        : 'border-white/[0.07] bg-black/20 text-muted'
+
+  return (
+    <div className={`flex items-center gap-3 rounded-xl border px-4 py-3 text-sm ${colorClass}`}>
+      <Icon size={16} className={`shrink-0 ${icon === 'loading' ? 'animate-spin' : ''}`} />
+      <span>{text}</span>
+    </div>
+  )
+}
+
+function VendorBadge({ vendor }: { vendor: GraphicsAdapterVendor }): JSX.Element {
+  const t = useT()
+  return (
+    <span className="rounded-full border border-white/10 bg-white/[0.055] px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.12em] text-white/48">
+      {t(GRAPHICS_VENDOR_KEYS[vendor])}
+    </span>
+  )
+}
+
+function formatUpdateDate(
+  value: number | string,
+  language: 'en' | 'de',
+  includeTime = false
+): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '—'
+  return new Intl.DateTimeFormat(language === 'de' ? 'de-DE' : 'en-US', {
+    dateStyle: 'medium',
+    ...(includeTime ? { timeStyle: 'short' as const } : {})
+  }).format(date)
 }
 
 function SettingsPageLead({
@@ -1252,6 +1674,75 @@ function PresentationChoice({
         <Check size={11} strokeWidth={3} />
       </span>
     </motion.button>
+  )
+}
+
+function HomeLayoutPreview({ layout }: { layout: HomeLayoutId }): JSX.Element {
+  if (layout === 'coresense') {
+    return (
+      <span className="flex w-full flex-col justify-between gap-2">
+        <span className="flex items-start gap-1.5">
+          {[0, 1, 2, 3, 4].map((index) => (
+            <span
+              key={index}
+              className={`block rounded-[4px] border ${
+                index === 0
+                  ? 'h-8 w-8 border-accent/80 bg-gradient-to-br from-accent/85 to-accent-2/55'
+                  : 'h-6 w-6 border-white/10 bg-white/10'
+              }`}
+            />
+          ))}
+        </span>
+        <span className="flex items-end justify-between gap-3">
+          <span className="flex items-center gap-1.5">
+            <span className="h-5 w-5 rounded-[5px] bg-accent/70" />
+            <span className="h-1.5 w-12 rounded-full bg-white/30" />
+          </span>
+          <span className="flex gap-1">
+            {[0, 1, 2].map((index) => (
+              <span key={index} className="h-3.5 w-7 rounded-[3px] bg-white/10" />
+            ))}
+          </span>
+        </span>
+      </span>
+    )
+  }
+
+  if (layout === 'float') {
+    return (
+      <span className="flex flex-1 flex-col gap-2">
+        <span className="h-5 rounded-md border border-white/10 bg-white/[0.06]" />
+        <span className="flex flex-1 items-end gap-2">
+          {[0, 1, 2, 3].map((index) => (
+            <span
+              key={index}
+              className={`h-full flex-1 rounded-md bg-gradient-to-b ${
+                index === 0
+                  ? 'from-accent/75 to-accent-2/55'
+                  : 'from-white/15 to-white/[0.04]'
+              }`}
+            />
+          ))}
+        </span>
+      </span>
+    )
+  }
+
+  return (
+    <span className="flex flex-1 flex-col gap-2">
+      <span className="grid h-9 grid-cols-[1.3fr_0.7fr] gap-2">
+        <span className="rounded-md bg-gradient-to-r from-accent/45 to-white/[0.05]" />
+        <span className="rounded-md bg-white/[0.07]" />
+      </span>
+      <span className="flex flex-1 gap-2">
+        {[0, 1, 2, 3, 4].map((index) => (
+          <span
+            key={index}
+            className={`flex-1 rounded-md ${index === 0 ? 'bg-accent/70' : 'bg-white/[0.08]'}`}
+          />
+        ))}
+      </span>
+    </span>
   )
 }
 

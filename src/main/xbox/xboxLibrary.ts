@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events'
 import type {
   GameMetadata,
+  LibraryGame,
   LibraryDetectionMethod,
   LibraryProviderStatus,
   LibrarySnapshot
@@ -11,6 +12,7 @@ import type { LibraryProviderAdapter } from '../library/libraryProvider'
 import { syncCoordinator } from '../sync/syncCoordinator'
 import { scanXboxAppLibrary, type XboxAppGame } from './xboxAppLibrary'
 import { scanInstalledXboxGames } from './xboxInstall'
+import { normalizeXboxPackageFamilyName } from './xboxPackageIdentity'
 import {
   xboxMetadataService,
   type XboxMetadataResult,
@@ -58,6 +60,7 @@ export class XboxLibraryService
 {
   readonly provider = 'xbox' as const
   private refreshInFlight: Promise<LibrarySnapshot> | null = null
+  private gameIdByPackageFamilyName = new Map<string, string>()
   private providerStatus: LibraryProviderStatus = {
     provider: 'xbox',
     state: 'idle',
@@ -114,6 +117,16 @@ export class XboxLibraryService
     }
   }
 
+  /** Resolves only package identities already admitted to ORBIT's Xbox library. */
+  resolvePackageFamilyName(packageFamilyName: string): LibraryGame | undefined {
+    const normalized = normalizeXboxPackageFamilyName(packageFamilyName)
+    if (!normalized) return undefined
+    const gameId = this.gameIdByPackageFamilyName.get(normalized.toLowerCase())
+    if (!gameId) return undefined
+    const game = gameRepository.getGame(gameId)
+    return game?.provider === 'xbox' ? game : undefined
+  }
+
   async refresh(): Promise<LibrarySnapshot> {
     if (this.refreshInFlight) return this.refreshInFlight
     this.refreshInFlight = this.doRefresh()
@@ -138,6 +151,16 @@ export class XboxLibraryService
 
     const appLibrary = appLibraryResult.status === 'fulfilled' ? appLibraryResult.value : undefined
     const installed = installedResult.status === 'fulfilled' ? installedResult.value : undefined
+    const nextPackageGameIds = new Map<string, string>()
+    for (const game of appLibrary?.games.values() ?? []) {
+      const packageFamilyName = normalizeXboxPackageFamilyName(game.packageFamilyName)
+      if (packageFamilyName) {
+        nextPackageGameIds.set(
+          packageFamilyName.toLowerCase(),
+          `xbox:${game.providerGameId}`
+        )
+      }
+    }
     syncCoordinator.progress('library', 1, 4, 'xbox-packages', 'xbox')
 
     if (appLibrary?.available && appLibrary.activeSubscription) {
@@ -167,7 +190,16 @@ export class XboxLibraryService
     const fallbackTargets: XboxMetadataSyncTarget[] = []
     if (installed) {
       const installedDeltas = [...installed.values()].map((game) => {
-        const catalog = appLibrary?.byPackageFamilyName.get(game.packageFamilyName.toLowerCase())
+        const packageFamilyName = normalizeXboxPackageFamilyName(game.packageFamilyName)
+        const catalog = packageFamilyName
+          ? appLibrary?.byPackageFamilyName.get(packageFamilyName.toLowerCase())
+          : undefined
+        if (packageFamilyName) {
+          nextPackageGameIds.set(
+            packageFamilyName.toLowerCase(),
+            `xbox:${catalog?.providerGameId ?? game.providerGameId}`
+          )
+        }
         if (!catalog) {
           fallbackTargets.push({
             providerGameId: game.providerGameId,
@@ -183,6 +215,17 @@ export class XboxLibraryService
         }
       })
       gameRepository.applyInstalledProviderDelta('xbox', installedDeltas)
+    }
+    if (appLibraryResult.status === 'fulfilled' && installedResult.status === 'fulfilled') {
+      this.gameIdByPackageFamilyName = nextPackageGameIds
+    } else if (
+      appLibraryResult.status === 'fulfilled' ||
+      installedResult.status === 'fulfilled'
+    ) {
+      this.gameIdByPackageFamilyName = new Map([
+        ...this.gameIdByPackageFamilyName,
+        ...nextPackageGameIds
+      ])
     }
     xboxMetadataService.syncLibrary(fallbackTargets)
     syncCoordinator.progress('library', 3, 4, 'xbox-artwork', 'xbox')

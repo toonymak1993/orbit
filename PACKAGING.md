@@ -1,80 +1,98 @@
 # ORBIT Windows packaging
 
-ORBIT `0.1.0-beta.3` ships as a signed community beta in two Windows formats: a normal offline NSIS installer and a packaged Xbox Mode / Full screen experience build. Automatic updates are not enabled yet. Stable application and package identities allow a later higher version to upgrade an existing installation while preserving local application data.
+ORBIT `0.1.0` is distributed as a signed x64 Windows release. The primary public artifact is the self-contained Xbox Mode setup:
 
-## Build the complete beta bundle
+`release/ORBIT-XboxMode-Setup-0.1.0-x64.exe`
 
-Run:
+This single executable embeds the complete signed AppX, the public ORBIT certificate and the hardened installation script. The private PFX and its DPAPI-protected password remain in the ignored `.certificates` directory and must never be distributed.
+
+The release pipeline also creates a normal NSIS installer as a local verification and fallback artifact. It is not required as a second public download when the Xbox Mode setup is the selected distribution path.
+
+## Stable release flow
+
+Version metadata must move together across `package.json`, `package-lock.json`, `electron-builder.yml`, `resources/release-manifest.json` and `build/xbox/AppxManifest.xml`. Stable product versions use three-part SemVer (`X.Y.Z`); Windows and AppX identities use four numeric components.
+
+For the first stable promotion:
+
+- product and Git tag: `0.1.0` / `v0.1.0`;
+- Windows and AppX identity: `0.1.0.4`;
+- release sequence: `8`.
+
+Build and verify the normal Windows installer first, then create the Xbox package from the same compiled source:
 
 ```powershell
-npm run build:beta
+npm run typecheck
+npm run build
+npm run build:win
+npm run verify:win
+npm run build:xbox
+npm run verify:xbox
 ```
 
-The command performs TypeScript validation, builds ORBIT, creates both Windows installers, signs every executable and AppX, validates manifests and signatures, generates SHA-256 checksums, and writes the distributable ZIP to `release/ORBIT-Beta-0.1.0-beta.3-x64.zip`.
+The Xbox builder derives Stable/Beta filenames, labels and distribution metadata from `resources/release-manifest.json`. It signs the AppX and setup with SHA-256 plus an RFC3161 timestamp and rejects missing timestamps during verification.
 
-The ZIP contains only public distribution material. The private PFX and its DPAPI-protected password remain in the ignored `.certificates` directory and must never be distributed.
+## Primary one-file installer
 
-## Self-signed beta publisher
+`ORBIT-XboxMode-Setup-<version>-x64.exe` contains:
 
-Until a commercial OV certificate or Azure Trusted Signing is available, the beta uses a dedicated self-signed code-signing certificate with subject `CN=ORBIT Development`. This follows the community-beta approach used by comparable Gaming Home projects, but Windows cannot establish public trust automatically.
+- the complete ORBIT `Windows.FullTrustApplication` AppX;
+- identity `ORBIT.GamingHome` and application ID `ORBIT`;
+- the `windows.gamingApp` extension;
+- the `Microsoft.appCategory.gamingHome_8wekyb3d8bbwe` custom capability and SCCD;
+- the public `ORBIT-Development.cer` certificate;
+- the validated Xbox Mode installer.
 
-Beta users must compare the certificate thumbprint against the value published by the ORBIT project before trusting `ORBIT-Development.cer`. The normal installer requires the included `Install-OrbitDevelopmentCertificate.ps1` first. The Xbox Mode setup imports the same exact certificate into `LocalMachine\TrustedPeople` as part of installation. Neither path adds it to a Root store.
+Before modifying Windows, setup validates certificate lifetime and usage, AppX hash/signature, identity, architecture, Gaming Home declarations, registration metadata, SCCD and the packaged release contract. It then imports only the bundled certificate into `LocalMachine\TrustedPeople`, enables Developer Mode for the SCCD capability, installs or upgrades the AppX for the interactive account, verifies registration and opens **Settings > Gaming > Xbox mode**.
 
-Back up `.certificates` separately and securely. Losing the private key prevents future packages from preserving the same publisher identity. The password XML is protected by Windows DPAPI and may not decrypt for a different Windows user or PC.
+The installer refuses downgrades, treats an equal package version as an idempotent verification, rolls back newly added trust and the previous Developer Mode value after a clean first-install failure, and writes diagnostics atomically to `C:\ProgramData\ORBIT\Logs\xbox-mode-diagnostics.json`.
 
-## Normal Windows installer
+It deliberately does not write `GamingHomeApp` directly. Windows Settings remains the owner of the selected home app.
 
-Build only the standard installer with:
+## Platform requirements
+
+- Windows 11 24H2 (build `10.0.26100.0`) or newer
+- x64 Windows; 64-bit Arm Windows may use x64 emulation but is not hardware-validated
+- current Xbox app and Game Bar recommended
+
+Xbox Mode availability remains controlled by Microsoft through supported markets, device policy and phased feature rollout. Successful installation does not guarantee that the Xbox Mode setting is exposed on every otherwise eligible PC.
+
+## Self-signed publisher
+
+The current release uses the self-signed code-signing certificate `CN=ORBIT Development`. The EXE, AppX and their timestamps are cryptographically verifiable, but Windows cannot establish public trust before the certificate is installed. Users can therefore see an unknown-publisher or SmartScreen warning until ORBIT adopts a publicly trusted signing certificate or service.
+
+Publish the release SHA-256 and certificate thumbprint in the GitHub release notes. The setup embeds only the public CER and never a private key. Neither the normal nor Xbox Mode path adds the certificate to a Root store.
+
+Back up `.certificates` separately and securely. Losing the private key prevents future AppX versions from preserving the same publisher identity. The password XML is protected by Windows DPAPI and may not decrypt for a different Windows user or PC.
+
+## Individual build targets
+
+Normal NSIS installer:
 
 ```powershell
 npm run build:win
 ```
 
-Output: `release/ORBIT-Beta-Setup-0.1.0-beta.3-x64.exe`.
-
-## Xbox Mode / Full screen experience
-
-Build only the Xbox package with:
+Xbox Mode AppX, self-contained setup and fallback ZIP:
 
 ```powershell
 npm run build:xbox
 ```
 
-Outputs include:
+Side-effect-free AppX preflight:
 
-- `ORBIT-Beta-XboxMode-Setup-0.1.0-beta.3-x64.exe` — recommended self-contained setup.
-- `ORBIT-Beta-XboxMode-0.1.0-beta.3-x64.appx` — signed Gaming Home package.
-- `ORBIT-Beta-XboxMode-0.1.0-beta.3-x64.zip` — script-based fallback bundle.
+```powershell
+./scripts/windows/Install-OrbitXboxMode.ps1 -PackagePath <appx> -CertificatePath <cer> -ValidateOnly
+```
 
-The AppX keeps the stable identity `ORBIT.GamingHome`, application ID `ORBIT`, `windows.gamingApp` extension, and `Microsoft.appCategory.gamingHome_8wekyb3d8bbwe` custom capability. It targets both `Windows.Universal` and `Windows.Desktop`, matching working handheld Gaming Home packages.
+The packaging gate runs the same preflight automatically.
 
-The setup is version-independent across supported Xbox app releases. It treats Windows as the source of truth instead of maintaining a brittle Xbox app/build allow-list:
+## Stable identities
 
-1. verifies the certificate lifetime and code-signing usage before trusting it;
-2. verifies the AppX hash/signature plus its identity, publisher, architecture, full-trust entry point, Gaming Home extension/capability, registration metadata, SCCD, and packaged release contract before changing Windows;
-3. accepts Windows 11 24H2 and newer instead of hard-coding individual cumulative-update or Xbox app versions;
-4. reports missing Xbox/Game Bar packages and a policy-disabled Xbox Mode without making either a false compatibility requirement;
-5. trusts only the bundled certificate in `LocalMachine\TrustedPeople` and re-validates the signature after trust is established;
-6. enables Developer Mode for the community-beta SCCD capability;
-7. refuses downgrades, treats an equal version as an idempotent verification, and installs or upgrades only for the interactive Windows account;
-8. verifies the installed Gaming Home registration and required payload;
-9. restores newly added certificate trust and the previous Developer Mode value when a first installation fails cleanly;
-10. writes atomic success or failure diagnostics to `C:\ProgramData\ORBIT\Logs\xbox-mode-diagnostics.json`;
-11. opens `Settings > Gaming > Xbox mode` so the user can select ORBIT.
+Keep these values stable across upgrades:
 
-The installer deliberately does not write `GamingHomeApp` directly. Windows Settings remains the owner of that selection, preventing a stale Gaming Home reference if a previous launcher is uninstalled.
+- Electron app ID: `com.orbit.launcher`
+- AppX identity: `ORBIT.GamingHome`
+- publisher: `CN=ORBIT Development` while the current signing line is in use
+- AppX application ID: `ORBIT`
 
-Windows 11 version 24H2 (build `26100.0`) or newer is the package baseline. Actual Xbox Mode availability remains controlled by Microsoft through supported markets, device policy, and phased Windows feature rollout; installation success therefore does not claim that the feature is exposed on every eligible PC. Keep Windows, the Xbox app, and Game Bar current. The installer never applies display/device-form overrides or third-party preparation tools.
-
-The current payload is x64. Windows 11 on Arm can run x64 app packages through emulation, so the installer accepts 64-bit Arm Windows as well; a native Arm64 ORBIT package is not built or hardware-validated yet.
-
-For a side-effect-free preflight of a built package, run `Install-OrbitXboxMode.ps1 -PackagePath <appx> -CertificatePath <cer> -ValidateOnly`. The packaging gate runs the same preflight automatically.
-
-## Version sources
-
-- `package.json`: SemVer package version `0.1.0-beta.3`.
-- `electron-builder.yml`: numeric Windows file version `0.1.0.2` and installer filename.
-- `resources/release-manifest.json`: channel, display version, release sequence, numeric AppX identity version, minimum Xbox Mode Windows baseline, and shared packaging metadata.
-- `build/xbox/AppxManifest.xml` and `build/xbox/Public/registration.json`: checked-in template values; the build stamps disposable staging copies from the release manifest and verification rejects drift.
-
-Keep `appId: com.orbit.launcher`, AppX identity `ORBIT.GamingHome`, publisher `CN=ORBIT Development`, and application ID `ORBIT` stable across beta upgrades.
+Changing the AppX publisher or identity breaks the existing upgrade line and must be treated as a migration, not a routine release change.

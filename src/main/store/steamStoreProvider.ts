@@ -1,4 +1,5 @@
 import type { StoreOffer, StoreProduct, StoreRelease } from '@shared/ipc'
+import { latestLibraryActivity } from '@shared/libraryTime'
 import type { SteamAuthManager } from '../steam/steamAuth'
 import { gameRepository } from '../library/gameRepository'
 import { fetchWithElectronNet } from '../networkFetch'
@@ -49,6 +50,8 @@ interface SteamAppDetails {
   background?: string
   background_raw?: string
   genres?: Array<{ description?: string }>
+  developers?: string[]
+  publishers?: string[]
   supported_languages?: string
   release_date?: { date?: string }
   price_overview?: {
@@ -338,7 +341,8 @@ function genreAffinity(genres: string[]): { score: number; reason?: string } {
   const ownedGenres = new Map<string, number>()
   for (const game of gameRepository.getSnapshot().games) {
     const playtimeWeight = 1 + Math.min(Math.log2(1 + (game.playtimeMinutes ?? 0) / 60), 5)
-    const recentWeight = game.lastPlayedTimestamp && Date.now() - game.lastPlayedTimestamp < 180 * 86400000 ? 1.5 : 1
+    const lastActivity = latestLibraryActivity(game)
+    const recentWeight = lastActivity && Date.now() - lastActivity < 180 * 86400000 ? 1.5 : 1
     for (const genre of game.metadata.genres ?? []) {
       const key = genre.toLocaleLowerCase('en')
       const specificity = BROAD_GENRES.has(key) ? 0.3 : 1
@@ -470,6 +474,8 @@ export async function fetchSteamProduct(
   const genres = (data.genres ?? [])
     .map((genre) => genre.description?.trim())
     .filter((genre): genre is string => Boolean(genre))
+  const developers = (data.developers ?? []).map((developer) => developer.trim()).filter(Boolean)
+  const publishers = (data.publishers ?? []).map((publisher) => publisher.trim()).filter(Boolean)
   const affinity = genreAffinity(genres)
   const supportedLanguages = parseSupportedLanguages(data.supported_languages)
   const offer = steamOffer(
@@ -505,6 +511,8 @@ export async function fetchSteamProduct(
     name: data.name?.trim() || existing?.name || `Steam ${appId}`,
     summary: data.short_description?.trim() || existing?.summary,
     genres: genres.length > 0 ? genres : existing?.genres,
+    developers: developers.length > 0 ? developers : existing?.developers,
+    publishers: publishers.length > 0 ? publishers : existing?.publishers,
     supportedLanguages:
       supportedLanguages.length > 0 ? supportedLanguages : existing?.supportedLanguages,
     discoverEligible:
@@ -527,7 +535,7 @@ export async function fetchSteamProduct(
     detailsUpdatedAt: checkedAt,
     priceUpdatedAt: checkedAt,
     providerPricesUpdatedAt: checkedAt,
-    providerPipelineVersion: 4,
+    providerPipelineVersion: 5,
     updatedAt: checkedAt
   }
 }

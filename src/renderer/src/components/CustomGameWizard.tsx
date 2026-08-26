@@ -1,4 +1,5 @@
 import { forwardRef, useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import {
   FileInput,
@@ -31,23 +32,34 @@ export function CustomGameWizard({ onClose, onCompleted }: Props): JSX.Element {
   const applySnapshot = useLibraryStore((state) => state.applySnapshot)
   const [draft, setDraft] = useState<CustomGameDraft | null>(null)
   const [name, setName] = useState('')
+  const [launchArguments, setLaunchArguments] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const firstActionRef = useRef<HTMLButtonElement>(null)
   const nameRef = useRef<HTMLInputElement>(null)
+  const saveFolderRef = useRef<HTMLButtonElement>(null)
 
   const close = useCallback((): void => {
+    if (busy) return
     if (draft) void window.api.library.custom.cancel(draft.id).catch(() => undefined)
     onClose()
-  }, [draft, onClose])
+  }, [busy, draft, onClose])
 
   useBackHandler(close)
 
   useEffect(() => {
     const previousFocus = document.activeElement as HTMLElement | null
+    const appRoot = document.getElementById('root')
+    const rootWasInert = appRoot?.hasAttribute('inert') ?? false
+    const previousAriaHidden = appRoot?.getAttribute('aria-hidden') ?? null
+    appRoot?.setAttribute('inert', '')
+    appRoot?.setAttribute('aria-hidden', 'true')
     const frame = requestAnimationFrame(() => focusElement(firstActionRef.current))
     return () => {
       cancelAnimationFrame(frame)
+      if (!rootWasInert) appRoot?.removeAttribute('inert')
+      if (previousAriaHidden === null) appRoot?.removeAttribute('aria-hidden')
+      else appRoot?.setAttribute('aria-hidden', previousAriaHidden)
       if (previousFocus?.isConnected) requestAnimationFrame(() => focusElement(previousFocus))
     }
   }, [])
@@ -59,15 +71,24 @@ export function CustomGameWizard({ onClose, onCompleted }: Props): JSX.Element {
   }, [draft?.id])
 
   const run = useCallback(async <T,>(action: () => Promise<T>): Promise<T | undefined> => {
+    const actionOrigin = document.activeElement as HTMLElement | null
     setBusy(true)
     setError(null)
     try {
       return await action()
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : t('customGame.error.generic'))
+      const message = cause instanceof Error ? cause.message : t('customGame.error.generic')
+      setError(
+        /custom game launch arguments/iu.test(message)
+          ? t('customGame.launchArgumentsFailed')
+          : message
+      )
       return undefined
     } finally {
       setBusy(false)
+      requestAnimationFrame(() => {
+        if (actionOrigin?.isConnected) focusElement(actionOrigin)
+      })
     }
   }, [t])
 
@@ -93,20 +114,27 @@ export function CustomGameWizard({ onClose, onCompleted }: Props): JSX.Element {
   const clearSave = async (): Promise<void> => {
     if (!draft) return
     const result = await run(() => window.api.library.custom.clearSave(draft.id))
-    if (result) setDraft(result)
+    if (result) {
+      setDraft(result)
+      requestAnimationFrame(() => focusElement(saveFolderRef.current))
+    }
   }
 
   const commit = async (): Promise<void> => {
     if (!draft || !name.trim()) return
     const snapshot = await run(() =>
-      window.api.library.custom.commit({ draftId: draft.id, name: name.trim() })
+      window.api.library.custom.commit({
+        draftId: draft.id,
+        name: name.trim(),
+        launchArguments: launchArguments.trim() || undefined
+      })
     )
     if (!snapshot) return
     applySnapshot(snapshot)
     onCompleted()
   }
 
-  return (
+  return createPortal(
     <motion.div
       data-focus-scope="active"
       role="dialog"
@@ -219,6 +247,28 @@ export function CustomGameWizard({ onClose, onCompleted }: Props): JSX.Element {
 
               <InfoRow label={t('customGame.executable')} value={draft.executablePath} />
 
+              <label className="block">
+                <span className="mb-2 block text-xs font-semibold uppercase tracking-[0.14em] text-white/55">
+                  {t('customGame.launchArguments')}
+                </span>
+                <input
+                  data-focusable
+                  type="text"
+                  maxLength={4096}
+                  value={launchArguments}
+                  disabled={busy}
+                  spellCheck={false}
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  placeholder={t('customGame.launchArgumentsPlaceholder')}
+                  onChange={(event) => setLaunchArguments(event.target.value)}
+                  className="w-full rounded-xl2 border border-white/10 bg-black/25 px-4 py-3 font-mono text-sm text-white outline-none transition-colors placeholder:text-white/25 focus:border-accent/60"
+                />
+                <span className="mt-2 block text-xs leading-relaxed text-white/40">
+                  {t('customGame.launchArgumentsHint')}
+                </span>
+              </label>
+
               <section className="rounded-xl2 border border-white/10 bg-black/20 p-4">
                 <div className="flex items-start gap-3">
                   <span className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-accent/12 text-accent">
@@ -232,6 +282,7 @@ export function CustomGameWizard({ onClose, onCompleted }: Props): JSX.Element {
                 </div>
                 <div className="mt-4 flex flex-wrap gap-2">
                   <button
+                    ref={saveFolderRef}
                     data-focusable
                     type="button"
                     disabled={busy}
@@ -307,7 +358,8 @@ export function CustomGameWizard({ onClose, onCompleted }: Props): JSX.Element {
           </div>
         )}
       </motion.section>
-    </motion.div>
+    </motion.div>,
+    document.body
   )
 }
 

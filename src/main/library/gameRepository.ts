@@ -4,16 +4,29 @@ import type {
   GameMetadata,
   GameProvider,
   LibraryGame,
+  LibrarySessionRecord,
   LibrarySnapshot,
   LocalGameBackupResult,
   LocalGameConfig
 } from '@shared/ipc'
+import { latestLibraryActivity, normalizeLibraryTimestamp } from '@shared/libraryTime'
+import { summarizeLibraryActivity } from '@shared/libraryActivity'
 import type { LocalGameRecordInput } from '../customLibrary'
+import {
+  playtimeSecondsFrom,
+  reconcileProviderPlaytime,
+  validPlaytimeSeconds
+} from './playtimeTracking'
 
-const DATABASE_VERSION = 5
+const DATABASE_VERSION = 7
 const DEFAULT_PROFILE_ID = 'orbit-default'
 const STEAM_PROVIDER = 'steam' as const
 const LEGACY_APP_NAME = /^App\s+\d+$/i
+const SESSION_RETENTION_MS = 366 * 24 * 60 * 60 * 1_000
+const MAX_STORED_SESSIONS = 1_000
+const MAX_SESSION_SECONDS = 30 * 24 * 60 * 60
+const MAX_LOCAL_LAUNCH_ARGUMENTS = 128
+const MAX_LOCAL_LAUNCH_ARGUMENT_LENGTH = 2_048
 const KNOWN_PROVIDERS = new Set<GameProvider>([
   'steam',
   'epic',
@@ -28,11 +41,16 @@ interface StoredGame extends LibraryGame {
   owned: boolean
   lastSeenOnlineAt?: number
   lastSeenInstalledAt?: number
+  /** Last authoritative total reported by Steam/Epic. Kept out of renderer snapshots. */
+  providerPlaytimeSeconds?: number
+  /** Locally observed time not yet reflected by the provider total. */
+  pendingPlaytimeSeconds?: number
 }
 
 interface AccountLibrary {
   games: Record<string, StoredGame>
   recentGameIds: string[]
+  sessions: LibrarySessionRecord[]
   loadedAt: number
 }
 
@@ -77,6 +95,13 @@ export interface ProviderInstalledDelta {
   installDir: string
   updateAvailable?: boolean
   metadata?: GameMetadata
+  playtimeSeconds?: number
+  lastPlayedTimestamp?: number
+}
+
+export interface ProviderActivityDelta {
+  providerGameId: string
+  playtimeSeconds?: number
   lastPlayedTimestamp?: number
 }
 
@@ -85,6 +110,7 @@ export interface ProviderOwnedDelta {
   name?: string
   appId?: number
   metadata?: GameMetadata
+  playtimeSeconds?: number
   playtimeMinutes?: number
   lastPlayedTimestamp?: number
 }
@@ -101,8 +127,9 @@ export interface ProviderMetadataDelta {
 
 export interface SteamOwnedDelta {
   appId: number
-  name: string
+  name?: string
   iconUrl?: string
+  playtimeSeconds?: number
   playtimeMinutes?: number
   lastPlayedTimestamp?: number
 }
@@ -121,6 +148,7 @@ export interface SteamInstalledDelta {
   name: string
   installDir: string
   updateAvailable?: boolean
+  playtimeSeconds?: number
   lastPlayedTimestamp?: number
 }
 
@@ -170,6 +198,31 @@ function hasUsableName(name: unknown): name is string {
   return typeof name === 'string' && name.trim().length > 0 && !LEGACY_APP_NAME.test(name.trim())
 }
 
+function validLocalLaunchArguments(value: unknown): value is string[] {
+  if (!Array.isArray(value) || value.length > MAX_LOCAL_LAUNCH_ARGUMENTS) return false
+  let totalLength = 0
+  for (const argument of value) {
+    if (
+      typeof argument !== 'string' ||
+      argument.length > MAX_LOCAL_LAUNCH_ARGUMENT_LENGTH ||
+      /[\u0000-\u001f\u007f-\u009f]/.test(argument)
+    ) {
+      return false
+    }
+    totalLength += argument.length + 1
+    if (totalLength > 4_096) return false
+  }
+  return true
+}
+
+function validatedLocalLaunchArguments(value: unknown): string[] | undefined {
+  if (value === undefined || (Array.isArray(value) && value.length === 0)) return undefined
+  if (!validLocalLaunchArguments(value)) {
+    throw new Error('Invalid custom game launch arguments')
+  }
+  return [...value]
+}
+
 function sanitizeLocalConfig(value: unknown): LocalGameConfig | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
   const candidate = value as Partial<LocalGameConfig>
@@ -182,6 +235,10 @@ function sanitizeLocalConfig(value: unknown): LocalGameConfig | undefined {
       : 'never'
   return {
     executablePath: candidate.executablePath,
+    launchArguments:
+      validLocalLaunchArguments(candidate.launchArguments) && candidate.launchArguments.length > 0
+        ? [...candidate.launchArguments]
+        : undefined,
     savePath:
       typeof candidate.savePath === 'string' && candidate.savePath.trim()
         ? candidate.savePath
@@ -231,8 +288,8 @@ function preferDisplayGame(current: StoredGame, candidate: StoredGame): StoredGa
   if (candidate.updateAvailable !== current.updateAvailable) {
     return candidate.updateAvailable ? candidate : current
   }
-  const candidatePlayed = candidate.lastStartedAt ?? candidate.lastPlayedTimestamp ?? 0
-  const currentPlayed = current.lastStartedAt ?? current.lastPlayedTimestamp ?? 0
+  const candidatePlayed = latestLibraryActivity(candidate)
+  const currentPlayed = latestLibraryActivity(current)
   if (candidatePlayed !== currentPlayed) return candidatePlayed > currentPlayed ? candidate : current
   const candidatePlaytime = candidate.playtimeMinutes ?? 0
   const currentPlaytime = current.playtimeMinutes ?? 0
@@ -241,7 +298,7 @@ function preferDisplayGame(current: StoredGame, candidate: StoredGame): StoredGa
 }
 
 function emptyAccount(): AccountLibrary {
-  return { games: {}, recentGameIds: [], loadedAt: 0 }
+  return { games: {}, recentGameIds: [], sessions: [], loadedAt: 0 }
 }
 
 /**
@@ -304,6 +361,8 @@ export class GameRepository {
       owned: _owned,
       lastSeenOnlineAt: _online,
       lastSeenInstalledAt: _local,
+      providerPlaytimeSeconds: _providerPlaytime,
+      pendingPlaytimeSeconds: _pendingPlaytime,
       ...game
     }: StoredGame): LibraryGame => game
     const games = [...canonicalRecords.values()].map(toPublicGame)
@@ -312,13 +371,34 @@ export class GameRepository {
     const recentGameIds = [
       ...new Set(this.account.recentGameIds.map((id) => canonicalIdByStoredId.get(id) ?? id))
     ].filter((id) => visibleIds.has(id))
+    const sessions = this.account.sessions.map((session) => ({
+      ...session,
+      gameId: canonicalIdByStoredId.get(session.gameId) ?? session.gameId
+    }))
+    const installedIds = new Set(games.filter((game) => game.installed).map((game) => game.id))
+    const activity = summarizeLibraryActivity(sessions)
+    const sessionContinue = sessions
+      .sort((left, right) => right.endedAt - left.endedAt)
+      .find((session) => installedIds.has(session.gameId))
+    const providerContinueId = recentGameIds.find((id) => installedIds.has(id))
+    const providerContinueAt = latestLibraryActivity(
+      games.find((game) => game.id === providerContinueId) ?? {}
+    )
+    const continueGameId =
+      sessionContinue && sessionContinue.endedAt >= providerContinueAt
+        ? sessionContinue.gameId
+        : providerContinueId ?? sessionContinue?.gameId
 
     return {
       games,
       providerGames,
       recentGameIds,
       loadedAt: this.account.loadedAt,
-      isLoadingMetadata: this.metadataLoadingProviders.size > 0
+      isLoadingMetadata: this.metadataLoadingProviders.size > 0,
+      activity: {
+        ...activity,
+        continueGameId
+      }
     }
   }
 
@@ -352,6 +432,10 @@ export class GameRepository {
       const currentMetadata = existing?.metadata ?? {}
       const nextMetadata = mergeDefinedMetadata(currentMetadata, installed.metadata ?? {})
       const metadataChanged = !metadataEquals(currentMetadata, nextMetadata)
+      const playtime = reconcileProviderPlaytime(
+        existing,
+        validPlaytimeSeconds(installed.playtimeSeconds)
+      )
       this.account.games[id] = {
         ...existing,
         id,
@@ -366,7 +450,12 @@ export class GameRepository {
         installDir: installed.installDir,
         updateAvailable: Boolean(installed.updateAvailable),
         owned: existing?.owned ?? false,
-        lastPlayedTimestamp: installed.lastPlayedTimestamp ?? existing?.lastPlayedTimestamp,
+        ...playtime,
+        lastPlayedTimestamp:
+          Math.max(
+            normalizeLibraryTimestamp(installed.lastPlayedTimestamp),
+            normalizeLibraryTimestamp(existing?.lastPlayedTimestamp)
+          ) || undefined,
         addedAt: existing?.addedAt ?? now,
         updatedAt: now,
         lastSeenInstalledAt: now
@@ -377,10 +466,71 @@ export class GameRepository {
     this.commit(now)
   }
 
+  /** Applies non-destructive launcher activity to already known provider games. */
+  applyProviderActivityDelta(
+    provider: GameProvider,
+    activities: Iterable<ProviderActivityDelta>
+  ): number {
+    this.ensureOpen()
+    const now = Date.now()
+    let changedCount = 0
+
+    for (const activity of activities) {
+      if (!validProviderGameId(activity.providerGameId)) continue
+      const id = providerGameId(provider, activity.providerGameId.trim())
+      const game = this.account.games[id]
+      if (!game || game.provider !== provider) continue
+
+      const previousSeconds = game.playtimeSeconds
+      const previousProviderSeconds = game.providerPlaytimeSeconds
+      const previousPendingSeconds = game.pendingPlaytimeSeconds
+      const previousLastPlayedTimestamp = game.lastPlayedTimestamp
+      Object.assign(
+        game,
+        reconcileProviderPlaytime(game, validPlaytimeSeconds(activity.playtimeSeconds))
+      )
+      game.lastPlayedTimestamp =
+        Math.max(
+          normalizeLibraryTimestamp(game.lastPlayedTimestamp),
+          normalizeLibraryTimestamp(activity.lastPlayedTimestamp)
+        ) || undefined
+      const changed =
+        previousSeconds !== game.playtimeSeconds ||
+        previousProviderSeconds !== game.providerPlaytimeSeconds ||
+        previousPendingSeconds !== game.pendingPlaytimeSeconds ||
+        previousLastPlayedTimestamp !== game.lastPlayedTimestamp
+      if (!changed) continue
+      game.updatedAt = now
+      changedCount++
+    }
+
+    if (changedCount > 0) {
+      this.rebuildRecentIds()
+      this.commit(now)
+    }
+    return changedCount
+  }
+
   /** A successful online response is authoritative for one provider only. */
   applyAuthoritativeProviderDelta(
     provider: GameProvider,
     ownedGames: Iterable<ProviderOwnedDelta>
+  ): void {
+    this.applyProviderOwnedDelta(provider, ownedGames, true)
+  }
+
+  /** A partial provider response may add/update records but never remove cached ones. */
+  applyNonAuthoritativeProviderDelta(
+    provider: GameProvider,
+    ownedGames: Iterable<ProviderOwnedDelta>
+  ): void {
+    this.applyProviderOwnedDelta(provider, ownedGames, false)
+  }
+
+  private applyProviderOwnedDelta(
+    provider: GameProvider,
+    ownedGames: Iterable<ProviderOwnedDelta>,
+    pruneMissing: boolean
   ): void {
     this.ensureOpen()
     const now = Date.now()
@@ -395,6 +545,7 @@ export class GameRepository {
       const nextMetadata = mergeDefinedMetadata(currentMetadata, owned.metadata ?? {})
       const metadataChanged = !metadataEquals(currentMetadata, nextMetadata)
       const name = hasUsableName(owned.name) ? owned.name.trim() : (existing?.name ?? '')
+      const playtime = reconcileProviderPlaytime(existing, playtimeSecondsFrom(owned))
       seen.add(id)
       this.account.games[id] = {
         ...existing,
@@ -408,18 +559,24 @@ export class GameRepository {
         metadataUpdatedAt: metadataChanged ? now : existing?.metadataUpdatedAt,
         installed: existing?.installed ?? false,
         owned: true,
-        playtimeMinutes: owned.playtimeMinutes ?? existing?.playtimeMinutes,
-        lastPlayedTimestamp: owned.lastPlayedTimestamp ?? existing?.lastPlayedTimestamp,
+        ...playtime,
+        lastPlayedTimestamp:
+          Math.max(
+            normalizeLibraryTimestamp(owned.lastPlayedTimestamp),
+            normalizeLibraryTimestamp(existing?.lastPlayedTimestamp)
+          ) || undefined,
         addedAt: existing?.addedAt ?? now,
         updatedAt: now,
         lastSeenOnlineAt: now
       }
     }
 
-    for (const [id, game] of Object.entries(this.account.games)) {
-      if (game.provider !== provider || seen.has(id)) continue
-      game.owned = false
-      if (!game.installed) delete this.account.games[id]
+    if (pruneMissing) {
+      for (const [id, game] of Object.entries(this.account.games)) {
+        if (game.provider !== provider || seen.has(id)) continue
+        game.owned = false
+        if (!game.installed) delete this.account.games[id]
+      }
     }
 
     this.rebuildRecentIds()
@@ -501,6 +658,7 @@ export class GameRepository {
         name: game.name,
         installDir: game.installDir,
         updateAvailable: game.updateAvailable,
+        playtimeSeconds: game.playtimeSeconds,
         lastPlayedTimestamp: game.lastPlayedTimestamp
       }))
     )
@@ -514,6 +672,22 @@ export class GameRepository {
         appId: game.appId,
         name: game.name,
         metadata: { iconUrl: game.iconUrl },
+        playtimeSeconds: game.playtimeSeconds,
+        playtimeMinutes: game.playtimeMinutes,
+        lastPlayedTimestamp: game.lastPlayedTimestamp
+      }))
+    )
+  }
+
+  applyNonAuthoritativeOwnedDelta(ownedGames: Iterable<SteamOwnedDelta>): void {
+    this.applyNonAuthoritativeProviderDelta(
+      STEAM_PROVIDER,
+      [...ownedGames].map((game) => ({
+        providerGameId: String(game.appId),
+        appId: game.appId,
+        name: game.name,
+        metadata: { iconUrl: game.iconUrl },
+        playtimeSeconds: game.playtimeSeconds,
         playtimeMinutes: game.playtimeMinutes,
         lastPlayedTimestamp: game.lastPlayedTimestamp
       }))
@@ -575,9 +749,23 @@ export class GameRepository {
     return true
   }
 
+  markStarted(gameId: string, startedAt = Date.now()): boolean {
+    this.ensureOpen()
+    const game = this.account.games[gameId]
+    if (!game) return false
+    const now = Date.now()
+    game.lastStartedAt = normalizeLibraryTimestamp(startedAt) || now
+    game.updatedAt = now
+    this.rebuildRecentIds()
+    this.commit(now)
+    return true
+  }
+
   setRecentSteamAppIds(appIds: Iterable<number>): void {
     this.ensureOpen()
-    const ids = [...new Set(appIds)].map(steamGameId)
+    const ids = [...new Set(appIds)]
+      .filter((appId) => Number.isInteger(appId) && appId > 0)
+      .map(steamGameId)
     const known = new Set(Object.keys(this.account.games))
     const otherProviders = this.account.recentGameIds.filter(
       (id) => this.account.games[id]?.provider !== STEAM_PROVIDER
@@ -586,15 +774,78 @@ export class GameRepository {
     this.commit(Date.now())
   }
 
-  markStarted(gameId: string): boolean {
+  recordGameSession(gameId: string, durationSeconds: number, endedAt: number): boolean {
     this.ensureOpen()
     const game = this.account.games[gameId]
-    if (!game) return false
-    const now = Date.now()
-    game.lastStartedAt = now
-    game.updatedAt = now
+    const duration = validPlaytimeSeconds(durationSeconds)
+    if (!game || duration === undefined || duration <= 0 || duration > MAX_SESSION_SECONDS) return false
+
+    const normalizedEndedAt = normalizeLibraryTimestamp(endedAt) || Date.now()
+    const sessionId = `${gameId}:${normalizedEndedAt}:${duration}`
+    if (this.account.sessions.some((session) => session.id === sessionId)) return false
+    this.account.sessions.push({
+      id: sessionId,
+      gameId,
+      startedAt: normalizedEndedAt - duration * 1_000,
+      endedAt: normalizedEndedAt,
+      durationSeconds: duration
+    })
+    this.pruneSessions(normalizedEndedAt)
+
+    const currentSeconds = playtimeSecondsFrom(game) ?? 0
+    const playtimeSeconds = currentSeconds + duration
+    game.playtimeSeconds = playtimeSeconds
+    game.playtimeMinutes = playtimeSeconds / 60
+    if (
+      game.provider === 'steam' ||
+      game.provider === 'epic' ||
+      game.providerPlaytimeSeconds !== undefined
+    ) {
+      game.pendingPlaytimeSeconds = (validPlaytimeSeconds(game.pendingPlaytimeSeconds) ?? 0) + duration
+    }
+    game.lastPlayedTimestamp =
+      Math.max(
+        normalizeLibraryTimestamp(game.lastPlayedTimestamp),
+        normalizedEndedAt
+      ) || Date.now()
+    game.updatedAt = Date.now()
     this.rebuildRecentIds()
-    this.commit(now)
+    this.commit(game.updatedAt)
+    return true
+  }
+
+  applyProviderPlaytimeDelta(
+    provider: GameProvider,
+    rawProviderId: string,
+    playtimeSeconds: number,
+    lastPlayedTimestamp?: number
+  ): boolean {
+    this.ensureOpen()
+    if (!validProviderGameId(rawProviderId)) return false
+    const game = this.account.games[providerGameId(provider, rawProviderId.trim())]
+    const reportedSeconds = validPlaytimeSeconds(playtimeSeconds)
+    if (!game || game.provider !== provider || reportedSeconds === undefined) return false
+
+    const previousSeconds = game.playtimeSeconds
+    const previousProviderSeconds = game.providerPlaytimeSeconds
+    const previousPendingSeconds = game.pendingPlaytimeSeconds
+    const previousLastPlayedTimestamp = game.lastPlayedTimestamp
+    Object.assign(game, reconcileProviderPlaytime(game, reportedSeconds))
+    game.lastPlayedTimestamp =
+      Math.max(
+        normalizeLibraryTimestamp(game.lastPlayedTimestamp),
+        normalizeLibraryTimestamp(lastPlayedTimestamp)
+      ) || undefined
+    const changed =
+      previousSeconds !== game.playtimeSeconds ||
+      previousProviderSeconds !== game.providerPlaytimeSeconds ||
+      previousPendingSeconds !== game.pendingPlaytimeSeconds ||
+      previousLastPlayedTimestamp !== game.lastPlayedTimestamp
+    if (!changed) return false
+
+    game.updatedAt = Date.now()
+    this.rebuildRecentIds()
+    this.commit(game.updatedAt)
     return true
   }
 
@@ -614,6 +865,7 @@ export class GameRepository {
     const sameSavePath = existing?.local?.savePath === input.savePath
     const local: LocalGameConfig = {
       executablePath: input.executablePath,
+      launchArguments: validatedLocalLaunchArguments(input.launchArguments),
       savePath: input.savePath,
       backupEnabled: Boolean(input.savePath),
       lastBackupAt: sameSavePath ? existing?.local?.lastBackupAt : undefined,
@@ -640,6 +892,21 @@ export class GameRepository {
     }
     this.commit(now)
     return this.getGame(id) as LibraryGame
+  }
+
+  updateLocalGameLaunchArguments(gameId: string, launchArguments: readonly string[]): boolean {
+    this.ensureOpen()
+    const game = this.account.games[gameId]
+    if (!game || game.provider !== 'local' || !game.local) return false
+
+    const now = Date.now()
+    game.local = {
+      ...game.local,
+      launchArguments: validatedLocalLaunchArguments(launchArguments)
+    }
+    game.updatedAt = now
+    this.commit(now)
+    return true
   }
 
   removeLocalGame(gameId: string): boolean {
@@ -671,12 +938,19 @@ export class GameRepository {
     this.ensureOpen()
     const game = this.account.games[id]
     if (!game) return undefined
-    const { owned: _owned, lastSeenOnlineAt: _online, lastSeenInstalledAt: _local, ...output } = game
+    const {
+      owned: _owned,
+      lastSeenOnlineAt: _online,
+      lastSeenInstalledAt: _local,
+      providerPlaytimeSeconds: _providerPlaytime,
+      pendingPlaytimeSeconds: _pendingPlaytime,
+      ...output
+    } = game
     return output
   }
 
   getGamesByProvider(provider: GameProvider): LibraryGame[] {
-    return this.getSnapshot().games.filter((game) => game.provider === provider)
+    return this.getSnapshot().providerGames.filter((game) => game.provider === provider)
   }
 
   getProviderCounts(provider: GameProvider): {
@@ -699,9 +973,7 @@ export class GameRepository {
     this.account.recentGameIds = Object.values(this.account.games)
       .filter((game) => (game.lastStartedAt || game.lastPlayedTimestamp) && (game.owned || game.installed))
       .sort(
-        (a, b) =>
-          (b.lastStartedAt ?? b.lastPlayedTimestamp ?? 0) -
-          (a.lastStartedAt ?? a.lastPlayedTimestamp ?? 0)
+        (a, b) => latestLibraryActivity(b) - latestLibraryActivity(a)
       )
       .map((game) => game.id)
   }
@@ -731,6 +1003,12 @@ export class GameRepository {
         ...currentFields
       } = candidate
       const migratedMetadata = migrateMetadata(candidate)
+      const playtimeSeconds = playtimeSecondsFrom(candidate)
+      const inferredProviderPlaytimeSeconds =
+        validPlaytimeSeconds(candidate.providerPlaytimeSeconds) ??
+        (provider === 'steam' || provider === 'epic'
+          ? playtimeSeconds
+          : undefined)
       clean.games[id] = {
         ...currentFields,
         id,
@@ -741,6 +1019,13 @@ export class GameRepository {
         metadata: migratedMetadata,
         metadataRevision:
           candidate.metadataRevision ?? (Object.keys(migratedMetadata).length > 0 ? 1 : 0),
+        playtimeSeconds,
+        playtimeMinutes:
+          playtimeSeconds === undefined ? candidate.playtimeMinutes : playtimeSeconds / 60,
+        providerPlaytimeSeconds: inferredProviderPlaytimeSeconds,
+        pendingPlaytimeSeconds: validPlaytimeSeconds(candidate.pendingPlaytimeSeconds) || undefined,
+        lastPlayedTimestamp: normalizeLibraryTimestamp(candidate.lastPlayedTimestamp) || undefined,
+        lastStartedAt: normalizeLibraryTimestamp(candidate.lastStartedAt) || undefined,
         installed: Boolean(candidate.installed),
         updateAvailable: Boolean(candidate.installed && candidate.updateAvailable),
         local: provider === 'local' ? sanitizeLocalConfig(candidate.local) : undefined,
@@ -751,6 +1036,42 @@ export class GameRepository {
     }
 
     clean.recentGameIds = [...new Set(input.recentGameIds ?? [])].filter((id) => Boolean(clean.games[id]))
+    const sessionCandidates = Array.isArray(input.sessions) ? input.sessions : []
+    clean.sessions = sessionCandidates
+      .flatMap((candidate) => {
+        if (!candidate || typeof candidate !== 'object') return []
+        const gameId = typeof candidate.gameId === 'string' ? candidate.gameId.trim() : ''
+        const endedAt = normalizeLibraryTimestamp(candidate.endedAt)
+        const durationSeconds = validPlaytimeSeconds(candidate.durationSeconds)
+        if (
+          !gameId ||
+          !endedAt ||
+          endedAt > now + 5 * 60_000 ||
+          durationSeconds === undefined ||
+          durationSeconds <= 0 ||
+          durationSeconds > MAX_SESSION_SECONDS
+        ) {
+          return []
+        }
+        const startedAt = Math.min(
+          endedAt,
+          normalizeLibraryTimestamp(candidate.startedAt) || endedAt - durationSeconds * 1_000
+        )
+        return [{
+          id:
+            typeof candidate.id === 'string' && candidate.id.trim()
+              ? candidate.id
+              : `${gameId}:${endedAt}:${durationSeconds}`,
+          gameId,
+          startedAt,
+          endedAt,
+          durationSeconds
+        }]
+      })
+      .filter((session) => session.endedAt >= now - SESSION_RETENTION_MS)
+      .sort((left, right) => right.endedAt - left.endedAt)
+      .filter((session, index, all) => all.findIndex((item) => item.id === session.id) === index)
+      .slice(0, MAX_STORED_SESSIONS)
     clean.loadedAt = input.loadedAt ?? 0
     return clean
   }
@@ -773,8 +1094,12 @@ export class GameRepository {
         name: old.name.trim(),
         metadata: migrateMetadata(old),
         metadataRevision: Object.keys(migrateMetadata(old)).length > 0 ? 1 : 0,
+        playtimeSeconds:
+          typeof old.playtimeMinutes === 'number' ? Math.max(0, Math.round(old.playtimeMinutes * 60)) : undefined,
         playtimeMinutes: old.playtimeMinutes,
-        lastPlayedTimestamp: old.lastPlayedTimestamp,
+        providerPlaytimeSeconds:
+          typeof old.playtimeMinutes === 'number' ? Math.max(0, Math.round(old.playtimeMinutes * 60)) : undefined,
+        lastPlayedTimestamp: normalizeLibraryTimestamp(old.lastPlayedTimestamp) || undefined,
         installed: Boolean(old.installed),
         installDir: old.installDir,
         owned: Boolean(old.installed),
@@ -788,6 +1113,14 @@ export class GameRepository {
       .filter((id) => Boolean(account.games[id]))
     account.loadedAt = legacy.snapshot.loadedAt ?? now
     return account
+  }
+
+  private pruneSessions(now: number): void {
+    const cutoff = now - SESSION_RETENTION_MS
+    this.account.sessions = this.account.sessions
+      .filter((session) => session.endedAt >= cutoff)
+      .sort((left, right) => right.endedAt - left.endedAt)
+      .slice(0, MAX_STORED_SESSIONS)
   }
 
   private ensureOpen(): void {

@@ -18,7 +18,10 @@ import { useGameDetailStore } from '@renderer/state/gameDetailStore'
 import { focusFirstIn } from '@renderer/lib/spatialNavigation'
 import { useStoreStore } from '@renderer/state/storeStore'
 import { GameLaunchSplash } from './GameLaunchSplash'
+import { SessionSummaryToast } from './SessionSummaryToast'
 import type { GameLaunchStatus } from '@shared/ipc'
+
+const SESSION_SUMMARY_VISIBLE_MS = 6_000
 
 export function MainShell(): JSX.Element {
   const mainView = useNavigationStore((s) => s.mainView)
@@ -30,6 +33,8 @@ export function MainShell(): JSX.Element {
   const refreshStoreIfStale = useStoreStore((s) => s.refreshIfStale)
   const detailGameId = useGameDetailStore((s) => s.gameId)
   const [launchStatus, setLaunchStatus] = useState<GameLaunchStatus>({ phase: 'idle' })
+  const [sessionSummary, setSessionSummary] = useState<GameLaunchStatus | null>(null)
+  const pendingSessionSummaryRef = useRef<GameLaunchStatus | null>(null)
   const games = useLibraryStore((s) => s.snapshot.games)
   const shellRef = useRef<HTMLDivElement>(null)
   const detailGame = detailGameId ? games.find((game) => game.id === detailGameId) : undefined
@@ -41,15 +46,32 @@ export function MainShell(): JSX.Element {
 
   useEffect(() => {
     let active = true
+    const receiveLaunchStatus = (status: GameLaunchStatus): void => {
+      if (!active) return
+      setLaunchStatus(status)
+      if (status.phase === 'returning' && (status.sessionDurationSeconds ?? 0) > 0) {
+        pendingSessionSummaryRef.current = status
+      }
+      if (status.phase === 'idle' && pendingSessionSummaryRef.current) {
+        setSessionSummary(pendingSessionSummaryRef.current)
+        pendingSessionSummaryRef.current = null
+      }
+    }
     void window.api.game.getLaunchStatus().then((status) => {
-      if (active) setLaunchStatus(status)
+      receiveLaunchStatus(status)
     })
-    const unsubscribe = window.api.game.onLaunchStatus(setLaunchStatus)
+    const unsubscribe = window.api.game.onLaunchStatus(receiveLaunchStatus)
     return () => {
       active = false
       unsubscribe()
     }
   }, [])
+
+  useEffect(() => {
+    if (!sessionSummary) return
+    const timer = window.setTimeout(() => setSessionSummary(null), SESSION_SUMMARY_VISIBLE_MS)
+    return () => window.clearTimeout(timer)
+  }, [sessionSummary])
 
   useEffect(() => {
     void initLibrary()
@@ -112,6 +134,15 @@ export function MainShell(): JSX.Element {
           <GameLaunchSplash
             key={launchStatus.gameId ?? 'game-launch'}
             status={launchStatus}
+          />
+        )}
+      </AnimatePresence>
+      <AnimatePresence>
+        {sessionSummary && (
+          <SessionSummaryToast
+            key={`${sessionSummary.gameId}:${sessionSummary.endedAt}`}
+            status={sessionSummary}
+            visibleSeconds={SESSION_SUMMARY_VISIBLE_MS / 1_000}
           />
         )}
       </AnimatePresence>

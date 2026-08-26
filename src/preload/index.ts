@@ -6,6 +6,7 @@ import {
   type CustomGameCommitInput,
   type CustomGameDraft,
   type CustomGameImportSource,
+  type CustomGameLaunchArgumentsInput,
   type CustomGameSaveSource,
   type EpicLoginStatus,
   type GameCompletionTimes,
@@ -16,6 +17,7 @@ import {
   type ImageUpdate,
   type LibrarySnapshot,
   type LibraryStats,
+  type LauncherDownloadSnapshot,
   type LocalGameBackupResult,
   type OrbitBackgroundServiceAction,
   type OrbitBackgroundServiceStatus,
@@ -27,6 +29,7 @@ import {
   type StoreSearchResponse,
   type StoreSnapshot,
   type SystemPowerAction,
+  type SystemUpdateSnapshot,
   type SystemSyncStatus
 } from '@shared/ipc'
 
@@ -35,6 +38,10 @@ const orbitApi = {
     get: (): Promise<OrbitSettings> => ipcRenderer.invoke(IPC.settingsGet),
     set: (partial: Partial<OrbitSettings>): Promise<OrbitSettings> =>
       ipcRenderer.invoke(IPC.settingsSet, partial)
+  },
+  profileAvatar: {
+    getCustom: (): Promise<string | null> => ipcRenderer.invoke(IPC.profileAvatarGetCustom),
+    selectCustom: (): Promise<string | null> => ipcRenderer.invoke(IPC.profileAvatarSelectCustom)
   },
   backgroundService: {
     getStatus: (): Promise<OrbitBackgroundServiceStatus> =>
@@ -102,6 +109,8 @@ const orbitApi = {
         ipcRenderer.invoke(IPC.customGameClearSave, draftId),
       commit: (input: CustomGameCommitInput): Promise<LibrarySnapshot> =>
         ipcRenderer.invoke(IPC.customGameCommit, input),
+      setLaunchArguments: (input: CustomGameLaunchArgumentsInput): Promise<LibrarySnapshot> =>
+        ipcRenderer.invoke(IPC.customGameSetLaunchArguments, input),
       cancel: (draftId: string): Promise<void> =>
         ipcRenderer.invoke(IPC.customGameCancel, draftId),
       remove: (gameId: string): Promise<LibrarySnapshot> =>
@@ -116,6 +125,17 @@ const orbitApi = {
         callback(snapshot)
       ipcRenderer.on(IPC.libraryUpdated, listener)
       return () => ipcRenderer.removeListener(IPC.libraryUpdated, listener)
+    }
+  },
+  downloads: {
+    get: (): Promise<LauncherDownloadSnapshot> => ipcRenderer.invoke(IPC.launcherDownloadsGet),
+    onUpdated: (callback: (snapshot: LauncherDownloadSnapshot) => void): (() => void) => {
+      const listener = (
+        _e: Electron.IpcRendererEvent,
+        snapshot: LauncherDownloadSnapshot
+      ): void => callback(snapshot)
+      ipcRenderer.on(IPC.launcherDownloadsUpdated, listener)
+      return () => ipcRenderer.removeListener(IPC.launcherDownloadsUpdated, listener)
     }
   },
   game: {
@@ -136,16 +156,31 @@ const orbitApi = {
   image: {
     resolve: (gameId: string, orientation: ImageOrientation): Promise<ResolvedImage | null> =>
       ipcRenderer.invoke(IPC.imageResolve, gameId, orientation),
-    listSteamGridDb: (gameId: string): Promise<SteamGridDbArtworkOptions> =>
-      ipcRenderer.invoke(IPC.imageSteamGridDbList, gameId),
-    applySteamGridDb: (gameId: string, artworkId: number): Promise<boolean> =>
-      ipcRenderer.invoke(IPC.imageSteamGridDbApply, gameId, artworkId),
-    selectCustom: (gameId: string): Promise<boolean> =>
-      ipcRenderer.invoke(IPC.imageSelectCustom, gameId),
-    resetCustom: (gameId: string): Promise<boolean> =>
-      ipcRenderer.invoke(IPC.imageResetCustom, gameId),
-    hasCustom: (gameId: string): Promise<boolean> =>
-      ipcRenderer.invoke(IPC.imageHasCustom, gameId),
+    listSteamGridDb: (
+      gameId: string,
+      orientation: Exclude<ImageOrientation, 'icon'>,
+      query?: string
+    ): Promise<SteamGridDbArtworkOptions> =>
+      ipcRenderer.invoke(IPC.imageSteamGridDbList, gameId, orientation, query),
+    applySteamGridDb: (
+      gameId: string,
+      artworkId: number,
+      orientation: Exclude<ImageOrientation, 'icon'>,
+      query?: string
+    ): Promise<boolean> =>
+      ipcRenderer.invoke(IPC.imageSteamGridDbApply, gameId, artworkId, orientation, query),
+    selectCustom: (
+      gameId: string,
+      orientation: Exclude<ImageOrientation, 'icon'>
+    ): Promise<boolean> => ipcRenderer.invoke(IPC.imageSelectCustom, gameId, orientation),
+    resetCustom: (
+      gameId: string,
+      orientation: Exclude<ImageOrientation, 'icon'>
+    ): Promise<boolean> => ipcRenderer.invoke(IPC.imageResetCustom, gameId, orientation),
+    hasCustom: (
+      gameId: string,
+      orientation: Exclude<ImageOrientation, 'icon'>
+    ): Promise<boolean> => ipcRenderer.invoke(IPC.imageHasCustom, gameId, orientation),
     reportFailure: (
       gameId: string,
       orientation: ImageOrientation,
@@ -189,6 +224,10 @@ const orbitApi = {
     }
   },
   system: {
+    checkUpdates: (): Promise<SystemUpdateSnapshot> =>
+      ipcRenderer.invoke(IPC.systemUpdatesCheck),
+    openUpdateSettings: (): Promise<void> =>
+      ipcRenderer.invoke(IPC.systemOpenUpdateSettings),
     power: (action: SystemPowerAction): Promise<void> =>
       ipcRenderer.invoke(IPC.systemPower, action)
   },

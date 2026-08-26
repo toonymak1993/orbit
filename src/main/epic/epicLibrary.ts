@@ -134,6 +134,28 @@ export class EpicLibraryService
     }
   }
 
+  /** Reconciles one finished session without repeating the catalog/artwork pipelines. */
+  async refreshPlaytime(auth: EpicAuthManager, providerGameId: string): Promise<boolean> {
+    const account = auth.getAccount() ?? (await auth.restoreSession())
+    if (!account || !providerGameId.trim()) return false
+    try {
+      const item = (await new EpicApiClient(auth).getPlaytime(account.accountId)).find(
+        (candidate) => candidate.artifactId === providerGameId
+      )
+      const seconds = Number(item?.totalTime ?? 0)
+      if (!Number.isFinite(seconds) || seconds < 0) return false
+      const changed = gameRepository.applyProviderPlaytimeDelta(
+        'epic',
+        providerGameId,
+        seconds
+      )
+      if (changed) this.emitSnapshot()
+      return true
+    } catch {
+      return false
+    }
+  }
+
   private async doRefresh(auth: EpicAuthManager): Promise<LibrarySnapshot> {
     const account = auth.getAccount() ?? (await auth.restoreSession())
     syncCoordinator.begin('library', account ? 3 : 1, 0, 'epic-local', 'epic')
@@ -166,13 +188,16 @@ export class EpicLibraryService
 
     const client = new EpicApiClient(auth)
     try {
-      const [assetList, playtimeItems] = await Promise.all([
+      const [assetList, playtimeResult] = await Promise.all([
         client.getAssets(),
-        client.getPlaytime(account.accountId).catch(() => [])
+        client
+          .getPlaytime(account.accountId)
+          .then((items) => ({ available: true as const, items }))
+          .catch(() => ({ available: false as const, items: [] }))
       ])
       const assets = deduplicateAssets(assetList)
       const playtimeByApp = new Map(
-        playtimeItems
+        playtimeResult.items
           .filter((item) => item.artifactId)
           .map((item) => [item.artifactId as string, Number(item.totalTime ?? 0)])
       )
@@ -182,7 +207,9 @@ export class EpicLibraryService
         'epic',
         [...assets.values()].map((asset) => ({
           providerGameId: asset.appName!.trim(),
-          playtimeMinutes: Math.max(0, Math.round((playtimeByApp.get(asset.appName!.trim()) ?? 0) / 60))
+          playtimeSeconds: playtimeResult.available
+            ? Math.max(0, Math.round(playtimeByApp.get(asset.appName!.trim()) ?? 0))
+            : undefined
         }))
       )
 

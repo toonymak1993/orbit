@@ -8,6 +8,11 @@ import { useStoreNavigationStore } from '@renderer/state/storeNavigationStore'
 import { usePreferencesStore } from '@renderer/state/preferencesStore'
 import { LIBRARY_SEARCH_EVENT, STORE_SEARCH_EVENT } from '@renderer/lib/librarySearch'
 import { playUiSound } from '@renderer/lib/uiAudio'
+import {
+  detectControllerFamily,
+  getGamepadInputSignature
+} from '@renderer/lib/controllerProfile'
+import { useControllerStore } from '@renderer/state/controllerStore'
 
 const STICK_DEADZONE = 0.5
 const REPEAT_DELAY_MS = 420
@@ -90,7 +95,49 @@ function isPressed(button: GamepadButton | undefined): boolean {
 export function useGamepadNavigation(): void {
   useEffect(() => {
     const nextDirectionRepeatAt: DirectionRepeatState = {}
+    const previousInputSignatures = new Map<string, string>()
+    let activeGamepadKey: string | null = null
     let rafId = 0
+
+    function gamepadKey(gamepad: Gamepad): string {
+      return `${gamepad.index}:${gamepad.id}`
+    }
+
+    function updateActiveController(pads: Gamepad[]): void {
+      const connectedKeys = new Set<string>()
+      let padWithNewActivity: Gamepad | undefined
+
+      for (const pad of pads) {
+        const key = gamepadKey(pad)
+        const signature = getGamepadInputSignature(pad)
+        connectedKeys.add(key)
+        if (signature && signature !== previousInputSignatures.get(key)) padWithNewActivity = pad
+        previousInputSignatures.set(key, signature)
+      }
+
+      for (const key of previousInputSignatures.keys()) {
+        if (!connectedKeys.has(key)) previousInputSignatures.delete(key)
+      }
+
+      const activePadStillConnected = pads.find((pad) => gamepadKey(pad) === activeGamepadKey)
+      const nextActivePad = padWithNewActivity ?? activePadStillConnected ?? pads[0]
+      if (!nextActivePad) {
+        activeGamepadKey = null
+        return
+      }
+
+      const nextKey = gamepadKey(nextActivePad)
+      const family = detectControllerFamily(nextActivePad.id)
+      const controllerState = useControllerStore.getState()
+      if (
+        nextKey !== activeGamepadKey ||
+        controllerState.family !== family ||
+        controllerState.activeGamepadId !== nextActivePad.id
+      ) {
+        activeGamepadKey = nextKey
+        controllerState.setActiveController(family, nextActivePad.id)
+      }
+    }
 
     function handleDirection(direction: NavDirection, now: number): void {
       const repeatAt = nextDirectionRepeatAt[direction]
@@ -140,6 +187,7 @@ export function useGamepadNavigation(): void {
       const pads = Array.from(navigator.getGamepads?.() ?? []).filter(
         (pad): pad is Gamepad => pad !== null
       )
+      updateActiveController(pads)
       const anyButtonPressed = (buttonIndex: number): boolean =>
         pads.some((pad) => isPressed(pad.buttons[buttonIndex]))
 

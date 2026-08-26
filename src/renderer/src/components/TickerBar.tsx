@@ -3,11 +3,13 @@ import { Radio } from 'lucide-react'
 import { useLibraryStore } from '@renderer/state/libraryStore'
 import { useAuthStore } from '@renderer/state/authStore'
 import { useT } from '@renderer/i18n/useT'
+import { useControllerButtonLabels } from '@renderer/state/controllerStore'
 
 export function TickerBar(): JSX.Element {
   const account = useAuthStore((s) => s.account)
   const gameCount = useLibraryStore((s) => s.snapshot.games.length)
   const t = useT()
+  const controllerLabels = useControllerButtonLabels()
 
   const messages = useMemo(() => {
     const list: string[] = []
@@ -17,9 +19,16 @@ export function TickerBar(): JSX.Element {
     } else {
       list.push(t('ticker.notConnected'))
     }
-    list.push(t('ticker.controlsHint'))
+    list.push(
+      t('ticker.controlsHint', {
+        previous: controllerLabels.leftBumper,
+        next: controllerLabels.rightBumper,
+        confirm: controllerLabels.south,
+        back: controllerLabels.east
+      })
+    )
     return list
-  }, [account, gameCount, t])
+  }, [account, controllerLabels, gameCount, t])
 
   const joined = messages.join('   ·   ')
 

@@ -5,6 +5,7 @@ import type {
   GameAchievementsSnapshot,
   LibraryGame
 } from '@shared/ipc'
+import { latestLibraryActivity } from '@shared/libraryTime'
 import { settingsStore } from '../settingsStore'
 import { steamAuthManager } from '../steam/steamAuth'
 import { syncCoordinator } from '../sync/syncCoordinator'
@@ -227,7 +228,7 @@ export class AchievementService {
           (game.playtimeMinutes ?? 0) > 0 ||
           (game.metadata.achievementCount ?? 0) > 0
       )
-      .sort((a, b) => (b.lastStartedAt ?? b.lastPlayedTimestamp ?? 0) - (a.lastStartedAt ?? a.lastPlayedTimestamp ?? 0))
+      .sort((a, b) => latestLibraryActivity(b) - latestLibraryActivity(a))
       .slice(0, STARTUP_BATCH_LIMIT)
 
     const stale = candidates.filter((game) => {

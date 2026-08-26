@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { GameMetadata } from '@shared/ipc'
+import { normalizeXboxPackageFamilyName } from './xboxPackageIdentity'
 
 const XBOX_APP_PACKAGE_FAMILY = 'Microsoft.GamingApp_8wekyb3d8bbwe'
 const XBOX_APP_CACHE_TIMEOUT_MS = 45_000
@@ -155,6 +156,20 @@ foreach ($row in $productRows) {
   } catch {}
 }
 
+# Newer Xbox app builds keep the Store-ID-to-package-family relation in a
+# dedicated cache scope even when product_summary omits alternateIds.
+$packageFamilyByStoreId = @{}
+$packageFamilyRows = [OrbitXboxSqliteReader]::ReadScope($databasePath, 'product_altid_pfn')
+foreach ($row in $packageFamilyRows) {
+  try {
+    $packageFamilyName = ([string]$row[0]).Trim()
+    $storeId = ([string](($row[1] | ConvertFrom-Json).data)).Trim().ToUpperInvariant()
+    if ($packageFamilyName -match '^[A-Za-z0-9.-]+_[A-Za-z0-9]+$' -and $storeId -match '^[A-Z0-9]{12}$') {
+      $packageFamilyByStoreId[$storeId] = $packageFamilyName
+    }
+  } catch {}
+}
+
 # Current Xbox app builds no longer retain subscription products in the
 # product_summary scope. The signed-in subscription records themselves remain
 # authoritative and already expose active/pass status. Restrict the imported
@@ -182,6 +197,7 @@ if ($hasActiveSubscription -and $subscriptionData) {
       Where-Object { $_.idType -eq 'PACKAGEFAMILYNAME' } |
       ForEach-Object { [string]$_.id } |
       Select-Object -First 1)[0]
+    if (-not $packageFamilyName) { $packageFamilyName = $packageFamilyByStoreId[$storeId] }
     $verticalUrls = Get-Urls @($data.artwork) @('POSTER', 'BRANDEDKEYART')
     $horizontalUrls = Get-Urls @($data.artwork) @('SUPERHEROART', 'TITLEDHEROART')
     $iconUrls = Get-Urls @($data.artwork) @('LOGO', 'BOXART')
@@ -285,7 +301,7 @@ export async function scanXboxAppLibrary(): Promise<XboxAppLibrarySnapshot> {
     const vertical = httpsUrls(record.verticalUrls)
     const horizontal = httpsUrls(record.horizontalUrls)
     const icon = httpsUrls(record.iconUrls)
-    const packageFamilyName = text(record.packageFamilyName)
+    const packageFamilyName = normalizeXboxPackageFamilyName(record.packageFamilyName)
     const description = text(record.description)
     const developer = text(record.developer)
     const publisher = text(record.publisher)
