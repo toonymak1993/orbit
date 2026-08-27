@@ -82,3 +82,9 @@ Create a production build with `npm run build`. Windows installer and Xbox Mode 
 ORBIT `0.1.0` is the first stable public release. Integrations and packaging will continue to evolve as the launcher is tested across more PCs, handhelds and game libraries.
 
 ORBIT is an independent project and is not affiliated with Valve, Epic Games, Microsoft, Xbox or the publishers shown in screenshots.
+
+## License
+
+Copyright (C) 2026 Luis Garcia.
+
+ORBIT is free software licensed under the [GNU General Public License v3.0](LICENSE). You may use, study, modify and redistribute it under those terms. Distributed modified versions must preserve the license and make the corresponding source code available.
