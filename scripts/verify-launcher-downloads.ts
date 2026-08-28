@@ -14,6 +14,7 @@ import {
 } from '../src/shared/launcherDownloads.ts'
 import type { LauncherDownloadActivity, LauncherDownloadSnapshot } from '../src/shared/ipc.ts'
 import {
+  deriveXboxPackageProgressState,
   parseXboxPackageProgressEvent,
   XboxPackageActivityMonitor
 } from '../src/main/xbox/xboxPackageActivity.ts'
@@ -158,9 +159,13 @@ assert.equal(shouldApplyLauncherDownloadSnapshot(snapshot(4), snapshot(5)), true
 const xboxEvent = parseXboxPackageProgressEvent(
   JSON.stringify({
     type: 'package-progress',
-    operation: 'install',
+    stage: 'staging',
     activityId: '00112233-4455-6677-8899-aabbccddeeff',
     packageFamilyName: 'Fixture.Game_8wekyb3d8bbwe',
+    displayName: 'Fixture Game',
+    gamingProductId: '9ABCDEFGHIJK',
+    isGamingPackage: true,
+    contentGroupRequired: false,
     progress: 0.42,
     isComplete: false,
     errorHResult: 0,
@@ -170,19 +175,139 @@ const xboxEvent = parseXboxPackageProgressEvent(
   })
 )
 assert.equal(xboxEvent?.progress, 0.42)
+assert.equal(xboxEvent?.stage, 'staging')
+assert.equal(xboxEvent?.displayName, 'Fixture Game')
+assert.equal(xboxEvent?.gamingProductId, '9ABCDEFGHIJK')
+const xboxStreamingEvent = parseXboxPackageProgressEvent(
+  JSON.stringify({
+    type: 'package-progress',
+    stage: 'streaming',
+    activityId: '20112233-4455-6677-8899-aabbccddeeff',
+    packageFamilyName: 'Fixture.Game_8wekyb3d8bbwe',
+    displayName: 'Fixture Game',
+    gamingProductId: '9ABCDEFGHIJK',
+    isGamingPackage: true,
+    contentGroupRequired: false,
+    isComplete: false,
+    errorHResult: 0,
+    isFramework: false,
+    isResourcePackage: false,
+    isOptional: false
+  })
+)
+assert.equal(xboxStreamingEvent?.stage, 'streaming')
+assert.equal(xboxStreamingEvent?.progress, undefined)
+assert.ok(xboxStreamingEvent)
+assert.deepEqual(
+  deriveXboxPackageProgressState({ ...xboxStreamingEvent, isComplete: true }),
+  {
+    phase: 'installing',
+    terminal: false,
+    refreshLibrary: false,
+    phaseTransition: true
+  }
+)
+assert.ok(xboxEvent)
+assert.deepEqual(deriveXboxPackageProgressState({ ...xboxEvent, progress: 1, isComplete: true }), {
+  phase: 'installing',
+  terminal: false,
+  refreshLibrary: false,
+  phaseTransition: true
+})
+assert.deepEqual(
+  deriveXboxPackageProgressState({
+    ...xboxEvent,
+    progress: 0.7,
+    isComplete: true,
+    errorHResult: -1
+  }),
+  {
+    phase: 'error',
+    terminal: true,
+    refreshLibrary: false,
+    phaseTransition: false
+  }
+)
+assert.deepEqual(
+  deriveXboxPackageProgressState({
+    ...xboxEvent,
+    stage: 'content-staging',
+    contentGroupRequired: true,
+    progress: 1,
+    isComplete: true,
+    errorHResult: -1
+  }),
+  {
+    phase: 'error',
+    terminal: true,
+    refreshLibrary: false,
+    phaseTransition: false
+  }
+)
+assert.deepEqual(
+  deriveXboxPackageProgressState({
+    ...xboxEvent,
+    stage: 'content-staging',
+    progress: 1,
+    isComplete: true,
+    errorHResult: -1
+  }),
+  {
+    phase: 'installing',
+    terminal: false,
+    refreshLibrary: false,
+    phaseTransition: true
+  }
+)
+assert.deepEqual(
+  deriveXboxPackageProgressState({
+    ...xboxEvent,
+    stage: 'installing',
+    progress: 1,
+    isComplete: true
+  }),
+  {
+    phase: 'completed',
+    terminal: true,
+    refreshLibrary: true,
+    phaseTransition: false
+  }
+)
+const xboxStatusEvent = parseXboxPackageProgressEvent(
+  JSON.stringify({
+    type: 'package-progress',
+    stage: 'status',
+    activityId: '00000000-0000-0000-0000-000000000000',
+    packageFamilyName: 'Fixture.Game_8wekyb3d8bbwe',
+    gamingProductId: '9ABCDEFGHIJK',
+    isGamingPackage: true,
+    contentGroupRequired: false,
+    progress: null,
+    isComplete: true,
+    errorHResult: 0,
+    isFramework: false,
+    isResourcePackage: false,
+    isOptional: false
+  })
+)
+assert.equal(xboxStatusEvent?.stage, 'status')
+assert.ok(xboxStatusEvent)
+assert.equal(deriveXboxPackageProgressState(xboxStatusEvent).refreshLibrary, true)
 assert.equal(
   parseXboxPackageProgressEvent(
     JSON.stringify({
       type: 'package-progress',
-      operation: 'update',
+      stage: 'content-staging',
       activityId: '10112233-4455-6677-8899-aabbccddeeff',
       packageFamilyName: '2K-Gearbox.Borderlands3_5c2m1mad6jpnr',
+      isGamingPackage: false,
+      contentGroupRequired: true,
       progress: 0.2,
       isComplete: false,
       errorHResult: 0,
       isFramework: false,
       isResourcePackage: false,
-      isOptional: false
+      isOptional: true
     })
   )?.packageFamilyName,
   '2K-Gearbox.Borderlands3_5c2m1mad6jpnr'
@@ -191,9 +316,11 @@ assert.equal(
   parseXboxPackageProgressEvent(
     JSON.stringify({
       type: 'package-progress',
-      operation: 'install',
+      stage: 'installing',
       activityId: '00112233-4455-6677-8899-aabbccddeeff',
       packageFamilyName: 'Microsoft.Framework_8wekyb3d8bbwe',
+      isGamingPackage: false,
+      contentGroupRequired: false,
       progress: 0.1,
       isComplete: false,
       errorHResult: 0,

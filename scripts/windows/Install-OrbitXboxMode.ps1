@@ -5,8 +5,15 @@ param(
   [switch]$Launch,
   [switch]$OpenSettings,
   [switch]$ValidateOnly,
+  [switch]$UpdateOnly,
   [string]$InvokingUserSid
 )
+
+$installerCulture = [System.Globalization.CultureInfo]::GetCultureInfo('en-US')
+[System.Globalization.CultureInfo]::DefaultThreadCurrentCulture = $installerCulture
+[System.Globalization.CultureInfo]::DefaultThreadCurrentUICulture = $installerCulture
+[System.Threading.Thread]::CurrentThread.CurrentCulture = $installerCulture
+[System.Threading.Thread]::CurrentThread.CurrentUICulture = $installerCulture
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -17,8 +24,12 @@ $expectedPublisher = 'CN=ORBIT Development'
 $expectedGamingExtension = 'windows.gamingApp'
 $expectedGamingCapability = 'Microsoft.appCategory.gamingHome_8wekyb3d8bbwe'
 $minimumXboxModeVersion = [version]'10.0.26100.0'
-$diagnosticDirectory = Join-Path $env:ProgramData 'ORBIT\Logs'
-$diagnosticPath = Join-Path $diagnosticDirectory 'xbox-mode-diagnostics.json'
+$diagnosticDirectory = if ($UpdateOnly) {
+  Join-Path $env:LOCALAPPDATA 'ORBIT\Logs'
+} else {
+  Join-Path $env:ProgramData 'ORBIT\Logs'
+}
+$diagnosticPath = Join-Path $diagnosticDirectory $(if ($UpdateOnly) { 'xbox-mode-update-diagnostics.json' } else { 'xbox-mode-diagnostics.json' })
 
 function Get-DefaultXboxPackagePath {
   $candidates = @(
@@ -43,6 +54,17 @@ function Resolve-RequiredFile {
   $file = Get-Item -LiteralPath $resolved -ErrorAction Stop
   if (!$file.PSIsContainer -and $file.Extension -ieq $ExpectedExtension) { return $file.FullName }
   throw "$Description must be a $ExpectedExtension file: $resolved"
+}
+
+function Get-OptionalRegistryProperty {
+  param(
+    [string]$Path,
+    [string]$Name
+  )
+
+  $item = Get-ItemProperty -LiteralPath $Path -ErrorAction SilentlyContinue
+  if (!$item) { return $null }
+  return $item.PSObject.Properties[$Name]
 }
 
 function Get-WindowsBuildInfo {
@@ -353,7 +375,7 @@ $principal = [Security.Principal.WindowsPrincipal]::new($identity)
 $isAdministrator = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 $currentUserSid = $identity.User.Value
 
-if (!$ValidateOnly -and !$isAdministrator) {
+if (!$ValidateOnly -and !$UpdateOnly -and !$isAdministrator) {
   $arguments = @(
     '-NoProfile',
     '-NonInteractive',
@@ -373,6 +395,8 @@ if (!$ValidateOnly -and !$isAdministrator) {
 $diagnostics = [ordered]@{
   schemaVersion = 2
   generatedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
+  installerLanguage = [System.Threading.Thread]::CurrentThread.CurrentUICulture.Name
+  mode = if ($UpdateOnly) { 'update' } elseif ($ValidateOnly) { 'validation' } else { 'install' }
   result = 'pending'
   phase = 'initialization'
 }
@@ -453,15 +477,20 @@ try {
 
   $gamingConfigurationKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\GamingConfiguration'
   $gamingConfigurationPresent = Test-Path -LiteralPath $gamingConfigurationKey
-  $currentGamingHome = [string](Get-ItemPropertyValue -LiteralPath $gamingConfigurationKey -Name GamingHomeApp -ErrorAction SilentlyContinue)
+  $gamingHomeProperty = Get-OptionalRegistryProperty -Path $gamingConfigurationKey -Name GamingHomeApp
+  $currentGamingHome = if ($null -ne $gamingHomeProperty) { [string]$gamingHomeProperty.Value } else { '' }
   $policyKey = 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Games'
-  $xboxModePolicyValue = Get-ItemPropertyValue -LiteralPath $policyKey -Name DisableGamingFullScreenExperience -ErrorAction SilentlyContinue
+  $xboxModePolicyProperty = Get-OptionalRegistryProperty -Path $policyKey -Name DisableGamingFullScreenExperience
+  $xboxModePolicyValue = if ($null -ne $xboxModePolicyProperty) { $xboxModePolicyProperty.Value } else { $null }
   $xboxModeDisabledByPolicy = $null -ne $xboxModePolicyValue -and [int]$xboxModePolicyValue -ne 0
   if ($xboxModeDisabledByPolicy) {
     Write-Warning 'Xbox Mode is disabled by Windows device policy. ORBIT can be installed, but the mode remains unavailable until the administrator changes that policy.'
   }
 
   $existingPackage = Get-InstalledOrbitPackage
+  if ($UpdateOnly -and !$existingPackage) {
+    throw 'ORBIT Xbox Mode is not installed for this Windows account. The update-only installer refuses to create a new installation.'
+  }
   if ($existingPackage -and [version]$existingPackage.Version -gt $packageContract.Version) {
     throw "A newer ORBIT Xbox Mode package ($($existingPackage.Version)) is already installed. Setup refuses to downgrade it to $($packageContract.Version)."
   }
@@ -470,6 +499,8 @@ try {
     xboxApp = $gamingApp
     gameBar = $gameBar
     gamingConfigurationPresent = $gamingConfigurationPresent
+    gamingHomeValuePresent = $null -ne $gamingHomeProperty
+    xboxModePolicyValuePresent = $null -ne $xboxModePolicyProperty
     xboxModeDisabledByPolicy = $xboxModeDisabledByPolicy
     developerModeInitiallyEnabled = $false
   }
@@ -483,7 +514,10 @@ try {
   $diagnostics.phase = 'machine-preparation'
   $trustedCertificatePath = "Cert:\LocalMachine\TrustedPeople\$($certificate.Thumbprint)"
   $certificateWasTrusted = Test-Path -LiteralPath $trustedCertificatePath
-  if (!$certificateWasTrusted) {
+  if ($UpdateOnly -and !$certificateWasTrusted) {
+    throw 'The installed ORBIT signing certificate is no longer trusted. Update-only mode will not change machine certificate trust.'
+  }
+  if (!$UpdateOnly -and !$certificateWasTrusted) {
     Write-Host "Trusting the exact ORBIT signing certificate in LocalMachine\TrustedPeople: $($certificate.Thumbprint)"
     Add-ValidatedCertificateTrust $certificate
     $certificateAdded = $true
@@ -498,7 +532,10 @@ try {
   if ($developerModePropertyExisted) { $developerModeOriginalValue = [int]$developerModeProperty.Value }
   $diagnostics.prerequisites.developerModeInitiallyEnabled = $developerModePropertyExisted -and $developerModeOriginalValue -eq 1
 
-  if (!$developerModePropertyExisted -or $developerModeOriginalValue -ne 1) {
+  if ($UpdateOnly -and (!$developerModePropertyExisted -or $developerModeOriginalValue -ne 1)) {
+    throw 'Windows Developer Mode is no longer enabled. Update-only mode will not change machine policy.'
+  }
+  if (!$UpdateOnly -and (!$developerModePropertyExisted -or $developerModeOriginalValue -ne 1)) {
     Write-Host 'Enabling Windows Developer Mode for the Gaming Home capability...'
     if (!(Test-Path -LiteralPath $developerModeKey)) { New-Item -Path $developerModeKey -Force | Out-Null }
     New-ItemProperty -Path $developerModeKey -Name AllowDevelopmentWithoutDevLicense -PropertyType DWord -Value 1 -Force | Out-Null
@@ -523,7 +560,8 @@ try {
   $diagnostics.phase = 'post-install-validation'
   $null = Assert-InstalledOrbitPackage $installedPackage $packageContract.Version
   $orbitAumid = "$($installedPackage.PackageFamilyName)!$expectedApplicationId"
-  $currentGamingHome = [string](Get-ItemPropertyValue -LiteralPath $gamingConfigurationKey -Name GamingHomeApp -ErrorAction SilentlyContinue)
+  $gamingHomeProperty = Get-OptionalRegistryProperty -Path $gamingConfigurationKey -Name GamingHomeApp
+  $currentGamingHome = if ($null -ne $gamingHomeProperty) { [string]$gamingHomeProperty.Value } else { '' }
   $diagnostics.installed = [ordered]@{
     action = $installationAction
     version = $installedPackage.Version.ToString()
@@ -613,6 +651,17 @@ try {
     }
     $diagnostics.phase = 'failed'
     try { Write-InstallDiagnostics $diagnostics } catch { Write-Warning "Installation diagnostics could not be written: $($_.Exception.Message)" }
+  }
+  if ($UpdateOnly -and $Launch) {
+    try {
+      $recoverPackage = Get-InstalledOrbitPackage
+      if ($recoverPackage) {
+        $recoverAumid = "$($recoverPackage.PackageFamilyName)!$expectedApplicationId"
+        Start-Process explorer.exe "shell:AppsFolder\$recoverAumid"
+      }
+    } catch {
+      Write-Warning "The previous ORBIT installation could not be restarted automatically: $($_.Exception.Message)"
+    }
   }
   throw $originalError
 } finally {

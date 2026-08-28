@@ -1,0 +1,107 @@
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import {
+  compareAppVersions,
+  isValidAppUpdateContentRange,
+  parseGitHubAppUpdateRelease,
+  selectLatestBetaRelease
+} from '../src/shared/appUpdatePolicy.ts'
+
+const root = resolve(import.meta.dirname, '..')
+const digest = `sha256:${'a'.repeat(64)}`
+
+function release(version: string, prerelease = false): Record<string, unknown> {
+  const betaPrefix = prerelease ? 'ORBIT-Beta' : 'ORBIT'
+  return {
+    tag_name: `v${version}`,
+    name: `ORBIT ${version}`,
+    body: 'Security and controller polish.',
+    html_url: `https://github.com/toonymak1993/orbit/releases/tag/v${version}`,
+    published_at: '2026-08-27T10:00:00Z',
+    draft: false,
+    prerelease,
+    assets: [
+      {
+        id: 42,
+        name: `${betaPrefix}-XboxMode-Setup-${version}-x64.exe`,
+        size: 10_000_000,
+        digest,
+        state: 'uploaded',
+        browser_download_url: `https://github.com/toonymak1993/orbit/releases/download/v${version}/${betaPrefix}-XboxMode-Setup-${version}-x64.exe`
+      }
+    ]
+  }
+}
+
+assert.equal(compareAppVersions('1.2.0', '1.1.9'), 1)
+assert.ok((compareAppVersions('1.0.0-beta.2', '1.0.0-beta.10') ?? 0) < 0)
+assert.equal(compareAppVersions('1.0.0', '1.0.0-beta.10'), 1)
+assert.equal(compareAppVersions('1.0', '1.0.0'), null)
+assert.equal(compareAppVersions('1.0.0-beta.01', '1.0.0-beta.1'), null)
+assert.equal(isValidAppUpdateContentRange('bytes 500-999/1000', 500, 1000), true)
+assert.equal(isValidAppUpdateContentRange('bytes 499-999/1000', 500, 1000), false)
+assert.equal(isValidAppUpdateContentRange('bytes 500-999/1001', 500, 1000), false)
+assert.equal(isValidAppUpdateContentRange('bytes */1000', 500, 1000), false)
+
+const stable = parseGitHubAppUpdateRelease(release('1.2.3'), 'stable')
+assert.equal(stable?.version, '1.2.3')
+assert.equal(stable?.asset.digest, 'a'.repeat(64))
+assert.equal(parseGitHubAppUpdateRelease(release('1.2.3'), 'beta'), null)
+
+const wrongAsset = release('1.2.3')
+;(wrongAsset.assets as Array<Record<string, unknown>>)[0].name = 'orbit.exe'
+assert.equal(parseGitHubAppUpdateRelease(wrongAsset, 'stable'), null)
+
+const wrongDigest = release('1.2.3')
+;(wrongDigest.assets as Array<Record<string, unknown>>)[0].digest = 'sha256:1234'
+assert.equal(parseGitHubAppUpdateRelease(wrongDigest, 'stable'), null)
+
+const newestBeta = selectLatestBetaRelease([
+  release('2.0.0-beta.2', true),
+  release('2.0.0-beta.11', true),
+  release('1.9.9-beta.99', true)
+])
+assert.equal(newestBeta?.version, '2.0.0-beta.11')
+
+const manifest = JSON.parse(
+  readFileSync(resolve(root, 'resources/release-manifest.json'), 'utf8')
+) as Record<string, any>
+assert.equal(manifest.updateMode, 'github-release')
+assert.equal(manifest.automaticUpdatesEnabled, true)
+assert.match(manifest.updates.owner, /^[a-zA-Z0-9-]+$/)
+assert.match(manifest.updates.repository, /^[a-zA-Z0-9._-]+$/)
+assert.ok(manifest.updates.signerThumbprints.length > 0)
+
+const installerScript = readFileSync(
+  resolve(root, 'scripts/windows/Install-OrbitXboxMode.ps1'),
+  'utf8'
+)
+assert.match(installerScript, /\[switch\]\$UpdateOnly/)
+assert.match(installerScript, /!\$ValidateOnly -and !\$UpdateOnly -and !\$isAdministrator/)
+assert.match(installerScript, /Update-only mode will not change machine certificate trust/)
+assert.match(installerScript, /Update-only mode will not change machine policy/)
+
+const xboxBootstrapper = readFileSync(resolve(root, 'build/xbox/OrbitXboxInstaller.nsi'), 'utf8')
+assert.match(xboxBootstrapper, /\/ORBIT-UPDATE=/)
+assert.match(xboxBootstrapper, /-UpdateOnly -Launch/)
+
+const builderConfig = readFileSync(resolve(root, 'electron-builder.yml'), 'utf8')
+assert.match(builderConfig, /provider: github/)
+assert.match(builderConfig, /owner: toonymak1993/)
+assert.doesNotMatch(builderConfig, /differentialPackage:\s*false/)
+
+const appUpdateService = readFileSync(resolve(root, 'src/main/appUpdateService.ts'), 'utf8')
+assert.match(appUpdateService, /isValidAppUpdateContentRange/)
+assert.match(appUpdateService, /DOWNLOAD_STALL_TIMEOUT_MS/)
+assert.match(appUpdateService, /pending-install\.json\.tmp|pendingInstallTempPath/)
+assert.match(appUpdateService, /verification: 'verifying'/)
+assert.match(appUpdateService, /autoUpdater\.autoDownload = false/)
+assert.match(appUpdateService, /createUpdaterCancellationToken/)
+assert.match(appUpdateService, /expectedNsisVersion/)
+
+const sharedIpc = readFileSync(resolve(root, 'src/shared/ipc.ts'), 'utf8')
+assert.match(sharedIpc, /appUpdateDownload: 'app:update:download'/)
+assert.match(sharedIpc, /appUpdateAutoDownload: boolean/)
+
+console.log('App update policy and packaging contracts verified.')

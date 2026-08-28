@@ -18,6 +18,17 @@ export interface SteamLocalAppActivity {
   lastPlayedTimestamp?: number
 }
 
+export interface InstalledSteamSnapshot {
+  games: Map<number, InstalledSteamApp>
+  /** False means at least one configured library or manifest was unreadable. */
+  complete: boolean
+}
+
+interface SteamLibraryFoldersSnapshot {
+  paths: string[]
+  complete: boolean
+}
+
 const FULLY_INSTALLED_FLAG = 4
 const UPDATE_REQUIRED_FLAG = 2
 const STEAM_REDISTRIBUTABLES_APP_ID = 228980
@@ -40,9 +51,9 @@ export function getSteamInstallPath(): string | null {
   return defaults.find((path) => existsSync(path)) ?? null
 }
 
-function getLibraryFolders(steamPath: string): string[] {
+function getLibraryFolders(steamPath: string): SteamLibraryFoldersSnapshot {
   const vdfPath = join(steamPath, 'steamapps', 'libraryfolders.vdf')
-  if (!existsSync(vdfPath)) return [steamPath]
+  if (!existsSync(vdfPath)) return { paths: [steamPath], complete: true }
 
   try {
     const root = parseVdf(readFileSync(vdfPath, 'utf8'))
@@ -60,16 +71,16 @@ function getLibraryFolders(steamPath: string): string[] {
     for (const libraryPath of paths) {
       uniquePaths.set(libraryPath.replace(/\//g, '\\').toLocaleLowerCase('en'), libraryPath)
     }
-    return [...uniquePaths.values()]
+    return { paths: [...uniquePaths.values()], complete: true }
   } catch {
-    return [steamPath]
+    return { paths: [steamPath], complete: false }
   }
 }
 
 export function getSteamAppsDirectories(): string[] {
   const steamPath = getSteamInstallPath()
   if (!steamPath) return []
-  return getLibraryFolders(steamPath)
+  return getLibraryFolders(steamPath).paths
     .map((libraryPath) => join(libraryPath, 'steamapps'))
     .filter((steamappsDir) => existsSync(steamappsDir))
 }
@@ -135,20 +146,26 @@ export function scanSteamLocalActivity(steamId?: string): Map<number, SteamLocal
  * only records with the FullyInstalled state and an existing install directory
  * are admitted. Steamworks Common Redistributables and soundtracks are skipped.
  */
-export function scanInstalledSteamApps(steamId?: string): Map<number, InstalledSteamApp> {
+export function scanInstalledSteamAppsSnapshot(steamId?: string): InstalledSteamSnapshot {
   const result = new Map<number, InstalledSteamApp>()
   const steamPath = getSteamInstallPath()
-  if (!steamPath) return result
+  if (!steamPath) return { games: result, complete: false }
 
   const localActivity = getLocalAppActivity(steamPath, steamId)
-  for (const libraryPath of getLibraryFolders(steamPath)) {
+  const libraries = getLibraryFolders(steamPath)
+  let complete = libraries.complete
+  for (const libraryPath of libraries.paths) {
     const steamappsDir = join(libraryPath, 'steamapps')
-    if (!existsSync(steamappsDir)) continue
+    if (!existsSync(steamappsDir)) {
+      complete = false
+      continue
+    }
 
     let files: string[]
     try {
       files = readdirSync(steamappsDir)
     } catch {
+      complete = false
       continue
     }
 
@@ -172,7 +189,10 @@ export function scanInstalledSteamApps(steamId?: string): Map<number, InstalledS
         }
 
         const installDir = join(steamappsDir, 'common', installDirName)
-        if (!existsSync(installDir)) continue
+        if (!existsSync(installDir)) {
+          complete = false
+          continue
+        }
         const hasPendingDownload =
           bytesToDownload !== undefined &&
           bytesDownloaded !== undefined &&
@@ -189,11 +209,16 @@ export function scanInstalledSteamApps(steamId?: string): Map<number, InstalledS
           lastPlayedTimestamp: activity?.lastPlayedTimestamp
         })
       } catch {
-        // One unreadable/corrupt manifest must not abort the remaining library.
+        // Keep scanning, but do not let a partial result clear cached installs.
+        complete = false
       }
     }
   }
 
-  return result
+  return { games: result, complete }
+}
+
+export function scanInstalledSteamApps(steamId?: string): Map<number, InstalledSteamApp> {
+  return scanInstalledSteamAppsSnapshot(steamId).games
 }
 

@@ -3,7 +3,9 @@ import { spawn } from 'node:child_process'
 import {
   HARDWARE_CONTROL_BUTTONS,
   HARDWARE_CONTROL_HOLD_SECONDS,
+  FRIENDS_PROVIDERS,
   IPC,
+  LIBRARY_GRID_COLUMN_OPTIONS,
   NOTIFICATION_MOTIONS,
   NOTIFICATION_POSITIONS,
   PROFILE_AVATAR_IDS,
@@ -13,6 +15,7 @@ import {
   type CustomGameLaunchArgumentsInput,
   type CustomGameSaveSource,
   type EpicLoginStatus,
+  type FriendsProvider,
   type ImageOrientation,
   type ImageUpdate,
   type LibraryGame,
@@ -22,7 +25,9 @@ import {
   type StoreRegionId,
   type SteamAccount,
   type SteamLoginStatus,
-  type SystemPowerAction
+  type SystemPowerAction,
+  type SystemSettingsTarget,
+  type SystemStatusSnapshot
 } from '@shared/ipc'
 import { settingsStore } from './settingsStore'
 import { steamAuthManager } from './steam/steamAuth'
@@ -40,13 +45,22 @@ import { customArtworkService } from './customArtwork'
 import { artworkPickerService } from './artworkPickerService'
 import { profileAvatarService } from './profileAvatarService'
 import { systemUpdateService } from './systemUpdateService'
+import { SystemStatusService } from './systemStatusService'
 import { launcherDownloadMonitor } from './downloads/launcherDownloadMonitor'
+import { AppUpdateService, launcherHasActiveDownload } from './appUpdateService'
+import { friendsService } from './friendsService'
 import {
   normalizeCustomLaunchArguments,
   parseCustomLaunchArguments
 } from './customLaunchArguments'
 
 const SYSTEM_POWER_ACTIONS: readonly SystemPowerAction[] = ['sleep', 'restart', 'shutdown']
+const SYSTEM_SETTINGS_TARGETS: Record<SystemSettingsTarget, string> = {
+  power: 'ms-settings:batterysaver',
+  wifi: 'ms-settings:network-wifi',
+  ethernet: 'ms-settings:network-ethernet',
+  bluetooth: 'ms-settings:bluetooth'
+}
 const APP_CONTROL_ACTIONS: readonly AppControlAction[] = ['relaunch', 'quit']
 const BACKGROUND_SERVICE_ACTIONS: readonly OrbitBackgroundServiceAction[] = [
   'install',
@@ -94,6 +108,60 @@ function validateSettingsPartial(value: unknown): asserts value is Partial<Orbit
   }
   const partial = value as Record<string, unknown>
   if (
+    'steamWebApiKey' in partial &&
+    partial.steamWebApiKey !== undefined &&
+    (typeof partial.steamWebApiKey !== 'string' ||
+      !/^[a-f\d]{32}$/i.test(partial.steamWebApiKey.trim()))
+  ) {
+    throw new Error('Invalid Steam Web API key')
+  }
+  if (
+    'libraryGridColumns' in partial &&
+    !LIBRARY_GRID_COLUMN_OPTIONS.includes(
+      partial.libraryGridColumns as (typeof LIBRARY_GRID_COLUMN_OPTIONS)[number]
+    )
+  ) {
+    throw new Error('Invalid library grid column count')
+  }
+  if ('favoriteGameIds' in partial) {
+    if (
+      !Array.isArray(partial.favoriteGameIds) ||
+      partial.favoriteGameIds.length > 10_000 ||
+      partial.favoriteGameIds.some(
+        (gameId) => typeof gameId !== 'string' || !gameId.trim() || gameId.length > 512
+      )
+    ) {
+      throw new Error('Invalid favorite game IDs')
+    }
+  }
+  if ('customLibraries' in partial) {
+    if (!Array.isArray(partial.customLibraries) || partial.customLibraries.length > 50) {
+      throw new Error('Invalid custom libraries')
+    }
+    for (const candidate of partial.customLibraries) {
+      if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) {
+        throw new Error('Invalid custom library')
+      }
+      const collection = candidate as Record<string, unknown>
+      if (
+        typeof collection.id !== 'string' ||
+        !/^[a-zA-Z0-9-]{1,80}$/.test(collection.id) ||
+        typeof collection.name !== 'string' ||
+        !collection.name.trim() ||
+        collection.name.length > 40 ||
+        typeof collection.createdAt !== 'number' ||
+        !Number.isFinite(collection.createdAt) ||
+        !Array.isArray(collection.gameIds) ||
+        collection.gameIds.length > 10_000 ||
+        collection.gameIds.some(
+          (gameId) => typeof gameId !== 'string' || !gameId.trim() || gameId.length > 512
+        )
+      ) {
+        throw new Error('Invalid custom library')
+      }
+    }
+  }
+  if (
     'profileAvatar' in partial &&
     !PROFILE_AVATAR_IDS.includes(partial.profileAvatar as (typeof PROFILE_AVATAR_IDS)[number])
   ) {
@@ -101,6 +169,9 @@ function validateSettingsPartial(value: unknown): asserts value is Partial<Orbit
   }
   if ('notificationsEnabled' in partial && typeof partial.notificationsEnabled !== 'boolean') {
     throw new Error('Invalid notification state')
+  }
+  if ('appUpdateAutoDownload' in partial && typeof partial.appUpdateAutoDownload !== 'boolean') {
+    throw new Error('Invalid app update download preference')
   }
   if (
     'homeCardBubbleEffect' in partial &&
@@ -155,9 +226,9 @@ function validatedImageOrientation(value: unknown): ImageOrientation {
   return value as ImageOrientation
 }
 
-function validatedArtworkOrientation(value: unknown): Exclude<ImageOrientation, 'icon'> {
+function validatedSteamGridDbOrientation(value: unknown): Exclude<ImageOrientation, 'icon'> {
   const orientation = validatedImageOrientation(value)
-  if (orientation === 'icon') throw new Error('Invalid customizable artwork orientation')
+  if (orientation === 'icon') throw new Error('Invalid SteamGridDB artwork orientation')
   return orientation
 }
 
@@ -255,6 +326,16 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
   }
   steamAuthManager.on('account', sendSteamAccountUpdate)
   mainWindow.once('closed', () => steamAuthManager.off('account', sendSteamAccountUpdate))
+  const sendFriendsUpdate = (): void => {
+    if (mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return
+    mainWindow.webContents.send(IPC.friendsUpdated, friendsService.getSnapshot())
+  }
+  friendsService.on('updated', sendFriendsUpdate)
+  mainWindow.once('closed', () => friendsService.off('updated', sendFriendsUpdate))
+  app.once('before-quit', () => friendsService.dispose())
+  // Warm the provider-neutral cache while the renderer is loading so opening
+  // the Friends Hub never becomes the trigger for its first network request.
+  void friendsService.refresh()
   const gameSessionManager = new GameSessionManager(mainWindow, {
     onGameConfirmed: (game, detectedAt) => libraryService.markGameStarted(game.id, detectedAt),
     onSessionCompleted: (game, session) =>
@@ -284,12 +365,47 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
   const disposeBackgroundService = (): void => backgroundServiceManager.dispose()
   app.once('before-quit', disposeBackgroundService)
   mainWindow.once('closed', disposeBackgroundService)
+  const appUpdateService = new AppUpdateService(mainWindow, {
+    getGameLaunchPhase: () => gameSessionManager.getStatus().phase,
+    hasActiveLauncherDownload: () =>
+      launcherHasActiveDownload(
+        launcherDownloadMonitor.getSnapshot().activities.map((activity) => activity.phase)
+      ),
+    prepareForInstall: () => backgroundServiceManager.prepareForAppUpdate(),
+    recoverFromFailedInstall: () => backgroundServiceManager.recoverFromFailedAppUpdate(),
+    getAutoDownloadEnabled: () => settingsStore.store.appUpdateAutoDownload
+  })
+  appUpdateService.start()
+  let appUpdateDisposed = false
+  const disposeAppUpdate = (): void => {
+    if (appUpdateDisposed) return
+    appUpdateDisposed = true
+    appUpdateService.dispose()
+  }
+  mainWindow.once('closed', disposeAppUpdate)
+  const systemStatusService = new SystemStatusService()
+  const sendSystemStatus = (snapshot: SystemStatusSnapshot): void => {
+    if (mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return
+    mainWindow.webContents.send(IPC.systemStatusUpdated, snapshot)
+  }
+  systemStatusService.on('updated', sendSystemStatus)
+  systemStatusService.start()
+  let systemStatusDisposed = false
+  const disposeSystemStatus = (): void => {
+    if (systemStatusDisposed) return
+    systemStatusDisposed = true
+    systemStatusService.off('updated', sendSystemStatus)
+    systemStatusService.dispose()
+  }
+  app.once('before-quit', disposeSystemStatus)
+  mainWindow.once('closed', disposeSystemStatus)
   const sendLauncherDownloads = (): void => {
     if (mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return
     mainWindow.webContents.send(
       IPC.launcherDownloadsUpdated,
       launcherDownloadMonitor.getSnapshot()
     )
+    appUpdateService.refreshBlockers()
   }
   launcherDownloadMonitor.on('updated', sendLauncherDownloads)
   launcherDownloadMonitor.start()
@@ -306,10 +422,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     mainWindow.webContents.send(IPC.libraryUpdated, snapshot)
   })
   artworkService.on('updated', (update) => {
-    const customArtwork =
-      update.orientation === 'icon'
-        ? null
-        : customArtworkService.resolve(update.gameId, update.orientation)
+    const customArtwork = customArtworkService.resolve(update.gameId, update.orientation)
     mainWindow.webContents.send(IPC.imageUpdated, {
       ...update,
       image: customArtwork ?? update.image
@@ -323,6 +436,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
   })
   gameSessionManager.on('updated', (status) => {
     mainWindow.webContents.send(IPC.gameLaunchStatus, status)
+    appUpdateService.refreshBlockers()
   })
 
   ipcMain.handle(IPC.launcherDownloadsGet, () => launcherDownloadMonitor.getSnapshot())
@@ -342,10 +456,21 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     ) {
       void backgroundServiceManager.reloadSettings()
     }
+    if ('steamWebApiKey' in partial) {
+      void friendsService.refresh()
+    }
+    if ('appUpdateAutoDownload' in partial) {
+      appUpdateService.refreshPreferences()
+    }
     return next
   })
 
   ipcMain.handle(IPC.appVersion, () => getDisplayVersion())
+  ipcMain.handle(IPC.appUpdateGet, () => appUpdateService.getSnapshot())
+  ipcMain.handle(IPC.appUpdateCheck, () => appUpdateService.check(true))
+  ipcMain.handle(IPC.appUpdateDownload, () => appUpdateService.download())
+  ipcMain.handle(IPC.appUpdateInstall, () => appUpdateService.install())
+  ipcMain.handle(IPC.appUpdateDefer, () => appUpdateService.defer())
   ipcMain.handle(IPC.backgroundServiceGetStatus, () => backgroundServiceManager.getStatus())
   ipcMain.handle(IPC.backgroundServiceControl, (_e, action: unknown) => {
     if (!BACKGROUND_SERVICE_ACTIONS.includes(action as OrbitBackgroundServiceAction)) {
@@ -375,6 +500,17 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
   ipcMain.handle(IPC.syncGet, () => syncCoordinator.getStatus())
   ipcMain.handle(IPC.systemUpdatesCheck, () => systemUpdateService.check())
   ipcMain.handle(IPC.systemOpenUpdateSettings, () => shell.openExternal('ms-settings:windowsupdate'))
+  ipcMain.handle(IPC.systemStatusGet, () => systemStatusService.getSnapshot())
+  ipcMain.handle(IPC.systemStatusRefresh, () => systemStatusService.refresh())
+  ipcMain.handle(IPC.systemOpenSettings, (_e, target: unknown) => {
+    if (typeof target !== 'string' || !Object.hasOwn(SYSTEM_SETTINGS_TARGETS, target)) {
+      throw new Error('Invalid system settings target')
+    }
+    if (process.platform !== 'win32') {
+      throw new Error('System settings are currently available on Windows only')
+    }
+    return shell.openExternal(SYSTEM_SETTINGS_TARGETS[target as SystemSettingsTarget])
+  })
   ipcMain.handle(IPC.storeGet, () => storeService.getSnapshot())
   ipcMain.handle(IPC.storeRefresh, () => storeService.refresh())
   ipcMain.handle(IPC.storeCompareProduct, (_e, productId: string) =>
@@ -405,6 +541,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     }
     try {
       await steamAuthManager.startLogin(sendStatus, mainWindow)
+      void friendsService.refresh()
     } catch (err) {
       sendStatus({
         state: 'error',
@@ -417,7 +554,10 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     steamAuthManager.cancelLogin()
   })
 
-  ipcMain.handle(IPC.steamLogout, () => steamAuthManager.logout())
+  ipcMain.handle(IPC.steamLogout, async () => {
+    await steamAuthManager.logout()
+    await friendsService.refresh()
+  })
 
   ipcMain.handle(IPC.epicGetAccount, async () => {
     return epicAuthManager.restoreSession()
@@ -429,6 +569,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     }
     try {
       await epicAuthManager.startLogin(sendStatus, mainWindow)
+      void friendsService.refresh()
     } catch (err) {
       sendStatus({
         state: 'error',
@@ -441,8 +582,26 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     epicAuthManager.cancelLogin()
   })
 
-  ipcMain.handle(IPC.epicLogout, () => {
-    return epicAuthManager.logout()
+  ipcMain.handle(IPC.epicLogout, async () => {
+    await epicAuthManager.logout()
+    await friendsService.refresh()
+  })
+
+  ipcMain.handle(IPC.friendsGet, () => friendsService.getSnapshot())
+  ipcMain.handle(IPC.friendsRefresh, () => friendsService.refresh())
+  ipcMain.handle(IPC.friendsConnect, (_e, provider: unknown) => {
+    if (provider !== 'discord') throw new Error('Unsupported friends provider connection')
+    return friendsService.connectProvider(provider)
+  })
+  ipcMain.handle(IPC.friendsDisconnect, (_e, provider: unknown) => {
+    if (provider !== 'discord') throw new Error('Unsupported friends provider disconnection')
+    return friendsService.disconnectProvider(provider)
+  })
+  ipcMain.handle(IPC.friendsOpenProvider, (_e, provider: unknown) => {
+    if (!FRIENDS_PROVIDERS.includes(provider as FriendsProvider)) {
+      throw new Error('Invalid friends provider')
+    }
+    return friendsService.openProvider(provider as FriendsProvider)
   })
 
   ipcMain.handle(IPC.libraryGet, () => {
@@ -533,6 +692,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     await gameSessionManager.start(game)
   })
 
+  ipcMain.handle(IPC.gameLaunchCancel, () => gameSessionManager.cancelPendingLaunch())
   ipcMain.handle(IPC.gameLaunchGet, () => gameSessionManager.getStatus())
   ipcMain.handle(IPC.gameLaunchRevealLauncher, () => gameSessionManager.revealLauncher())
 
@@ -561,7 +721,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     queryValue: unknown
   ) => {
     const gameId = validatedShortString(gameIdValue, 'SteamGridDB artwork game ID')
-    const orientation = validatedArtworkOrientation(orientationValue)
+    const orientation = validatedSteamGridDbOrientation(orientationValue)
     const query = validatedArtworkQuery(queryValue)
     const game = libraryService.getGame(gameId)
     if (!game) throw new Error('Game is not available')
@@ -578,7 +738,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
       queryValue: unknown
     ): Promise<boolean> => {
       const gameId = validatedShortString(gameIdValue, 'SteamGridDB artwork game ID')
-      const orientation = validatedArtworkOrientation(orientationValue)
+      const orientation = validatedSteamGridDbOrientation(orientationValue)
       const query = validatedArtworkQuery(queryValue)
       if (
         typeof artworkIdValue !== 'number' ||
@@ -605,10 +765,29 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     orientationValue: unknown
   ): Promise<boolean> => {
     const gameId = validatedShortString(gameIdValue, 'custom artwork game ID')
-    const orientation = validatedArtworkOrientation(orientationValue)
+    const orientation = validatedImageOrientation(orientationValue)
     const game = libraryService.getGame(gameId)
     if (!game) throw new Error('Game is not available')
     const image = await customArtworkService.select(mainWindow, gameId, orientation)
+    if (!image) return false
+    mainWindow.webContents.send(IPC.imageUpdated, {
+      gameId,
+      orientation,
+      image
+    } satisfies ImageUpdate)
+    return true
+  })
+
+  ipcMain.handle(IPC.imagePasteCustom, async (
+    _e,
+    gameIdValue: unknown,
+    orientationValue: unknown
+  ): Promise<boolean> => {
+    const gameId = validatedShortString(gameIdValue, 'clipboard artwork game ID')
+    const orientation = validatedImageOrientation(orientationValue)
+    const game = libraryService.getGame(gameId)
+    if (!game) throw new Error('Game is not available')
+    const image = await customArtworkService.paste(gameId, orientation)
     if (!image) return false
     mainWindow.webContents.send(IPC.imageUpdated, {
       gameId,
@@ -624,7 +803,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     orientationValue: unknown
   ): Promise<boolean> => {
     const gameId = validatedShortString(gameIdValue, 'custom artwork game ID')
-    const orientation = validatedArtworkOrientation(orientationValue)
+    const orientation = validatedImageOrientation(orientationValue)
     const game = libraryService.getGame(gameId)
     if (!game) throw new Error('Game is not available')
     const removed = await customArtworkService.reset(gameId, orientation)
@@ -643,7 +822,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     orientationValue: unknown
   ): boolean => {
     const gameId = validatedShortString(gameIdValue, 'custom artwork game ID')
-    const orientation = validatedArtworkOrientation(orientationValue)
+    const orientation = validatedImageOrientation(orientationValue)
     return Boolean(libraryService.getGame(gameId) && customArtworkService.has(gameId, orientation))
   })
 
@@ -661,10 +840,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
       }
       const game = findArtworkGame(gameId)
       if (!game) return
-      if (
-        orientation !== 'icon' &&
-        (await customArtworkService.reset(gameId, orientation, revisionValue))
-      ) {
+      if (await customArtworkService.reset(gameId, orientation, revisionValue)) {
         mainWindow.webContents.send(IPC.imageUpdated, {
           gameId,
           orientation,

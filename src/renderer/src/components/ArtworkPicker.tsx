@@ -3,6 +3,8 @@ import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
   AlertTriangle,
+  CheckCircle2,
+  ClipboardPaste,
   ImagePlus,
   Loader2,
   RefreshCw,
@@ -10,13 +12,13 @@ import {
   Search,
   X
 } from 'lucide-react'
-import type { SteamGridDbArtworkOptions } from '@shared/ipc'
+import type { ImageOrientation, SteamGridDbArtworkOptions } from '@shared/ipc'
 import { useBackHandler } from '@renderer/hooks/useBackHandler'
 import { useT } from '@renderer/i18n/useT'
 import { focusElement } from '@renderer/lib/spatialNavigation'
 import { usePreferencesStore } from '@renderer/state/preferencesStore'
 
-type PickerOrientation = 'vertical' | 'horizontal'
+type PickerOrientation = ImageOrientation
 
 interface Props {
   gameId: string
@@ -27,7 +29,9 @@ interface Props {
   onClose: () => void
 }
 
-type BusyAction = number | 'custom' | 'reset' | null
+type BusyAction = number | 'custom' | 'clipboard' | 'reset' | null
+type Failure = 'apply' | 'clipboard-empty' | null
+type Notice = 'applied' | 'reset' | null
 
 const MIN_QUERY_LENGTH = 2
 const MAX_QUERY_LENGTH = 120
@@ -43,7 +47,6 @@ export function ArtworkPicker({
   const t = useT()
   const compact = usePreferencesStore((state) => state.uiDensity === 'compact')
   const customRef = useRef<HTMLButtonElement>(null)
-  const firstArtworkRef = useRef<HTMLButtonElement>(null)
   const requestGenerationRef = useRef(0)
   const initialQuery = gameName.trim().slice(0, MAX_QUERY_LENGTH)
   const [orientation, setOrientation] = useState<PickerOrientation>('vertical')
@@ -53,13 +56,22 @@ export function ArtworkPicker({
   const [result, setResult] = useState<SteamGridDbArtworkOptions | null>(null)
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState<BusyAction>(null)
-  const [failed, setFailed] = useState(false)
+  const [failure, setFailure] = useState<Failure>(null)
+  const [notice, setNotice] = useState<Notice>(null)
 
   const load = useCallback(
     (nextOrientation: PickerOrientation, nextQuery: string): void => {
       const normalizedQuery = nextQuery.trim().slice(0, MAX_QUERY_LENGTH)
       const generation = ++requestGenerationRef.current
-      setFailed(false)
+      setFailure(null)
+      setNotice(null)
+
+      if (nextOrientation === 'icon') {
+        setQueryTooShort(false)
+        setResult(null)
+        setLoading(false)
+        return
+      }
 
       if (normalizedQuery.length < MIN_QUERY_LENGTH) {
         setQueryTooShort(true)
@@ -117,17 +129,9 @@ export function ArtworkPicker({
     []
   )
 
-  useEffect(() => {
-    if (result?.state !== 'ready' || result.options.length === 0) return
-    const frame = requestAnimationFrame(() => {
-      if (document.activeElement === customRef.current) focusElement(firstArtworkRef.current)
-    })
-    return () => cancelAnimationFrame(frame)
-  }, [result])
-
   const submitSearch = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault()
-    if (busy || loading) return
+    if (busy || loading || orientation === 'icon') return
     const nextQuery = query.trim().slice(0, MAX_QUERY_LENGTH)
     if (nextQuery.length < MIN_QUERY_LENGTH) {
       load(orientation, nextQuery)
@@ -139,20 +143,28 @@ export function ArtworkPicker({
   }
 
   const selectOrientation = (nextOrientation: PickerOrientation): void => {
-    if (busy || loading || nextOrientation === orientation) return
+    if (busy || nextOrientation === orientation) return
     const nextQuery = query.trim().slice(0, MAX_QUERY_LENGTH)
     setOrientation(nextOrientation)
-    setFailed(false)
+    setFailure(null)
+    setNotice(null)
     setQuery(nextQuery)
     if (nextQuery.length >= MIN_QUERY_LENGTH) setSubmittedQuery(nextQuery)
     load(nextOrientation, nextQuery)
   }
 
+  const restoreActionFocus = (actionOrigin: HTMLElement | null): void => {
+    requestAnimationFrame(() => {
+      focusElement(actionOrigin?.isConnected ? actionOrigin : customRef.current)
+    })
+  }
+
   const applySteamGridDb = async (artworkId: number): Promise<void> => {
-    if (busy) return
+    if (busy || orientation === 'icon') return
     const actionOrigin = document.activeElement as HTMLElement | null
     setBusy(artworkId)
-    setFailed(false)
+    setFailure(null)
+    setNotice(null)
     try {
       if (
         await window.api.image.applySteamGridDb(
@@ -162,15 +174,14 @@ export function ArtworkPicker({
           submittedQuery
         )
       ) {
+        setNotice('applied')
         onApplied(orientation)
       }
     } catch {
-      setFailed(true)
+      setFailure('apply')
     } finally {
       setBusy(null)
-      requestAnimationFrame(() => {
-        if (actionOrigin?.isConnected) focusElement(actionOrigin)
-      })
+      restoreActionFocus(actionOrigin)
     }
   }
 
@@ -178,33 +189,59 @@ export function ArtworkPicker({
     if (busy) return
     const actionOrigin = document.activeElement as HTMLElement | null
     setBusy('custom')
-    setFailed(false)
+    setFailure(null)
+    setNotice(null)
     try {
-      if (await window.api.image.selectCustom(gameId, orientation)) onApplied(orientation)
+      if (await window.api.image.selectCustom(gameId, orientation)) {
+        setNotice('applied')
+        onApplied(orientation)
+      }
     } catch {
-      setFailed(true)
+      setFailure('apply')
     } finally {
       setBusy(null)
-      requestAnimationFrame(() => {
-        if (actionOrigin?.isConnected) focusElement(actionOrigin)
-      })
+      restoreActionFocus(actionOrigin)
+    }
+  }
+
+  const pasteCustom = async (): Promise<void> => {
+    if (busy) return
+    const actionOrigin = document.activeElement as HTMLElement | null
+    setBusy('clipboard')
+    setFailure(null)
+    setNotice(null)
+    try {
+      if (await window.api.image.pasteCustom(gameId, orientation)) {
+        setNotice('applied')
+        onApplied(orientation)
+      }
+      else setFailure('clipboard-empty')
+    } catch {
+      setFailure('apply')
+    } finally {
+      setBusy(null)
+      restoreActionFocus(actionOrigin)
     }
   }
 
   const reset = async (): Promise<void> => {
     if (busy) return
     const actionOrigin = document.activeElement as HTMLElement | null
+    let resetApplied = false
     setBusy('reset')
-    setFailed(false)
+    setFailure(null)
+    setNotice(null)
     try {
-      if (await window.api.image.resetCustom(gameId, orientation)) onReset(orientation)
+      if (await window.api.image.resetCustom(gameId, orientation)) {
+        resetApplied = true
+        setNotice('reset')
+        onReset(orientation)
+      }
     } catch {
-      setFailed(true)
+      setFailure('apply')
     } finally {
       setBusy(null)
-      requestAnimationFrame(() => {
-        if (actionOrigin?.isConnected) focusElement(actionOrigin)
-      })
+      restoreActionFocus(resetApplied ? null : actionOrigin)
     }
   }
 
@@ -215,7 +252,11 @@ export function ArtworkPicker({
         ? t('artwork.notConfigured')
         : t('artwork.unavailable')
   const orientationLabel =
-    orientation === 'vertical' ? t('artwork.cover') : t('artwork.background')
+    orientation === 'vertical'
+      ? t('artwork.cover')
+      : orientation === 'horizontal'
+        ? t('artwork.background')
+        : t('artwork.icon')
   const optionGridClass =
     orientation === 'vertical'
       ? `grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 ${compact ? 'gap-2' : 'gap-3'}`
@@ -250,11 +291,11 @@ export function ArtworkPicker({
           <header className={`flex shrink-0 items-start justify-between border-b border-white/[0.07] ${compact ? 'gap-4 px-4 py-3' : 'gap-6 px-[clamp(1.15rem,2.4vw,1.75rem)] py-[clamp(0.9rem,2vh,1.25rem)]'}`}>
             <div className="min-w-0">
               <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-accent">
-                SteamGridDB
+                ORBIT · Artwork Studio
               </p>
               <h2 className="mt-1 truncate text-2xl font-bold text-white">{t('artwork.title')}</h2>
               <p className="mt-1 text-sm text-white/45">
-                {t('artwork.subtitleSearch', { name: gameName })}
+                {t('artwork.subtitle', { name: gameName })}
               </p>
             </div>
             <button
@@ -277,29 +318,34 @@ export function ArtworkPicker({
                 aria-label={t('artwork.title')}
                 className="flex shrink-0 rounded-full border border-white/10 bg-black/25 p-1"
               >
-                {(['vertical', 'horizontal'] as const).map((value) => (
+                {(['vertical', 'horizontal', 'icon'] as const).map((value) => (
                   <button
                     key={value}
                     data-focusable
-                    data-disabled={busy || loading ? 'true' : undefined}
+                    data-disabled={busy ? 'true' : undefined}
                     disabled={Boolean(busy)}
-                    aria-disabled={Boolean(busy) || loading}
+                    aria-disabled={Boolean(busy)}
                     type="button"
                     role="tab"
                     aria-selected={orientation === value}
                     aria-controls="artwork-results"
                     onClick={() => selectOrientation(value)}
-                    className={`min-w-[8.5rem] rounded-full px-4 py-2.5 text-sm font-semibold transition-colors disabled:opacity-45 data-[focused=true]:shadow-[0_0_0_2px_rgb(var(--color-accent)/0.45)] ${loading ? 'opacity-45' : ''} ${
+                    className={`min-w-[7rem] rounded-full px-4 py-2.5 text-sm font-semibold transition-colors disabled:opacity-45 data-[focused=true]:shadow-[0_0_0_2px_rgb(var(--color-accent)/0.45)] ${
                       orientation === value
                         ? 'bg-accent text-black'
                         : 'text-white/55 hover:bg-white/[0.08] hover:text-white'
                     }`}
                   >
-                    {value === 'vertical' ? t('artwork.cover') : t('artwork.background')}
+                    {value === 'vertical'
+                      ? t('artwork.cover')
+                      : value === 'horizontal'
+                        ? t('artwork.background')
+                        : t('artwork.icon')}
                   </button>
                 ))}
               </div>
 
+              {orientation !== 'icon' && result?.state !== 'not-configured' && (
               <form role="search" onSubmit={submitSearch} className="min-w-0 flex-1">
                 <label className="sr-only" htmlFor="artwork-search">
                   {t('artwork.searchLabel')}
@@ -354,6 +400,7 @@ export function ArtworkPicker({
                   </p>
                 )}
               </form>
+              )}
             </div>
           </div>
 
@@ -365,17 +412,33 @@ export function ArtworkPicker({
               disabled={Boolean(busy)}
               type="button"
               onClick={() => void selectCustom()}
-              className="flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.06] px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-white/[0.12] disabled:opacity-45 data-[focused=true]:border-accent/60 data-[focused=true]:bg-accent/15"
+              className="flex items-center gap-2 rounded-full bg-accent px-4 py-2.5 text-sm font-bold text-black transition-transform hover:scale-[1.02] disabled:opacity-45 data-[focused=true]:shadow-[0_0_0_3px_rgb(var(--color-accent)/0.25)]"
             >
               {busy === 'custom' ? (
                 <Loader2 size={16} className="animate-spin" />
               ) : (
                 <ImagePlus size={16} />
               )}
-              <span>{t('artwork.custom')}</span>
+              <span>{t('artwork.chooseFile')}</span>
               <span className="hidden text-xs font-normal text-white/35 sm:inline">
                 · {orientationLabel}
               </span>
+            </button>
+
+            <button
+              data-focusable
+              data-disabled={busy ? 'true' : undefined}
+              disabled={Boolean(busy)}
+              type="button"
+              onClick={() => void pasteCustom()}
+              className="flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.06] px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-white/[0.12] disabled:opacity-45 data-[focused=true]:border-accent/60 data-[focused=true]:bg-accent/15"
+            >
+              {busy === 'clipboard' ? (
+                <Loader2 size={16} className="animate-spin" />
+              ) : (
+                <ClipboardPaste size={16} />
+              )}
+              <span>{t('artwork.clipboard')}</span>
             </button>
 
             {hasOverrides[orientation] && (
@@ -403,14 +466,27 @@ export function ArtworkPicker({
             aria-label={orientationLabel}
             className={`min-h-0 flex-1 overflow-y-auto ${compact ? 'px-4 py-3' : 'px-[clamp(1.15rem,2.4vw,1.75rem)] py-4'}`}
           >
-            {failed && (
+            {failure && (
               <p role="alert" className="mb-4 flex items-center gap-2 rounded-xl border border-rose-300/15 bg-rose-300/[0.08] px-3.5 py-3 text-sm text-rose-100">
                 <AlertTriangle size={16} />
-                {t('artwork.applyFailed')}
+                {failure === 'clipboard-empty'
+                  ? t('artwork.clipboardEmpty')
+                  : t('artwork.applyFailed')}
+              </p>
+            )}
+            {notice && (
+              <p role="status" aria-live="polite" className="mb-4 flex items-center gap-2 rounded-xl border border-emerald-300/15 bg-emerald-300/[0.08] px-3.5 py-3 text-sm text-emerald-100">
+                <CheckCircle2 size={16} />
+                {notice === 'applied' ? t('artwork.saved') : t('artwork.restored')}
               </p>
             )}
 
-            {queryTooShort && !result ? (
+            {orientation === 'icon' ? (
+              <div className="flex min-h-64 flex-col items-center justify-center gap-3 text-center text-white/45">
+                <ImagePlus size={30} className="text-accent" />
+                <p className="max-w-lg text-sm leading-relaxed">{t('artwork.iconHint')}</p>
+              </div>
+            ) : queryTooShort && !result ? (
               <div className="flex min-h-64 flex-col items-center justify-center gap-3 text-center text-white/45">
                 <Search size={27} className="text-amber-200/75" />
                 <p className="max-w-lg text-sm leading-relaxed">{t('artwork.queryTooShort')}</p>
@@ -432,7 +508,6 @@ export function ArtworkPicker({
                 {result.options.map((option, index) => (
                   <button
                     key={`${orientation}:${option.id}`}
-                    ref={index === 0 ? firstArtworkRef : undefined}
                     data-focusable
                     data-disabled={busy ? 'true' : undefined}
                     disabled={Boolean(busy)}
@@ -489,7 +564,10 @@ export function ArtworkPicker({
           </div>
 
           <footer className={`shrink-0 border-t border-white/[0.06] text-[10px] uppercase tracking-[0.16em] text-white/25 ${compact ? 'px-4 py-2' : 'px-[clamp(1.15rem,2.4vw,1.75rem)] py-2.5'}`}>
-            {t('artwork.credit')}
+            {t('artwork.localFooter')}
+            {result?.state === 'ready' && result.options.length > 0
+              ? ` · ${t('artwork.credit')}`
+              : ''}
           </footer>
         </motion.section>
       </motion.div>

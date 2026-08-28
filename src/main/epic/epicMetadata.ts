@@ -8,7 +8,7 @@ import type { EpicApiClient, EpicCatalogItem } from './epicApi'
 const POSITIVE_TTL_MS = 30 * 24 * 60 * 60 * 1000
 const NEGATIVE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 const REQUEST_GAP_MS = 250
-const METADATA_SCHEMA_VERSION = 1
+const METADATA_SCHEMA_VERSION = 2
 
 export interface EpicMetadataSyncTarget {
   providerGameId: string
@@ -147,11 +147,8 @@ function classifyCatalogItem(item: EpicCatalogItem): 'game' | 'skip' {
     return 'skip'
   }
 
-  // Keep third-party launcher entries out of the Epic library by default, as
-  // Playnite does unless EA/Ubisoft imports are explicitly enabled.
-  const thirdParty = attribute(item, 'ThirdPartyManagedApp')?.toLowerCase()
-  if (thirdParty === 'the ea app') return 'skip'
-  if (attribute(item, 'partnerLinkType')?.toLowerCase() === 'ubisoft') return 'skip'
+  // Third-party-managed entitlements remain valid Epic library entries. The
+  // Epic launcher owns the hand-off to EA/Ubisoft when ORBIT launches them.
   return 'game'
 }
 
@@ -262,7 +259,7 @@ export class EpicMetadataService extends EventEmitter {
     for (const target of uniqueTargets.values()) {
       const key = cacheKey(target.providerGameId, locale)
       const cached = cacheEntries[key]
-      if (cached) {
+      if (cached?.metadataSchemaVersion === METADATA_SCHEMA_VERSION) {
         this.emitUpdate(cached)
         if (isFresh(cached, target)) {
           this.markSyncComplete(key)

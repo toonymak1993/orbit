@@ -27,10 +27,13 @@ SetCompressorDictSize 32
 !endif
 
 !include "MUI2.nsh"
+!include "FileFunc.nsh"
 !include "LogicLib.nsh"
 !include "x64.nsh"
 
 Var OrbitPowerShell
+Var OrbitParameters
+Var OrbitUpdateMode
 
 Name "${ORBIT_SETUP_NAME}"
 Caption "${ORBIT_SETUP_NAME} Setup"
@@ -39,6 +42,16 @@ InstallDir "$LOCALAPPDATA\Programs\ORBIT Xbox Mode"
 BrandingText "ORBIT ${DISPLAY_VERSION} - Gaming Home"
 ShowInstDetails show
 AutoCloseWindow false
+
+Function .onInit
+  StrCpy $OrbitUpdateMode "0"
+  ${GetParameters} $OrbitParameters
+  ${GetOptions} $OrbitParameters "/ORBIT-UPDATE=" $0
+  ${If} $0 == "1"
+    StrCpy $OrbitUpdateMode "1"
+    SetSilent silent
+  ${EndIf}
+FunctionEnd
 
 VIProductVersion "${FILE_VERSION}"
 VIAddVersionKey /LANG=1033 "ProductName" "ORBIT Xbox Mode"
@@ -62,7 +75,6 @@ VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright 2026 Luis Garcia"
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
 
-!insertmacro MUI_LANGUAGE "German"
 !insertmacro MUI_LANGUAGE "English"
 
 Section "Install ORBIT Xbox Mode" SEC_MAIN
@@ -72,7 +84,11 @@ Section "Install ORBIT Xbox Mode" SEC_MAIN
   File /oname=ORBIT-Development.cer "${CERT_PATH}"
   File /oname=Install-OrbitXboxMode.ps1 "${INSTALL_SCRIPT_PATH}"
 
-  DetailPrint "Installing the ORBIT Gaming Home package..."
+  ${If} $OrbitUpdateMode == "1"
+    DetailPrint "Updating the ORBIT Gaming Home package..."
+  ${Else}
+    DetailPrint "Installing the ORBIT Gaming Home package..."
+  ${EndIf}
   StrCpy $OrbitPowerShell "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"
   ${If} ${RunningX64}
     ; NSIS is a 32-bit process. Sysnative bypasses file-system redirection and
@@ -80,10 +96,16 @@ Section "Install ORBIT Xbox Mode" SEC_MAIN
     StrCpy $OrbitPowerShell "$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
   ${EndIf}
   DetailPrint "Using 64-bit PowerShell: $OrbitPowerShell"
-  nsExec::ExecToLog '"$OrbitPowerShell" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\Install-OrbitXboxMode.ps1" -PackagePath "$PLUGINSDIR\ORBIT.appx" -CertificatePath "$PLUGINSDIR\ORBIT-Development.cer" -OpenSettings'
+  ${If} $OrbitUpdateMode == "1"
+    nsExec::ExecToLog '"$OrbitPowerShell" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\Install-OrbitXboxMode.ps1" -PackagePath "$PLUGINSDIR\ORBIT.appx" -CertificatePath "$PLUGINSDIR\ORBIT-Development.cer" -UpdateOnly -Launch'
+  ${Else}
+    nsExec::ExecToLog '"$OrbitPowerShell" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\Install-OrbitXboxMode.ps1" -PackagePath "$PLUGINSDIR\ORBIT.appx" -CertificatePath "$PLUGINSDIR\ORBIT-Development.cer" -OpenSettings'
+  ${EndIf}
   Pop $0
   ${If} $0 != 0
-    MessageBox MB_ICONSTOP|MB_OK "ORBIT Xbox Mode setup failed with exit code $0. See the installation log for details."
+    ${If} $OrbitUpdateMode != "1"
+      MessageBox MB_ICONSTOP|MB_OK "ORBIT Xbox Mode setup failed with exit code $0. See the installation log for details."
+    ${EndIf}
     SetErrorLevel $0
     Abort
   ${EndIf}

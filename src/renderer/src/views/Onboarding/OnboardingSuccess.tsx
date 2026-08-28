@@ -5,6 +5,7 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleAlert,
+  ExternalLink,
   Globe2,
   Gamepad2,
   ImageIcon,
@@ -67,6 +68,7 @@ interface Props {
 }
 
 const PAGE_ORDER: SetupPage[] = ['libraries', 'personalize', 'hardware', 'ready']
+const ORBIT_DISCORD_INVITE_URL = 'https://discord.gg/QdsbSwgxB6'
 
 const THEME_SWATCH: Record<ThemeId, string> = {
   midnight: 'from-[#3fd0ff] to-[#8b5cf6]',
@@ -147,6 +149,8 @@ function focusOnboardingPage(container: HTMLElement | null, page: SetupPage): vo
   const pageRoot = container?.querySelector<HTMLElement>(
     `[data-onboarding-page-content="${page}"]`
   )
+  const scrollRoot = pageRoot?.closest<HTMLElement>('main')
+  if (scrollRoot) scrollRoot.scrollTop = 0
   const first =
     pageRoot?.querySelector<HTMLElement>(
       '[data-onboarding-primary]:not([data-disabled="true"])'
@@ -1259,6 +1263,19 @@ function ReadyPage({
   failed: boolean
 }): JSX.Element {
   const t = useT()
+  const [communityStatus, setCommunityStatus] = useState<'idle' | 'opening' | 'error'>('idle')
+
+  async function joinCommunity(): Promise<void> {
+    if (communityStatus === 'opening') return
+    setCommunityStatus('opening')
+    try {
+      await window.api.app.openExternal(ORBIT_DISCORD_INVITE_URL)
+      setCommunityStatus('idle')
+    } catch {
+      setCommunityStatus('error')
+    }
+  }
+
   return (
     <div className="mx-auto flex max-w-5xl flex-col items-center text-center">
       <motion.div
@@ -1299,6 +1316,46 @@ function ReadyPage({
         <LargeMetric icon={<Trophy size={18} />} value={playtime} label={t('onboarding.setup.hoursPlayed')} />
       </div>
 
+      <section className="onboarding-community mt-5 w-full overflow-hidden text-left">
+        <span className="onboarding-community__signal" aria-hidden="true" />
+        <div className="relative flex flex-col gap-5 p-5 sm:flex-row sm:items-center">
+          <span className="onboarding-community__mark shrink-0" aria-hidden="true">
+            <DiscordMark size={32} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#aab1ff]">
+              {t('onboarding.community.eyebrow')}
+            </div>
+            <h2 className="mt-1 text-xl font-bold tracking-tight text-white">
+              {t('onboarding.community.title')}
+            </h2>
+            <p className="mt-1 max-w-2xl text-sm leading-relaxed text-white/52">
+              {t('onboarding.community.body')}
+            </p>
+          </div>
+          <div className="shrink-0 sm:text-right">
+            <FocusableButton
+              variant="ghost"
+              onClick={() => void joinCommunity()}
+              className="onboarding-community-action inline-flex min-w-48 items-center justify-center gap-2.5 px-6"
+            >
+              {communityStatus === 'opening' ? (
+                <Loader2 size={17} className="animate-spin" />
+              ) : (
+                <DiscordMark size={18} />
+              )}
+              {t('onboarding.community.cta')}
+              <ExternalLink size={14} className="opacity-70" />
+            </FocusableButton>
+            {communityStatus === 'error' && (
+              <p role="status" className="mt-2 text-xs text-red-300">
+                {t('onboarding.community.openFailed')}
+              </p>
+            )}
+          </div>
+        </div>
+      </section>
+
       <section className="onboarding-panel mt-5 w-full border border-white/[0.08] bg-black/55 p-5 text-left shadow-card">
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
           <PipelineRow progress={syncStatus.library} required />
@@ -1313,9 +1370,24 @@ function ReadyPage({
           {canFinish
             ? t('onboarding.setup.backgroundContinues')
             : t('onboarding.setup.requiredHint')}
-        </p>
+          </p>
       </section>
     </div>
+  )
+}
+
+function DiscordMark({ size }: { size: number }): JSX.Element {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      focusable="false"
+      aria-hidden="true"
+    >
+      <path d="M19.54 5.34A16.3 16.3 0 0 0 15.44 4l-.5 1.02a15.2 15.2 0 0 0-5.87 0L8.56 4a16.4 16.4 0 0 0-4.1 1.35C1.87 9.2 1.17 12.96 1.52 16.67a16.5 16.5 0 0 0 5.03 2.54l1.24-1.7a12.4 12.4 0 0 1-1.94-.96l.48-.37c3.74 1.74 7.8 1.74 11.5 0l.49.37c-.62.4-1.27.72-1.95.97l1.24 1.7a16.5 16.5 0 0 0 5.03-2.54c.41-4.3-.7-8.03-3.1-11.33ZM8.5 14.5c-1.12 0-2.04-1.03-2.04-2.3 0-1.27.9-2.3 2.04-2.3 1.15 0 2.06 1.04 2.04 2.3 0 1.27-.9 2.3-2.04 2.3Zm7 0c-1.12 0-2.04-1.03-2.04-2.3 0-1.27.9-2.3 2.04-2.3 1.15 0 2.06 1.04 2.04 2.3 0 1.27-.89 2.3-2.04 2.3Z" />
+    </svg>
   )
 }
 

@@ -217,7 +217,10 @@ export class StoreRepository {
     scheduleDatabasePersist()
   }
 
-  pruneUnverifiedProducts(region: StoreRegionId): number {
+  pruneUnverifiedProducts(
+    region: StoreRegionId,
+    preservedProductIds: ReadonlySet<string> = new Set()
+  ): number {
     const cache = ensureRegion(region)
     const steamWishlist = databaseState.steamWishlist
     const orbitWishlist = new Set(databaseState.orbitWishlistIds)
@@ -225,6 +228,7 @@ export class StoreRepository {
       Object.entries(cache.products).filter(
         ([id, product]) =>
           Boolean(product.detailsUpdatedAt) ||
+          preservedProductIds.has(id) ||
           Object.hasOwn(steamWishlist, id) ||
           orbitWishlist.has(id)
       )
@@ -276,7 +280,8 @@ export class StoreRepository {
     region: StoreRegionId,
     isRefreshing: boolean,
     changedSinceLastRefresh: number,
-    releaseCalendarError = false
+    releaseCalendarError = false,
+    catalogError = false
   ): StoreSnapshot {
     const cache = ensureRegion(region)
     const orbitWishlist = new Set(databaseState.orbitWishlistIds)
@@ -289,6 +294,7 @@ export class StoreRepository {
       releaseCalendarMonth: cache.releaseCalendarMonth,
       releaseCalendarUpdatedAt: cache.releaseCalendarUpdatedAt,
       releaseCalendarError,
+      catalogError,
       region,
       updatedAt: cache.updatedAt,
       lastSuccessfulRefreshAt: cache.lastSuccessfulRefreshAt,

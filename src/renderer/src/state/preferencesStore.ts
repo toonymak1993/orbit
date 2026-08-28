@@ -1,17 +1,19 @@
 import { create } from 'zustand'
-import type {
-  AudioPreset,
-  BackdropIntensity,
-  GameCardSize,
-  HomeLayoutId,
-  HardwareControlButton,
-  HardwareControlHoldSeconds,
-  NotificationMotion,
-  NotificationPosition,
-  ProfileAvatarId,
-  ThemeId,
-  UiDensity,
-  Language
+import {
+  LIBRARY_GRID_COLUMN_OPTIONS,
+  type AudioPreset,
+  type BackdropIntensity,
+  type GameCardSize,
+  type HomeLayoutId,
+  type HardwareControlButton,
+  type HardwareControlHoldSeconds,
+  type LibraryGridColumns,
+  type NotificationMotion,
+  type NotificationPosition,
+  type ProfileAvatarId,
+  type ThemeId,
+  type UiDensity,
+  type Language
 } from '@shared/ipc'
 import { setUiAudioPreset } from '@renderer/lib/uiAudio'
 
@@ -21,6 +23,7 @@ interface PreferencesState {
   customAvatarUrl?: string
   homeLayout: HomeLayoutId
   gameCardSize: GameCardSize
+  libraryGridColumns: LibraryGridColumns
   backdropIntensity: BackdropIntensity
   homeCardBubbleEffect: boolean
   uiDensity: UiDensity
@@ -43,6 +46,7 @@ interface PreferencesState {
   selectCustomAvatar: () => Promise<boolean>
   setHomeLayout: (homeLayout: HomeLayoutId) => Promise<void>
   setGameCardSize: (gameCardSize: GameCardSize) => Promise<void>
+  setLibraryGridColumns: (libraryGridColumns: LibraryGridColumns) => Promise<void>
   setBackdropIntensity: (backdropIntensity: BackdropIntensity) => Promise<void>
   setHomeCardBubbleEffect: (enabled: boolean) => Promise<void>
   setDensity: (density: UiDensity) => Promise<void>
@@ -83,6 +87,7 @@ export const HOME_LAYOUT_OPTIONS: { id: HomeLayoutId; label: string }[] = [
 ]
 
 export const GAME_CARD_SIZE_OPTIONS: GameCardSize[] = ['compact', 'standard', 'large']
+export { LIBRARY_GRID_COLUMN_OPTIONS }
 
 export const BACKDROP_INTENSITY_OPTIONS: BackdropIntensity[] = [
   'subtle',
@@ -119,6 +124,7 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
   customAvatarUrl: undefined,
   homeLayout: 'orbit',
   gameCardSize: 'standard',
+  libraryGridColumns: 6,
   backdropIntensity: 'balanced',
   homeCardBubbleEffect: true,
   uiDensity: 'standard',
@@ -143,6 +149,9 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
     ])
     const homeLayout = settings.homeLayout ?? 'orbit'
     const gameCardSize = settings.gameCardSize ?? 'standard'
+    const libraryGridColumns = LIBRARY_GRID_COLUMN_OPTIONS.includes(settings.libraryGridColumns)
+      ? settings.libraryGridColumns
+      : 6
     const backdropIntensity = settings.backdropIntensity ?? 'balanced'
     const homeCardBubbleEffect = settings.homeCardBubbleEffect ?? true
     document.documentElement.lang = settings.language
@@ -164,6 +173,7 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
       customAvatarUrl: customAvatarUrl ?? undefined,
       homeLayout,
       gameCardSize,
+      libraryGridColumns,
       backdropIntensity,
       homeCardBubbleEffect,
       uiDensity: settings.uiDensity,
@@ -232,6 +242,11 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
     )
     set({ gameCardSize })
     await window.api.settings.set({ gameCardSize })
+  },
+
+  setLibraryGridColumns: async (libraryGridColumns) => {
+    set({ libraryGridColumns })
+    await window.api.settings.set({ libraryGridColumns })
   },
 
   setBackdropIntensity: async (backdropIntensity) => {

@@ -11,6 +11,11 @@ import type {
 } from '@shared/ipc'
 import { latestLibraryActivity, normalizeLibraryTimestamp } from '@shared/libraryTime'
 import { summarizeLibraryActivity } from '@shared/libraryActivity'
+import {
+  isUsableLibraryName,
+  projectVisibleLibraryRecords,
+  shouldPruneProviderRecord
+} from '@shared/libraryProjection'
 import type { LocalGameRecordInput } from '../customLibrary'
 import {
   playtimeSecondsFrom,
@@ -21,7 +26,6 @@ import {
 const DATABASE_VERSION = 7
 const DEFAULT_PROFILE_ID = 'orbit-default'
 const STEAM_PROVIDER = 'steam' as const
-const LEGACY_APP_NAME = /^App\s+\d+$/i
 const SESSION_RETENTION_MS = 366 * 24 * 60 * 60 * 1_000
 const MAX_STORED_SESSIONS = 1_000
 const MAX_SESSION_SECONDS = 30 * 24 * 60 * 60
@@ -39,6 +43,8 @@ const KNOWN_PROVIDERS = new Set<GameProvider>([
 
 interface StoredGame extends LibraryGame {
   owned: boolean
+  /** Provider-defined ownership partition used for safe, source-scoped pruning. */
+  ownershipSource?: string
   lastSeenOnlineAt?: number
   lastSeenInstalledAt?: number
   /** Last authoritative total reported by Steam/Epic. Kept out of renderer snapshots. */
@@ -204,7 +210,7 @@ function validProviderGameId(value: unknown): value is string {
 }
 
 function hasUsableName(name: unknown): name is string {
-  return typeof name === 'string' && name.trim().length > 0 && !LEGACY_APP_NAME.test(name.trim())
+  return isUsableLibraryName(name)
 }
 
 function validLocalLaunchArguments(value: unknown): value is string[] {
@@ -283,29 +289,6 @@ function metadataEquals(left: GameMetadata, right: GameMetadata): boolean {
   return JSON.stringify(left) === JSON.stringify(right)
 }
 
-function canonicalName(name: string): string {
-  return name
-    .normalize('NFKC')
-    .replace(/[\u00ae\u2122\u00a9]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLocaleLowerCase('en')
-}
-
-function preferDisplayGame(current: StoredGame, candidate: StoredGame): StoredGame {
-  if (candidate.installed !== current.installed) return candidate.installed ? candidate : current
-  if (candidate.updateAvailable !== current.updateAvailable) {
-    return candidate.updateAvailable ? candidate : current
-  }
-  const candidatePlayed = latestLibraryActivity(candidate)
-  const currentPlayed = latestLibraryActivity(current)
-  if (candidatePlayed !== currentPlayed) return candidatePlayed > currentPlayed ? candidate : current
-  const candidatePlaytime = candidate.playtimeMinutes ?? 0
-  const currentPlaytime = current.playtimeMinutes ?? 0
-  if (candidatePlaytime !== currentPlaytime) return candidatePlaytime > currentPlaytime ? candidate : current
-  return candidate.id.localeCompare(current.id) < 0 ? candidate : current
-}
-
 function emptyAccount(): AccountLibrary {
   return { games: {}, recentGameIds: [], steamRecentGameIds: [], sessions: [], loadedAt: 0 }
 }
@@ -313,8 +296,8 @@ function emptyAccount(): AccountLibrary {
 /**
  * Persistent, provider-neutral repository. Identity follows Playnite's rule:
  * library plugin/provider + provider game ID. Every import is an idempotent
- * upsert, while the public snapshot collapses same-title cross-store copies to
- * the best installed/recent record.
+ * upsert. Public snapshots preserve every durable provider identity; matching
+ * titles are not proof that two licenses or editions are the same record.
  */
 export class GameRepository {
   private profileOpen = false
@@ -351,39 +334,24 @@ export class GameRepository {
 
   getSnapshot(): LibrarySnapshot {
     this.ensureOpen()
-    const visibleRecords = Object.values(this.account.games).filter(
-      (game) => hasUsableName(game.name) && (game.owned || game.installed)
-    )
-    const canonicalRecords = new Map<string, StoredGame>()
-    const canonicalIdByStoredId = new Map<string, string>()
-    for (const game of visibleRecords) {
-      const nameKey = canonicalName(game.name)
-      const current = canonicalRecords.get(nameKey)
-      canonicalRecords.set(nameKey, current ? preferDisplayGame(current, game) : game)
-    }
-    for (const game of visibleRecords) {
-      const canonical = canonicalRecords.get(canonicalName(game.name)) as StoredGame
-      canonicalIdByStoredId.set(game.id, canonical.id)
-    }
+    const visibleRecords = projectVisibleLibraryRecords(Object.values(this.account.games))
 
     const toPublicGame = ({
       owned: _owned,
+      ownershipSource: _ownershipSource,
       lastSeenOnlineAt: _online,
       lastSeenInstalledAt: _local,
       providerPlaytimeSeconds: _providerPlaytime,
       pendingPlaytimeSeconds: _pendingPlaytime,
       ...game
     }: StoredGame): LibraryGame => game
-    const games = [...canonicalRecords.values()].map(toPublicGame)
+    const games = visibleRecords.map(toPublicGame)
     const providerGames = visibleRecords.map(toPublicGame)
     const visibleIds = new Set(games.map((game) => game.id))
-    const recentGameIds = [
-      ...new Set(this.account.recentGameIds.map((id) => canonicalIdByStoredId.get(id) ?? id))
-    ].filter((id) => visibleIds.has(id))
-    const sessions = this.account.sessions.map((session) => ({
-      ...session,
-      gameId: canonicalIdByStoredId.get(session.gameId) ?? session.gameId
-    }))
+    const recentGameIds = [...new Set(this.account.recentGameIds)].filter((id) =>
+      visibleIds.has(id)
+    )
+    const sessions = this.account.sessions.map((session) => ({ ...session }))
     const installedIds = new Set(games.filter((game) => game.installed).map((game) => game.id))
     const activity = summarizeLibraryActivity(sessions)
     const sessionContinue = sessions
@@ -423,13 +391,32 @@ export class GameRepository {
     provider: GameProvider,
     installedGames: Iterable<ProviderInstalledDelta>
   ): void {
+    this.applyInstalledProviderGames(provider, installedGames, true)
+  }
+
+  /** Adds or updates confirmed installs without invalidating the provider's
+   * other games. Used by event-driven, package-scoped launcher refreshes. */
+  applyInstalledProviderPatch(
+    provider: GameProvider,
+    installedGames: Iterable<ProviderInstalledDelta>
+  ): void {
+    this.applyInstalledProviderGames(provider, installedGames, false)
+  }
+
+  private applyInstalledProviderGames(
+    provider: GameProvider,
+    installedGames: Iterable<ProviderInstalledDelta>,
+    resetMissing: boolean
+  ): void {
     this.ensureOpen()
     const now = Date.now()
-    for (const game of Object.values(this.account.games)) {
-      if (game.provider === provider) {
-        game.installed = false
-        game.installDir = undefined
-        game.updateAvailable = false
+    if (resetMissing) {
+      for (const game of Object.values(this.account.games)) {
+        if (game.provider === provider) {
+          game.installed = false
+          game.installDir = undefined
+          game.updateAvailable = false
+        }
       }
     }
 
@@ -528,6 +515,27 @@ export class GameRepository {
     this.applyProviderOwnedDelta(provider, ownedGames, true)
   }
 
+  /** Prunes only records previously proven to belong to the same provider
+   * source. This prevents a subscription catalog from deleting purchases or
+   * records discovered through another account surface. */
+  applyAuthoritativeProviderSourceDelta(
+    provider: GameProvider,
+    ownershipSource: string,
+    ownedGames: Iterable<ProviderOwnedDelta>
+  ): void {
+    this.applyProviderOwnedDelta(provider, ownedGames, true, ownershipSource)
+  }
+
+  /** Updates one provider-owned partition without deleting records when that
+   * source reported an incomplete snapshot. */
+  applyNonAuthoritativeProviderSourceDelta(
+    provider: GameProvider,
+    ownershipSource: string,
+    ownedGames: Iterable<ProviderOwnedDelta>
+  ): void {
+    this.applyProviderOwnedDelta(provider, ownedGames, false, ownershipSource)
+  }
+
   /** A partial provider response may add/update records but never remove cached ones. */
   applyNonAuthoritativeProviderDelta(
     provider: GameProvider,
@@ -539,7 +547,8 @@ export class GameRepository {
   private applyProviderOwnedDelta(
     provider: GameProvider,
     ownedGames: Iterable<ProviderOwnedDelta>,
-    pruneMissing: boolean
+    pruneMissing: boolean,
+    ownershipSource?: string
   ): void {
     this.ensureOpen()
     const now = Date.now()
@@ -568,6 +577,7 @@ export class GameRepository {
         metadataUpdatedAt: metadataChanged ? now : existing?.metadataUpdatedAt,
         installed: existing?.installed ?? false,
         owned: true,
+        ownershipSource: ownershipSource ?? existing?.ownershipSource,
         ...playtime,
         lastPlayedTimestamp:
           Math.max(
@@ -582,7 +592,7 @@ export class GameRepository {
 
     if (pruneMissing) {
       for (const [id, game] of Object.entries(this.account.games)) {
-        if (game.provider !== provider || seen.has(id)) continue
+        if (!shouldPruneProviderRecord(game, provider, seen, ownershipSource)) continue
         game.owned = false
         if (!game.installed) delete this.account.games[id]
       }
@@ -954,6 +964,7 @@ export class GameRepository {
     if (!game) return undefined
     const {
       owned: _owned,
+      ownershipSource: _ownershipSource,
       lastSeenOnlineAt: _online,
       lastSeenInstalledAt: _local,
       providerPlaytimeSeconds: _providerPlaytime,
@@ -1048,6 +1059,10 @@ export class GameRepository {
         updateAvailable: Boolean(candidate.installed && candidate.updateAvailable),
         local: provider === 'local' ? sanitizeLocalConfig(candidate.local) : undefined,
         owned: Boolean(candidate.owned),
+        ownershipSource:
+          typeof candidate.ownershipSource === 'string' && candidate.ownershipSource.trim()
+            ? candidate.ownershipSource.trim()
+            : undefined,
         addedAt: candidate.addedAt || now,
         updatedAt: candidate.updatedAt || now
       }

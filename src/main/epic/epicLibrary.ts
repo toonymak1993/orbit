@@ -4,6 +4,10 @@ import type {
   LibraryProviderStatus,
   LibrarySnapshot
 } from '@shared/ipc'
+import {
+  epicEntitlementFallbackName,
+  shouldRemoveEpicEntitlement
+} from '@shared/libraryProjection'
 import type { LibraryProviderAdapter } from '../library/libraryProvider'
 import { gameRepository } from '../library/gameRepository'
 import { artworkService } from '../imageCache'
@@ -43,6 +47,13 @@ function deduplicateAssets(assets: EpicLibraryAsset[]): Map<string, EpicLibraryA
   return unique
 }
 
+function assetDisplayName(asset: EpicLibraryAsset): string {
+  // Epic's labelName is commonly a deployment channel such as "Live", not a
+  // product title. appName is technical but stable and uniquely identifies the
+  // entitlement until catalog metadata supplies the display title.
+  return epicEntitlementFallbackName(asset.appName)
+}
+
 /** Epic adapter following Playnite's local-manifest + account-catalog model. */
 export class EpicLibraryService
   extends EventEmitter
@@ -51,6 +62,7 @@ export class EpicLibraryService
   readonly provider = 'epic' as const
   private refreshInFlight: Promise<LibrarySnapshot> | null = null
   private pendingMetadataIds = new Set<string>()
+  private unresolvedMetadataIds = new Set<string>()
   private providerStatus: LibraryProviderStatus = {
     provider: 'epic',
     state: 'idle',
@@ -69,8 +81,16 @@ export class EpicLibraryService
     })
     epicMetadataService.on('updated', ({ metadata }: MetadataUpdate) => {
       this.pendingMetadataIds.delete(metadata.providerGameId)
-      if (metadata.kind !== 'game') {
+      if (shouldRemoveEpicEntitlement(metadata.kind)) {
+        this.unresolvedMetadataIds.delete(metadata.providerGameId)
         if (gameRepository.removeProviderGame('epic', metadata.providerGameId)) this.emitSnapshot()
+        this.finishMetadataStatus()
+        return
+      }
+      if (metadata.kind === 'missing') {
+        // A missing catalog response is not evidence that the entitlement is
+        // invalid. Keep the asset with its library-service fallback identity.
+        this.unresolvedMetadataIds.add(metadata.providerGameId)
         this.finishMetadataStatus()
         return
       }
@@ -86,6 +106,7 @@ export class EpicLibraryService
         },
         true
       )
+      this.unresolvedMetadataIds.delete(metadata.providerGameId)
       if (changed) {
         const game = gameRepository
           .getGamesByProvider('epic')
@@ -98,7 +119,9 @@ export class EpicLibraryService
     epicMetadataService.on('idle', () => {
       gameRepository.setMetadataLoading('epic', false)
       if (this.providerStatus.issue === 'metadata-pending') {
-        const unresolved = this.pendingMetadataIds.size
+        for (const id of this.pendingMetadataIds) this.unresolvedMetadataIds.add(id)
+        this.pendingMetadataIds.clear()
+        const unresolved = this.unresolvedMetadataIds.size
         this.setProviderStatus({
           state: unresolved > 0 ? 'partial' : 'ready',
           connection: 'connected',
@@ -160,6 +183,7 @@ export class EpicLibraryService
     const account = auth.getAccount() ?? (await auth.restoreSession())
     syncCoordinator.begin('library', account ? 3 : 1, 0, 'epic-local', 'epic')
     this.pendingMetadataIds.clear()
+    this.unresolvedMetadataIds.clear()
     this.setProviderStatus({
       state: 'scanning',
       connection: account ? 'connected' : 'not-connected',
@@ -196,6 +220,11 @@ export class EpicLibraryService
           .catch(() => ({ available: false as const, items: [] }))
       ])
       const assets = deduplicateAssets(assetList)
+      const existingNames = new Map(
+        gameRepository
+          .getGamesByProvider('epic')
+          .map((game) => [game.providerGameId, game.name] as const)
+      )
       const playtimeByApp = new Map(
         playtimeResult.items
           .filter((item) => item.artifactId)
@@ -207,6 +236,7 @@ export class EpicLibraryService
         'epic',
         [...assets.values()].map((asset) => ({
           providerGameId: asset.appName!.trim(),
+          name: existingNames.get(asset.appName!.trim()) || assetDisplayName(asset),
           playtimeSeconds: playtimeResult.available
             ? Math.max(0, Math.round(playtimeByApp.get(asset.appName!.trim()) ?? 0))
             : undefined
@@ -221,17 +251,18 @@ export class EpicLibraryService
           catalogItemId: asset.catalogItemId!.trim(),
           buildVersion: asset.buildVersion?.trim() || undefined
         }))
-      this.pendingMetadataIds = new Set(assets.keys())
+      const targetIds = new Set(targets.map((target) => target.providerGameId))
+      this.pendingMetadataIds = new Set(targetIds)
+      this.unresolvedMetadataIds = new Set(
+        [...assets.keys()].filter((id) => !targetIds.has(id))
+      )
       const locale = EPIC_LOCALE[settingsStore.get('language')] ?? 'en-US'
       const country = locale === 'de-DE' ? 'DE' : 'US'
       epicMetadataService.syncLibrary(targets, locale, country, client)
       syncCoordinator.progress('library', 3, 3, 'epic', 'epic')
       syncCoordinator.complete('library', 'epic', 'epic')
-      const pendingCount = this.pendingMetadataIds.size
-      const targetIds = new Set(targets.map((target) => target.providerGameId))
-      const pendingTargetCount = [...this.pendingMetadataIds].filter((id) =>
-        targetIds.has(id)
-      ).length
+      const pendingTargetCount = this.pendingMetadataIds.size
+      const pendingCount = pendingTargetCount + this.unresolvedMetadataIds.size
       this.setProviderStatus({
         state: pendingTargetCount > 0 ? 'scanning' : pendingCount > 0 ? 'partial' : 'ready',
         connection: 'connected',
@@ -253,6 +284,7 @@ export class EpicLibraryService
       epicMetadataService.syncLibrary([], EPIC_LOCALE[settingsStore.get('language')] ?? 'en-US', 'US', client)
       syncCoordinator.fail('library', 'epic-cache', 'epic')
       this.pendingMetadataIds.clear()
+      this.unresolvedMetadataIds.clear()
       const counts = gameRepository.getProviderCounts('epic')
       const methods: LibraryDetectionMethod[] = ['local-manifests']
       if (counts.installableCount > 0) methods.push('cached-data')
@@ -282,9 +314,11 @@ export class EpicLibraryService
       return
     }
     this.setProviderStatus({
-      state: 'ready',
+      state: this.unresolvedMetadataIds.size > 0 ? 'partial' : 'ready',
       connection: 'connected',
       methods: ['local-manifests', 'epic-catalog'],
+      pendingCount: this.unresolvedMetadataIds.size || undefined,
+      issue: this.unresolvedMetadataIds.size > 0 ? 'source-unavailable' : undefined,
       lastCheckedAt: this.providerStatus.lastCheckedAt ?? Date.now()
     })
   }

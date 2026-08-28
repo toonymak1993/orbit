@@ -170,6 +170,7 @@ export function scanInstalledEpicApps(programDataRoot?: string): Map<string, Ins
       installDir: normalize(installDir),
       metadata: {
         platforms: ['windows'],
+        launchExecutable: manifest.LaunchExecutable?.trim() || undefined,
         artwork: thumbnail
           ? { vertical: [thumbnail], horizontal: [thumbnail] }
           : undefined

@@ -7,12 +7,13 @@ import type {
   LibraryProviderStatus,
   LibrarySnapshot
 } from '@shared/ipc'
+import { canPruneSteamOwnedRecords, decideSteamSyncHealth } from '@shared/steamSyncPolicy'
 import type { SteamAuthManager } from './steamAuth'
 import { settingsStore } from '../settingsStore'
 import { gameRepository } from '../library/gameRepository'
 import {
   getSteamAppsDirectories,
-  scanInstalledSteamApps,
+  scanInstalledSteamAppsSnapshot,
   scanSteamLocalActivity,
   type InstalledSteamApp
 } from './steamInstall'
@@ -38,6 +39,28 @@ import { completionTimesService } from '../completionTimes'
 const STEAM_API_LANGUAGE: Record<string, string> = { en: 'english', de: 'german' }
 const LOCAL_MANIFEST_SETTLE_MS = 900
 
+type SteamSyncSource =
+  | 'store-token'
+  | 'owned-games'
+  | 'client-app-list'
+  | 'community'
+  | 'dynamic-store'
+
+function steamSourceFailureKind(error: unknown): string {
+  const message = error instanceof Error ? error.message.toLocaleLowerCase('en') : ''
+  if (/abort|timeout/.test(message)) return 'timeout'
+  if (/session|login|token|another account/.test(message)) return 'session'
+  if (/\(\d{3}\)/.test(message)) return 'http'
+  if (/returned|response|payload|parse|json|not present/.test(message)) return 'invalid-response'
+  if (error instanceof TypeError) return 'network'
+  return 'unknown'
+}
+
+/** Deliberately excludes raw errors, URLs, tokens, account IDs and game data. */
+function reportSteamSourceFailure(source: SteamSyncSource, error: unknown): void {
+  console.warn(`[steam-sync] ${source} unavailable (${steamSourceFailureKind(error)})`)
+}
+
 interface MetadataUpdate {
   metadata: SteamAppMetadata
   allowCreate: boolean
@@ -58,12 +81,12 @@ function localInstallFingerprint(installed: Iterable<InstalledSteamApp>): string
 export class SteamLibraryService extends EventEmitter implements LibraryProviderAdapter<SteamAuthManager> {
   readonly provider = 'steam' as const
   private refreshInFlight: Promise<LibrarySnapshot> | null = null
-  private discoverableFallbackIds = new Set<number>()
+  private pendingMetadataIds = new Set<number>()
   private localManifestWatchers: FSWatcher[] = []
   private localManifestTimer: ReturnType<typeof setTimeout> | undefined
   private localInstallState = ''
   private watchedSteamId?: string
-  private pendingMetadataCanCompleteLibrary = false
+  private synchronizedSourcesComplete = false
   private providerStatus: LibraryProviderStatus = {
     provider: 'steam',
     state: 'idle',
@@ -81,20 +104,19 @@ export class SteamLibraryService extends EventEmitter implements LibraryProvider
       this.emitSnapshot()
     })
     steamMetadataService.on('updated', ({ metadata, allowCreate }: MetadataUpdate) => {
-      const wasPendingFallback =
-        allowCreate && this.discoverableFallbackIds.has(metadata.appId)
+      const wasPending = this.pendingMetadataIds.has(metadata.appId)
       if (metadata.type !== 'game') {
-        if (wasPendingFallback) this.resolveFallbackMetadata(metadata.appId)
+        if (wasPending) this.resolvePendingMetadata(metadata.appId)
         return
       }
       const changed = gameRepository.applyMetadataDelta(
         metadata,
-        Boolean(wasPendingFallback)
+        Boolean(allowCreate && wasPending)
       )
       const game = gameRepository
         .getGamesByProvider('steam')
         .find((candidate) => candidate.id === `steam:${metadata.appId}`)
-      if (wasPendingFallback && game) this.resolveFallbackMetadata(metadata.appId)
+      if (wasPending && game) this.resolvePendingMetadata(metadata.appId)
       if (!changed) return
       if (game) artworkService.syncProvider([game], 'steam')
       this.emitSnapshot()
@@ -103,13 +125,13 @@ export class SteamLibraryService extends EventEmitter implements LibraryProvider
       gameRepository.setMetadataLoading('steam', false)
       if (
         this.providerStatus.issue === 'metadata-pending' &&
-        this.discoverableFallbackIds.size > 0
+        this.pendingMetadataIds.size > 0
       ) {
         this.setProviderStatus({
           state: 'partial',
           connection: 'connected',
           methods: this.providerStatus.methods,
-          pendingCount: this.discoverableFallbackIds.size,
+          pendingCount: this.pendingMetadataIds.size,
           issue: 'source-unavailable',
           lastCheckedAt: this.providerStatus.lastCheckedAt ?? Date.now()
         })
@@ -216,8 +238,8 @@ export class SteamLibraryService extends EventEmitter implements LibraryProvider
     syncCoordinator.begin('library', account ? 3 : 1, 0, 'steam-local', 'steam')
 
     gameRepository.openProfile(account?.steamId)
-    this.discoverableFallbackIds.clear()
-    this.pendingMetadataCanCompleteLibrary = false
+    this.pendingMetadataIds.clear()
+    this.synchronizedSourcesComplete = false
     this.setProviderStatus({
       state: 'scanning',
       connection: account ? 'connected' : 'not-connected',
@@ -225,7 +247,8 @@ export class SteamLibraryService extends EventEmitter implements LibraryProvider
     })
 
     // Local state is fast, private and authoritative for installation status.
-    const installed = scanInstalledSteamApps(account?.steamId)
+    const installedSnapshot = scanInstalledSteamAppsSnapshot(account?.steamId)
+    const installed = installedSnapshot.games
     const localActivity = [...scanSteamLocalActivity(account?.steamId)].map(
       ([appId, activity]) => ({
         providerGameId: String(appId),
@@ -235,7 +258,22 @@ export class SteamLibraryService extends EventEmitter implements LibraryProvider
     )
     this.localInstallState = localInstallFingerprint(installed.values())
     this.startLocalInstallMonitor(account?.steamId)
-    gameRepository.applyInstalledDelta(installed.values())
+    if (installedSnapshot.complete) {
+      gameRepository.applyInstalledDelta(installed.values())
+    } else {
+      gameRepository.applyInstalledProviderPatch(
+        'steam',
+        [...installed.values()].map((game) => ({
+          providerGameId: String(game.appId),
+          appId: game.appId,
+          name: game.name,
+          installDir: game.installDir,
+          updateAvailable: game.updateAvailable,
+          playtimeSeconds: game.playtimeSeconds,
+          lastPlayedTimestamp: game.lastPlayedTimestamp
+        }))
+      )
+    }
     gameRepository.applyProviderActivityDelta('steam', localActivity)
     syncCoordinator.progress('library', 1, account ? 3 : 1, 'steam-account', 'steam')
     artworkService.syncProvider(gameRepository.getGamesByProvider('steam'), 'steam')
@@ -266,6 +304,7 @@ export class SteamLibraryService extends EventEmitter implements LibraryProvider
         game.provider === 'steam' && game.appId ? [[game.appId, game] as const] : []
       )
     )
+    const hadCachedOnlineLibrary = [...cachedByAppId.values()].some((game) => !game.installed)
     const methods: LibraryDetectionMethod[] = ['local-manifests']
     const addMethod = (method: LibraryDetectionMethod): void => {
       if (!methods.includes(method)) methods.push(method)
@@ -289,7 +328,8 @@ export class SteamLibraryService extends EventEmitter implements LibraryProvider
       // Steam exposes the short-lived token in #application_config on /explore/.
       // It remains in memory and is never persisted or sent anywhere but Steam.
       token = await getSteamUserToken(account.steamId, sessionFetch)
-    } catch {
+    } catch (error) {
+      reportSteamSourceFailure('store-token', error)
       // Community and authenticated Store userdata remain independent fallbacks.
     }
 
@@ -310,11 +350,15 @@ export class SteamLibraryService extends EventEmitter implements LibraryProvider
           authoritativeOwned = ownedAttempt.value
           addMethod('account-api')
         }
+      } else {
+        reportSteamSourceFailure('owned-games', ownedAttempt.reason)
       }
       if (clientAttempt.status === 'fulfilled') {
         clientSourceAvailable = true
         clientGames = clientAttempt.value
         if (clientGames.size > 0) addMethod('launcher-session')
+      } else {
+        reportSteamSourceFailure('client-app-list', clientAttempt.reason)
       }
       syncCoordinator.progress('library', 2, 3, 'steam-client', 'steam')
     } else {
@@ -335,7 +379,8 @@ export class SteamLibraryService extends EventEmitter implements LibraryProvider
           addMethod('community-profile')
           for (const game of communityGames.values()) mergeOwnedGame(supplementalOwned, game)
         }
-      } catch {
+      } catch (error) {
+        reportSteamSourceFailure('community', error)
         // A private or unavailable community feed must never prune cached games.
       }
     }
@@ -351,9 +396,15 @@ export class SteamLibraryService extends EventEmitter implements LibraryProvider
       dynamicRecentIds = dynamicStore.recentlyPlayedAppIds
       if (dynamicOwnedIds.length > 0) addMethod('launcher-session')
     } else {
+      reportSteamSourceFailure('dynamic-store', dynamicAttempt.reason)
       // Keep the last good online snapshot when Steam's Store session is unavailable.
     }
-    const supplementalSourcesComplete = clientSourceAvailable && dynamicSourceAvailable
+    const primaryLibraryAvailable = Boolean(authoritativeOwned)
+    const canPruneOwnedRecords = canPruneSteamOwnedRecords(
+      primaryLibraryAvailable,
+      clientSourceAvailable,
+      dynamicSourceAvailable
+    )
 
     if (authoritativeOwned) {
       // Preserve previously verified Store-session games that are still present
@@ -374,7 +425,7 @@ export class SteamLibraryService extends EventEmitter implements LibraryProvider
       // GetOwnedGames does not necessarily include Family Sharing titles. A
       // mark-and-sweep is safe only after both additive session sources were
       // also structurally available; otherwise keep cached provider records.
-      if (supplementalSourcesComplete) {
+      if (canPruneOwnedRecords) {
         gameRepository.applyAuthoritativeOwnedDelta(authoritativeOwned.values())
       } else {
         gameRepository.applyNonAuthoritativeOwnedDelta(authoritativeOwned.values())
@@ -388,10 +439,7 @@ export class SteamLibraryService extends EventEmitter implements LibraryProvider
     const unresolved = gameRepository.applyNonAuthoritativeOwnedIds(dynamicOwnedIds)
     const unresolvedSet = new Set(unresolved)
     for (const appId of dynamicOwnedIds) addMetadataTarget(appId, unresolvedSet.has(appId))
-    this.discoverableFallbackIds = unresolvedSet
-    this.pendingMetadataCanCompleteLibrary = Boolean(
-      authoritativeOwned && supplementalSourcesComplete
-    )
+    this.synchronizedSourcesComplete = canPruneOwnedRecords && installedSnapshot.complete
     gameRepository.applyProviderActivityDelta('steam', localActivity)
     if (dynamicSourceAvailable) gameRepository.setRecentSteamAppIds(dynamicRecentIds)
 
@@ -402,30 +450,30 @@ export class SteamLibraryService extends EventEmitter implements LibraryProvider
       authoritativeOwned || supplementalOwned.size > 0 || dynamicOwnedIds.length > 0
     )
     const counts = gameRepository.getProviderCounts('steam')
-    const fullySynchronized = Boolean(authoritativeOwned && supplementalSourcesComplete)
-    if (!fullySynchronized && counts.installableCount > 0) addMethod('cached-data')
-    const pendingCount = unresolved.length
+    if (!canPruneOwnedRecords && hadCachedOnlineLibrary) addMethod('cached-data')
+    this.pendingMetadataIds = new Set([
+      ...unresolvedSet,
+      ...[...metadataByAppId.keys()].filter((appId) => {
+        const game = gameRepository.getGame(`steam:${appId}`)
+        return !game?.name?.trim()
+      })
+    ])
+    const pendingCount = this.pendingMetadataIds.size
+    const health = decideSteamSyncHealth({
+      primaryLibraryAvailable,
+      fallbackLibraryAvailable: supplementalOwned.size > 0 || dynamicOwnedIds.length > 0,
+      cachedGameCount: counts.gameCount,
+      pendingMetadataCount: pendingCount,
+      ownedResponseWasEmpty,
+      supplementalSourcesComplete: clientSourceAvailable && dynamicSourceAvailable,
+      localLibraryComplete: installedSnapshot.complete
+    })
     this.setProviderStatus({
-      state: fullySynchronized
-        ? pendingCount > 0
-          ? 'partial'
-          : 'ready'
-        : librarySucceeded || counts.gameCount > 0
-          ? 'partial'
-          : 'error',
+      state: health.state,
       connection: 'connected',
       methods,
       pendingCount: pendingCount || undefined,
-      issue:
-        pendingCount > 0
-          ? 'metadata-pending'
-          : fullySynchronized
-            ? undefined
-            : ownedResponseWasEmpty
-              ? 'no-games-found'
-              : librarySucceeded
-                ? 'source-unavailable'
-                : 'online-library-unavailable',
+      issue: health.issue,
       lastCheckedAt: Date.now()
     })
 
@@ -455,33 +503,33 @@ export class SteamLibraryService extends EventEmitter implements LibraryProvider
     this.localManifestWatchers = []
   }
 
-  private finishFallbackMetadataIfReady(): void {
+  private finishPendingMetadataIfReady(): void {
     if (
-      this.discoverableFallbackIds.size > 0 ||
+      this.pendingMetadataIds.size > 0 ||
       this.providerStatus.issue !== 'metadata-pending'
     ) {
       return
     }
     this.setProviderStatus({
-      state: this.pendingMetadataCanCompleteLibrary ? 'ready' : 'partial',
+      state: this.synchronizedSourcesComplete ? 'ready' : 'partial',
       connection: 'connected',
       methods: this.providerStatus.methods,
-      issue: this.pendingMetadataCanCompleteLibrary ? undefined : 'source-unavailable',
+      issue: this.synchronizedSourcesComplete ? undefined : 'source-unavailable',
       lastCheckedAt: this.providerStatus.lastCheckedAt ?? Date.now()
     })
   }
 
-  private resolveFallbackMetadata(appId: number): void {
-    if (!this.discoverableFallbackIds.delete(appId)) return
-    if (this.discoverableFallbackIds.size === 0) {
-      this.finishFallbackMetadataIfReady()
+  private resolvePendingMetadata(appId: number): void {
+    if (!this.pendingMetadataIds.delete(appId)) return
+    if (this.pendingMetadataIds.size === 0) {
+      this.finishPendingMetadataIfReady()
       return
     }
     this.setProviderStatus({
       state: 'partial',
       connection: 'connected',
       methods: this.providerStatus.methods,
-      pendingCount: this.discoverableFallbackIds.size,
+      pendingCount: this.pendingMetadataIds.size,
       issue: 'metadata-pending',
       lastCheckedAt: this.providerStatus.lastCheckedAt ?? Date.now()
     })
@@ -516,13 +564,39 @@ export class SteamLibraryService extends EventEmitter implements LibraryProvider
     if (this.localManifestTimer) clearTimeout(this.localManifestTimer)
     this.localManifestTimer = setTimeout(() => {
       this.localManifestTimer = undefined
-      const installed = scanInstalledSteamApps(this.watchedSteamId)
+      const installedSnapshot = scanInstalledSteamAppsSnapshot(this.watchedSteamId)
+      const installed = installedSnapshot.games
       const fingerprint = localInstallFingerprint(installed.values())
       if (fingerprint !== this.localInstallState) {
         this.localInstallState = fingerprint
-        gameRepository.applyInstalledDelta(installed.values())
+        if (installedSnapshot.complete) {
+          gameRepository.applyInstalledDelta(installed.values())
+        } else {
+          gameRepository.applyInstalledProviderPatch(
+            'steam',
+            [...installed.values()].map((game) => ({
+              providerGameId: String(game.appId),
+              appId: game.appId,
+              name: game.name,
+              installDir: game.installDir,
+              updateAvailable: game.updateAvailable,
+              playtimeSeconds: game.playtimeSeconds,
+              lastPlayedTimestamp: game.lastPlayedTimestamp
+            }))
+          )
+        }
         artworkService.syncProvider(gameRepository.getGamesByProvider('steam'), 'steam')
         this.emitSnapshot()
+      }
+      if (!installedSnapshot.complete && this.providerStatus.state !== 'scanning') {
+        this.synchronizedSourcesComplete = false
+        this.setProviderStatus({
+          state: 'partial',
+          connection: this.providerStatus.connection,
+          methods: this.providerStatus.methods,
+          issue: 'source-unavailable',
+          lastCheckedAt: Date.now()
+        })
       }
       if (restartWatchers) this.startLocalInstallMonitor(this.watchedSteamId)
     }, LOCAL_MANIFEST_SETTLE_MS)

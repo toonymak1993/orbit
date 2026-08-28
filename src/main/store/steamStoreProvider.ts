@@ -8,6 +8,7 @@ import { fetchGogOffer } from './gogStoreProvider'
 import { fetchEpicOffer } from './epicStoreProvider'
 import { fetchInstantGamingOffer } from './instantGamingProvider'
 import { fetchXboxOffer } from './xboxStoreProvider'
+import { parseEnglishSteamDate } from './steamReleaseDate'
 import {
   hasRemoteArtwork,
   type StoreSearchCandidate,
@@ -111,24 +112,13 @@ function decodeHtmlText(value: string): string {
     .trim()
 }
 
-function parseEnglishSteamDate(value: string): { timestamp: number; year: number; month: number; day: number } | null {
-  const match = /^(\d{1,2})\s+([a-z]{3}),?\s+(\d{4})$/i.exec(decodeHtmlText(value))
-  if (!match) return null
-  const months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
-  const month = months.indexOf(match[2].toLowerCase())
-  const day = Number(match[1])
-  const year = Number(match[3])
-  if (month < 0 || day < 1 || day > 31 || !Number.isInteger(year)) return null
-  return { timestamp: Date.UTC(year, month, day, 12), year, month, day }
-}
-
 /**
- * Steam's popular-upcoming search is a compact editorial source for the current
- * month. One bounded request yields the official title, date and capsule; the
+ * Steam's popular-upcoming search is a compact editorial source for a rolling
+ * release window. One bounded request yields the official title, date and capsule; the
  * larger hero URL is resolved by ORBIT's existing artwork cache with the
  * capsule as its fallback.
  */
-export async function fetchMonthlySteamReleases(
+export async function fetchUpcomingSteamReleases(
   region: StoreRegionConfig,
   now = new Date()
 ): Promise<StoreRelease[]> {
@@ -154,6 +144,7 @@ export async function fetchMonthlySteamReleases(
   )
   const ranked: Array<StoreRelease & { rank: number }> = []
   const seen = new Set<number>()
+  const today = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(), 12)
 
   for (const row of rows) {
     const appId = Number(row[1])
@@ -165,13 +156,8 @@ export async function fetchMonthlySteamReleases(
     if (!title || !dateText || !capsule) continue
     const decodedTitle = decodeHtmlText(title)
     if (decodedTitle.length > 72 || hasUnsupportedTitleScript(decodedTitle)) continue
-    const release = parseEnglishSteamDate(dateText)
-    if (
-      !release ||
-      release.year !== now.getFullYear() ||
-      release.month !== now.getMonth() ||
-      release.day < now.getDate()
-    ) continue
+    const release = parseEnglishSteamDate(decodeHtmlText(dateText))
+    if (!release || release.timestamp < today) continue
 
     seen.add(appId)
     ranked.push({
@@ -188,6 +174,10 @@ export async function fetchMonthlySteamReleases(
       orbitWishlisted: false,
       rank: ranked.length
     })
+  }
+
+  if (ranked.length === 0) {
+    throw new Error('Steam release calendar contained no usable upcoming releases')
   }
 
   const selected = ranked.slice(0, RELEASE_CALENDAR_LIMIT)
@@ -414,7 +404,7 @@ export async function fetchFeaturedProducts(
   const response = await fetchWithElectronNet(url, {
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
   })
-  if (!response.ok) return []
+  if (!response.ok) throw new Error(`Steam featured catalog failed (${response.status})`)
   const json = (await response.json()) as Record<string, { items?: FeaturedItem[] }>
   const checkedAt = Date.now()
   const products = new Map<number, StoreProduct>()

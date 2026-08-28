@@ -34,7 +34,7 @@ const TRANSIENT_RETRY_MAX_MS = 6 * 60 * 60 * 1000
 const ORPHAN_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_ORPHAN_DELETIONS_PER_RUN = 25
 const GENERATED_CACHE_FILE = /-(?:vertical|horizontal|icon)-[a-f0-9]{16}\.(?:jpg|png|webp)$/i
-const CUSTOM_CACHE_FILE = /^custom-(?:cover|background)-[a-f0-9]{12}-[a-f0-9]{16}\.png$/i
+const CUSTOM_CACHE_FILE = /^custom-(?:cover|background|icon)-[a-f0-9]{12}-[a-f0-9]{16}\.png$/i
 // Keep background artwork decoding below the point where it competes with the
 // controller UI on handheld CPUs. Delta sync is continuous, so latency matters
 // less here than stable frame times.
@@ -814,9 +814,7 @@ export const artworkService = new ArtworkService()
 // Kept as a function for the IPC boundary; resolution is instant and any stale
 // or missing asset is upgraded by ArtworkService's bounded background queue.
 export function resolveImage(game: LibraryGame, orientation: ImageOrientation): ResolvedImage | null {
-  if (orientation !== 'icon') {
-    const customArtwork = customArtworkService.resolve(game.id, orientation)
-    if (customArtwork) return customArtwork
-  }
+  const customArtwork = customArtworkService.resolve(game.id, orientation)
+  if (customArtwork) return customArtwork
   return artworkService.resolve(game, orientation)
 }

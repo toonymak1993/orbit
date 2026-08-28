@@ -9,6 +9,7 @@ import { gameRepository } from '../library/gameRepository'
 import { getSteamAppsDirectories } from '../steam/steamInstall'
 import { xboxLibraryService } from '../xbox/xboxLibrary'
 import {
+  deriveXboxPackageProgressState,
   xboxPackageActivityMonitor,
   type XboxPackageProgressEvent
 } from '../xbox/xboxPackageActivity'
@@ -33,6 +34,10 @@ const MAX_EPIC_PENDING_ITEMS = 32
 const MAX_EPIC_MANIFEST_BYTES = 2 * 1024 * 1024
 const MAX_EPIC_SHALLOW_ENTRIES = 128
 const XBOX_ACTIVITY_STALE_MS = 2 * 60_000
+const XBOX_PHASE_TRANSITION_MS = 20_000
+const XBOX_PENDING_EVENT_MS = 2 * 60_000
+const MAX_PENDING_XBOX_PACKAGES = 32
+const XBOX_LIBRARY_RETRY_DELAYS_MS = [250, 1_500, 5_000, 12_000] as const
 
 interface TerminalActivity {
   activity: LauncherDownloadActivity
@@ -43,6 +48,19 @@ interface SteamManifestCacheEntry {
   modifiedAt: number
   size: number
   sample: SteamDownloadSample | null
+}
+
+interface PendingXboxEvent {
+  event: XboxPackageProgressEvent
+  receivedAt: number
+}
+
+interface XboxLibraryRefresh {
+  packageFamilyName: string
+  gamingProductId?: string
+  completeIslandOnSuccess: boolean
+  attempt: number
+  timer?: ReturnType<typeof setTimeout>
 }
 
 function sanitizedLibraryTitle(activity: LauncherDownloadActivity): LauncherDownloadActivity {
@@ -205,6 +223,9 @@ export class LauncherDownloadMonitor extends EventEmitter {
   private steamActivities = new Map<string, LauncherDownloadActivity>()
   private epicActivities = new Map<string, LauncherDownloadActivity>()
   private xboxActivities = new Map<string, LauncherDownloadActivity>()
+  private xboxTransitionExpiries = new Map<string, number>()
+  private pendingXboxEvents = new Map<string, PendingXboxEvent>()
+  private xboxLibraryRefreshes = new Map<string, XboxLibraryRefresh>()
   private terminalActivities = new Map<string, TerminalActivity>()
   private fingerprint = ''
   private snapshot: LauncherDownloadSnapshot = {
@@ -218,6 +239,7 @@ export class LauncherDownloadMonitor extends EventEmitter {
     this.running = true
     xboxPackageActivityMonitor.on('progress', this.receiveXboxProgress)
     xboxPackageActivityMonitor.on('unavailable', this.receiveXboxUnavailable)
+    xboxLibraryService.on('updated', this.receiveXboxLibraryUpdate)
     xboxPackageActivityMonitor.start()
     this.schedule(350)
   }
@@ -235,6 +257,12 @@ export class LauncherDownloadMonitor extends EventEmitter {
     this.steamActivities.clear()
     this.epicActivities.clear()
     this.xboxActivities.clear()
+    this.xboxTransitionExpiries.clear()
+    this.pendingXboxEvents.clear()
+    for (const refresh of this.xboxLibraryRefreshes.values()) {
+      if (refresh.timer) clearTimeout(refresh.timer)
+    }
+    this.xboxLibraryRefreshes.clear()
     this.terminalActivities.clear()
     this.fingerprint = ''
     this.snapshot = {
@@ -244,6 +272,7 @@ export class LauncherDownloadMonitor extends EventEmitter {
     }
     xboxPackageActivityMonitor.off('progress', this.receiveXboxProgress)
     xboxPackageActivityMonitor.off('unavailable', this.receiveXboxUnavailable)
+    xboxLibraryService.off('updated', this.receiveXboxLibraryUpdate)
     xboxPackageActivityMonitor.stop()
   }
 
@@ -261,28 +290,56 @@ export class LauncherDownloadMonitor extends EventEmitter {
 
   private readonly receiveXboxProgress = (event: XboxPackageProgressEvent): void => {
     if (!this.running) return
-    const game = xboxLibraryService.resolvePackageFamilyName(event.packageFamilyName)
-    if (!game) return
     const now = Date.now()
+    const key = event.packageFamilyName.toLowerCase()
+    let game
+    try {
+      game = xboxLibraryService.resolvePackageFamilyName(
+        event.packageFamilyName,
+        event.gamingProductId
+      )
+    } catch {
+      // The monitor can become ready a few milliseconds before the renderer
+      // hydrates the persistent library. The next heartbeat resolves identity.
+      game = undefined
+    }
+    const state = deriveXboxPackageProgressState(event)
+    if (event.stage === 'status') {
+      if (state.refreshLibrary && (game || event.isGamingPackage)) {
+        this.scheduleXboxLibraryRefresh(event)
+      }
+      return
+    }
+    if (!game && !event.isGamingPackage) {
+      if (this.pendingXboxEvents.size >= MAX_PENDING_XBOX_PACKAGES) {
+        const oldest = this.pendingXboxEvents.keys().next().value as string | undefined
+        if (oldest) this.pendingXboxEvents.delete(oldest)
+      }
+      this.pendingXboxEvents.set(key, { event, receivedAt: now })
+      if (
+        state.refreshLibrary
+      ) {
+        this.scheduleXboxLibraryRefresh(event)
+      }
+      return
+    }
+    this.pendingXboxEvents.delete(key)
+    const activityId = `xbox:${key}`
     const activity: LauncherDownloadActivity = {
-      id: `${game.id}:${event.activityId}`,
+      id: activityId,
       provider: 'xbox',
-      providerGameId: game.providerGameId,
-      gameId: game.id,
-      title: game.name.slice(0, 160),
-      phase: event.isComplete
-        ? event.errorHResult === 0
-          ? 'completed'
-          : 'error'
-        : event.operation === 'update'
-          ? 'updating'
-          : 'downloading',
-      confidence: 'approximate',
+      providerGameId:
+        game?.providerGameId ?? event.gamingProductId ?? `package:${event.packageFamilyName}`,
+      gameId: game?.id,
+      title: (game?.name ?? event.displayName ?? 'Xbox game').slice(0, 160),
+      phase: state.phase ?? 'downloading',
+      confidence: event.stage === 'streaming' ? 'heuristic' : 'approximate',
       progress: event.progress,
       updatedAt: now
     }
-    if (event.isComplete) {
+    if (state.terminal) {
       this.xboxActivities.delete(activity.id)
+      this.xboxTransitionExpiries.delete(activity.id)
       this.terminalActivities.set(
         activity.id,
         terminalActivity(activity, activity.phase === 'error' ? 'error' : 'completed', now)
@@ -290,13 +347,104 @@ export class LauncherDownloadMonitor extends EventEmitter {
     } else {
       this.terminalActivities.delete(activity.id)
       this.xboxActivities.set(activity.id, activity)
+      if (state.phaseTransition) {
+        this.xboxTransitionExpiries.set(activity.id, now + XBOX_PHASE_TRANSITION_MS)
+      } else {
+        this.xboxTransitionExpiries.delete(activity.id)
+      }
     }
+    if (state.refreshLibrary) this.scheduleXboxLibraryRefresh(event)
     this.publish(now)
+  }
+
+  private readonly receiveXboxLibraryUpdate = (): void => {
+    if (!this.running || this.pendingXboxEvents.size === 0) return
+    const now = Date.now()
+    for (const [key, pending] of [...this.pendingXboxEvents]) {
+      if (now - pending.receivedAt > XBOX_PENDING_EVENT_MS) {
+        this.pendingXboxEvents.delete(key)
+        continue
+      }
+      let game
+      try {
+        game = xboxLibraryService.resolvePackageFamilyName(
+          pending.event.packageFamilyName,
+          pending.event.gamingProductId
+        )
+      } catch {
+        continue
+      }
+      if (!game) continue
+      this.pendingXboxEvents.delete(key)
+      this.receiveXboxProgress(pending.event)
+    }
+  }
+
+  private scheduleXboxLibraryRefresh(event: XboxPackageProgressEvent): void {
+    const key = event.packageFamilyName.toLowerCase()
+    const current = this.xboxLibraryRefreshes.get(key)
+    if (current) {
+      if (!current.gamingProductId && event.gamingProductId) {
+        current.gamingProductId = event.gamingProductId
+      }
+      if (event.stage === 'status') current.completeIslandOnSuccess = true
+      return
+    }
+    const refresh: XboxLibraryRefresh = {
+      packageFamilyName: event.packageFamilyName,
+      gamingProductId: event.gamingProductId,
+      completeIslandOnSuccess: event.stage === 'status',
+      attempt: 0
+    }
+    this.xboxLibraryRefreshes.set(key, refresh)
+    this.scheduleXboxLibraryRefreshAttempt(key, refresh)
+  }
+
+  private scheduleXboxLibraryRefreshAttempt(key: string, refresh: XboxLibraryRefresh): void {
+    const delay = XBOX_LIBRARY_RETRY_DELAYS_MS[refresh.attempt]
+    if (delay === undefined) {
+      this.xboxLibraryRefreshes.delete(key)
+      return
+    }
+    refresh.timer = setTimeout(() => {
+      refresh.timer = undefined
+      void xboxLibraryService
+        .refreshInstalledPackage(refresh.packageFamilyName, refresh.gamingProductId)
+        .then((found) => {
+          if (!this.running || this.xboxLibraryRefreshes.get(key) !== refresh) return
+          if (found) {
+            this.xboxLibraryRefreshes.delete(key)
+            if (refresh.completeIslandOnSuccess) {
+              const activityId = `xbox:${key}`
+              const activity = this.xboxActivities.get(activityId)
+              if (activity) {
+                const now = Date.now()
+                this.xboxActivities.delete(activityId)
+                this.xboxTransitionExpiries.delete(activityId)
+                this.terminalActivities.set(
+                  activityId,
+                  terminalActivity(activity, 'completed', now)
+                )
+                this.publish(now)
+              }
+            }
+            return
+          }
+          refresh.attempt += 1
+          this.scheduleXboxLibraryRefreshAttempt(key, refresh)
+        })
+        .catch(() => {
+          if (!this.running || this.xboxLibraryRefreshes.get(key) !== refresh) return
+          refresh.attempt += 1
+          this.scheduleXboxLibraryRefreshAttempt(key, refresh)
+        })
+    }, delay)
   }
 
   private readonly receiveXboxUnavailable = (): void => {
     if (!this.running || this.xboxActivities.size === 0) return
     this.xboxActivities.clear()
+    this.xboxTransitionExpiries.clear()
     this.publish(Date.now())
   }
 
@@ -403,7 +551,17 @@ export class LauncherDownloadMonitor extends EventEmitter {
 
   private publish(now: number): void {
     for (const [id, activity] of this.xboxActivities) {
-      if (now - activity.updatedAt > XBOX_ACTIVITY_STALE_MS) this.xboxActivities.delete(id)
+      const transitionExpiry = this.xboxTransitionExpiries.get(id)
+      if (
+        (transitionExpiry !== undefined && transitionExpiry <= now) ||
+        now - activity.updatedAt > XBOX_ACTIVITY_STALE_MS
+      ) {
+        this.xboxActivities.delete(id)
+        this.xboxTransitionExpiries.delete(id)
+      }
+    }
+    for (const [key, pending] of this.pendingXboxEvents) {
+      if (now - pending.receivedAt > XBOX_PENDING_EVENT_MS) this.pendingXboxEvents.delete(key)
     }
     for (const [id, terminal] of this.terminalActivities) {
       if (terminal.expiresAt <= now) this.terminalActivities.delete(id)

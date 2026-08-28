@@ -5,14 +5,17 @@ import {
   type HardwareControlStatus,
   type OrbitSettings
 } from '@shared/ipc'
+import { createDualSenseMonitorScript } from './dualsenseMonitor'
 
 type HardwareControlSettings = Pick<
   OrbitSettings,
   'hardwareControlEnabled' | 'hardwareControlButton' | 'hardwareControlHoldSeconds'
 >
 
+type XInputHardwareControlButton = Exclude<HardwareControlButton, 'playstation'>
+
 const BUTTON_INPUTS: Record<
-  HardwareControlButton,
+  XInputHardwareControlButton,
   { buttonMask: number; trigger: 'none' | 'left' | 'right' }
 > = {
   menu: { buttonMask: 0x0010, trigger: 'none' },
@@ -249,19 +252,21 @@ export class HardwareControlWatcher extends EventEmitter {
   }
 
   private startMonitor(): void {
-    const input = BUTTON_INPUTS[this.settings.hardwareControlButton]
     const holdMilliseconds = Math.round(this.settings.hardwareControlHoldSeconds * 1_000)
-    const script = MONITOR_SCRIPT.replace('__BUTTON_MASK__', String(input.buttonMask))
-      .replace('__TRIGGER_SIDE__', input.trigger)
-      .replace('__HOLD_MILLISECONDS__', String(holdMilliseconds))
-    const encoded = Buffer.from(script, 'utf16le').toString('base64')
+    const button = this.settings.hardwareControlButton
+    const script =
+      button === 'playstation'
+        ? createDualSenseMonitorScript(holdMilliseconds)
+        : MONITOR_SCRIPT.replace('__BUTTON_MASK__', String(BUTTON_INPUTS[button].buttonMask))
+            .replace('__TRIGGER_SIDE__', BUTTON_INPUTS[button].trigger)
+            .replace('__HOLD_MILLISECONDS__', String(holdMilliseconds))
     this.setStatus({ state: 'starting', connectedControllers: 0 })
 
     let child: ChildProcessWithoutNullStreams
     try {
       child = spawn(
         'powershell.exe',
-        ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+        ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '-'],
         { windowsHide: true }
       )
     } catch {
@@ -287,7 +292,7 @@ export class HardwareControlWatcher extends EventEmitter {
     child.stderr.setEncoding('utf8')
     child.stderr.on('data', (chunk: string) => {
       const message = chunk.trim()
-      if (message) console.warn('[hardware-control] XInput monitor:', message)
+      if (message) console.warn('[hardware-control] controller monitor:', message)
     })
 
     child.once('error', () => {
@@ -310,6 +315,11 @@ export class HardwareControlWatcher extends EventEmitter {
         reason: 'monitor-failed'
       })
     })
+
+    // PowerShell reads the generated monitor from stdin so the native
+    // DualSense source cannot hit Windows' command-line length limit.
+    child.stdin.on('error', () => undefined)
+    child.stdin.end(script, 'utf8')
   }
 
   private stopMonitor(): void {

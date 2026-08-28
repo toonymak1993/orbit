@@ -1,9 +1,13 @@
-import { useEffect, useState } from 'react'
-import { motion } from 'framer-motion'
-import { AlertTriangle, ExternalLink } from 'lucide-react'
-import type { GameLaunchStatus } from '@shared/ipc'
+import { useEffect, useRef, useState } from 'react'
+import { motion, useReducedMotion } from 'framer-motion'
+import { AlertTriangle, ExternalLink, X } from 'lucide-react'
+import { GAME_LAUNCH_CANCEL_WINDOW_MS, type GameLaunchStatus } from '@shared/ipc'
 import { GameImage } from './GameImage'
+import { ControllerButtonHint } from './ControllerButtonHint'
+import { useBackHandler } from '@renderer/hooks/useBackHandler'
 import { useT } from '@renderer/i18n/useT'
+import { focusElement, focusFirstIn } from '@renderer/lib/spatialNavigation'
+import { playUiSound } from '@renderer/lib/uiAudio'
 
 interface Props {
   status: GameLaunchStatus
@@ -15,19 +19,93 @@ function elapsedLabel(startedAt?: number): string | null {
   const hours = Math.floor(totalSeconds / 3600)
   const minutes = Math.floor((totalSeconds % 3600) / 60)
   const seconds = totalSeconds % 60
-  if (hours > 0) return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+  }
   return `${minutes}:${String(seconds).padStart(2, '0')}`
 }
 
 export function GameLaunchSplash({ status }: Props): JSX.Element {
   const t = useT()
+  const reduceMotion = useReducedMotion()
   const [, setClock] = useState(0)
+  const [now, setNow] = useState(() => Date.now())
+  const [cancelInFlight, setCancelInFlight] = useState(false)
+  const cancelRef = useRef<HTMLButtonElement>(null)
+  const revealRef = useRef<HTMLButtonElement>(null)
+  const returnFocusRef = useRef<HTMLElement | null>(null)
+  const cancelableUntil = status.cancelableUntil
+  const remainingMs = cancelableUntil ? Math.max(0, cancelableUntil - now) : 0
+  const canCancel = status.phase === 'launching' && remainingMs > 0
+  const countdownSeconds = Math.max(1, Math.ceil(remainingMs / 1_000))
+  const cancelWindowMs = cancelableUntil
+    ? Math.max(
+        1,
+        cancelableUntil -
+          (status.requestedAt ?? cancelableUntil - GAME_LAUNCH_CANCEL_WINDOW_MS)
+      )
+    : 1
+  const countdownProgress = Math.min(1, remainingMs / cancelWindowMs)
 
   useEffect(() => {
     if (status.phase !== 'running') return
     const timer = window.setInterval(() => setClock((value) => value + 1), 1_000)
     return () => window.clearInterval(timer)
   }, [status.phase])
+
+  useEffect(() => {
+    setNow(Date.now())
+    setCancelInFlight(false)
+    if (!cancelableUntil) return
+    const timer = window.setInterval(() => setNow(Date.now()), 100)
+    return () => window.clearInterval(timer)
+  }, [cancelableUntil])
+
+  useEffect(() => {
+    const active = document.activeElement
+    if (active instanceof HTMLElement && active !== document.body) {
+      returnFocusRef.current = active
+    }
+    return () => {
+      const previous = returnFocusRef.current
+      requestAnimationFrame(() => {
+        if (document.querySelector('[data-game-launch-splash="true"]')) return
+        if (previous?.isConnected && !previous.closest('[inert]')) focusElement(previous)
+        else focusFirstIn()
+      })
+    }
+  }, [])
+
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      const active = document.activeElement
+      if (
+        active instanceof HTMLElement &&
+        active !== document.body &&
+        !active.closest('[data-game-launch-splash="true"]')
+      ) {
+        returnFocusRef.current = active
+      }
+      focusElement(canCancel ? cancelRef.current : revealRef.current)
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [canCancel, cancelableUntil, status.phase])
+
+  const requestCancel = (): void => {
+    if (!canCancel || cancelInFlight) return
+    setCancelInFlight(true)
+    void window.api.game
+      .cancelLaunch()
+      .then((cancelled) => {
+        if (!cancelled) setCancelInFlight(false)
+      })
+      .catch(() => {
+        setCancelInFlight(false)
+        playUiSound('error')
+      })
+  }
+
+  useBackHandler(requestCancel)
 
   const returnTitle =
     status.returnTask === 'backing-up'
@@ -37,33 +115,53 @@ export function GameLaunchSplash({ status }: Props): JSX.Element {
         : status.returnTask === 'backup-failed'
           ? t('launch.backupFailed')
           : t('launch.returning')
-  const title =
-    status.phase === 'launching'
+  const failureTitle =
+    status.failureReason === 'monitor-unavailable'
+      ? t('launch.monitorUnavailable')
+      : t('launch.failed')
+  const failureDescription =
+    status.failureReason === 'launch-rejected'
+      ? t('launch.failureLaunchRejected')
+      : status.failureReason === 'not-started'
+        ? t('launch.failureNotStarted')
+        : status.failureReason === 'startup-ended'
+          ? t('launch.failureStartupEnded')
+          : t('launch.failureMonitorUnavailable')
+  const title = canCancel
+    ? t('launch.countdown', { seconds: countdownSeconds })
+    : status.phase === 'launching'
       ? t('launch.starting')
       : status.phase === 'running'
         ? t('launch.running')
         : status.phase === 'returning'
           ? returnTitle
-          : t('launch.failed')
-  const gameName = status.gameName ?? 'Game'
-  const elapsed = status.phase === 'running' ? elapsedLabel(status.startedAt) : null
+          : failureTitle
+  const gameName = status.gameName ?? t('launch.gameFallback')
+  const elapsed = status.phase === 'running' ? elapsedLabel(status.detectedAt) : null
+  const showLauncher =
+    !cancelableUntil && (status.phase === 'launching' || status.phase === 'running')
 
   return (
     <motion.div
-      role="status"
-      aria-live="polite"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="game-launch-name"
+      aria-describedby="game-launch-state"
+      data-focus-scope="active"
       data-game-launch-splash="true"
+      data-launch-cancelable={canCancel ? 'true' : 'false'}
+      data-launch-revealable={showLauncher ? 'true' : 'false'}
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
-      exit={{ opacity: 0, scale: 1.015, filter: 'blur(8px)' }}
-      transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
+      exit={{ opacity: 0, scale: 1.015, filter: reduceMotion ? 'none' : 'blur(8px)' }}
+      transition={{ duration: reduceMotion ? 0 : 0.5, ease: [0.22, 1, 0.36, 1] }}
       className="fixed inset-0 z-[100] overflow-hidden bg-[#030509]"
     >
       {status.gameId && (
         <motion.div
-          initial={{ opacity: 0, scale: 1.04 }}
+          initial={{ opacity: 0, scale: reduceMotion ? 1 : 1.04 }}
           animate={{ opacity: 1, scale: 1 }}
-          transition={{ duration: 1.2, ease: [0.22, 1, 0.36, 1] }}
+          transition={{ duration: reduceMotion ? 0 : 1.2, ease: [0.22, 1, 0.36, 1] }}
           className="absolute inset-0"
         >
           <GameImage
@@ -78,75 +176,132 @@ export function GameLaunchSplash({ status }: Props): JSX.Element {
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,transparent_0%,rgba(3,5,9,0.38)_42%,rgba(3,5,9,0.96)_100%)]" />
 
       <div className="relative z-10 flex h-full flex-col items-center justify-center px-8 text-center">
-        <div className="relative mb-[clamp(1.5rem,4vh,3rem)] flex h-[clamp(7.5rem,15vw,11rem)] w-[clamp(7.5rem,15vw,11rem)] items-center justify-center">
-          {status.phase === 'error' ? (
-            <div className="flex h-24 w-24 items-center justify-center rounded-full border border-red-300/25 bg-red-400/10 text-red-300 backdrop-blur-xl">
-              <AlertTriangle size={38} />
-            </div>
-          ) : (
+        <div className="relative mb-[clamp(1rem,2.8vh,2rem)] flex h-[clamp(8rem,21vh,12.5rem)] w-[clamp(8rem,21vh,12.5rem)] items-center justify-center">
+          {status.phase !== 'error' && (
             <>
               <motion.div
-                animate={{ rotate: 360 }}
+                animate={reduceMotion ? undefined : { rotate: 360 }}
                 transition={{ duration: 3.2, repeat: Infinity, ease: 'linear' }}
                 className="absolute inset-0 rounded-full border border-white/10 border-r-accent border-t-accent/70"
               />
               <motion.div
-                animate={{ rotate: -360 }}
+                animate={reduceMotion ? undefined : { rotate: -360 }}
                 transition={{ duration: 5.5, repeat: Infinity, ease: 'linear' }}
                 className="absolute inset-[10%] rounded-full border border-white/10 border-b-white/55"
               />
-              <div className="h-[58%] w-[58%] overflow-hidden rounded-[28%] border border-white/15 bg-black/45 shadow-[0_0_55px_rgb(var(--color-accent)/0.24)] backdrop-blur-xl">
-                {status.gameId && (
-                  <GameImage
-                    gameId={status.gameId}
-                    name={gameName}
-                    orientation="icon"
-                    className="h-full w-full object-cover"
-                  />
-                )}
-              </div>
             </>
+          )}
+
+          <motion.div
+            initial={{ opacity: 0, y: reduceMotion ? 0 : 8, scale: reduceMotion ? 1 : 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            transition={{ duration: reduceMotion ? 0 : 0.45, ease: [0.22, 1, 0.36, 1] }}
+            className="relative h-[78%] aspect-[2/3] overflow-hidden rounded-xl2 border border-white/15 bg-black/45 shadow-card"
+          >
+            {status.gameId && (
+              <GameImage
+                gameId={status.gameId}
+                name={gameName}
+                orientation="vertical"
+                className="h-full w-full object-cover"
+              />
+            )}
+          </motion.div>
+
+          {status.phase === 'error' && (
+            <div className="absolute -bottom-2 -right-1 flex h-12 w-12 items-center justify-center rounded-full border border-red-200/25 bg-red-500/85 text-white shadow-2xl">
+              <AlertTriangle size={22} />
+            </div>
           )}
         </div>
 
         <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-accent">
-          ORBIT · {(status.provider ?? '').toUpperCase()}
+          ORBIT{status.provider ? ` · ${status.provider.toUpperCase()}` : ''}
         </p>
-        <h1 className="mt-3 max-w-4xl text-[clamp(1.8rem,4vw,4rem)] font-bold tracking-[-0.035em] text-white">
+        <h1
+          id="game-launch-name"
+          className="mt-3 line-clamp-2 max-w-4xl text-[clamp(1.6rem,3.6vw,3.5rem)] font-bold leading-tight tracking-[-0.035em] text-white"
+        >
           {gameName}
         </h1>
-        <p className="mt-3 text-[clamp(0.85rem,1.3vw,1.05rem)] font-medium text-white/70">
+        <p
+          id="game-launch-state"
+          aria-live="polite"
+          className="mt-3 text-[clamp(0.85rem,1.3vw,1.05rem)] font-medium text-white/70"
+        >
           {title}
         </p>
 
-        {status.phase !== 'error' && (
+        {canCancel ? (
+          <div className="mt-4 h-1 w-[min(15rem,58vw)] overflow-hidden rounded-full bg-white/10">
+            <div
+              className={`h-full origin-left rounded-full bg-accent ${reduceMotion ? '' : 'transition-transform duration-100 ease-linear'}`}
+              style={{ transform: `scaleX(${countdownProgress})` }}
+            />
+          </div>
+        ) : status.phase !== 'error' ? (
           <div className="mt-5 flex h-4 items-center gap-2">
             {[0, 1, 2].map((index) => (
               <motion.span
                 key={index}
-                animate={{ opacity: [0.25, 1, 0.25], y: [0, -3, 0] }}
+                animate={
+                  reduceMotion
+                    ? { opacity: 0.7 }
+                    : { opacity: [0.25, 1, 0.25], y: [0, -3, 0] }
+                }
                 transition={{ duration: 1.1, repeat: Infinity, delay: index * 0.16 }}
                 className="h-1.5 w-1.5 rounded-full bg-white"
               />
             ))}
           </div>
-        )}
+        ) : null}
 
-        <p className="mt-5 max-w-xl text-xs leading-relaxed text-white/40">
-          {status.phase === 'running' ? t('launch.sessionActive') : t('launch.automaticReturn')}
+        <p className="mt-4 max-w-xl text-xs leading-relaxed text-white/45">
+          {canCancel
+            ? t('launch.cancelHint')
+            : status.phase === 'error'
+              ? failureDescription
+            : status.phase === 'running'
+              ? t('launch.sessionActive')
+              : status.phase === 'launching'
+                ? t('launch.waitingForGame')
+                : t('launch.automaticReturn')}
         </p>
         {elapsed && <p className="mt-2 font-mono text-xs tracking-wider text-white/45">{elapsed}</p>}
 
-        {(status.phase === 'launching' || status.phase === 'running') && (
+        {canCancel && (
           <button
+            ref={cancelRef}
+            data-focusable
+            data-disabled={cancelInFlight ? 'true' : undefined}
+            type="button"
+            aria-busy={cancelInFlight}
+            aria-keyshortcuts="Escape Backspace"
+            onClick={requestCancel}
+            className="mt-[clamp(1rem,2.5vh,1.5rem)] inline-flex min-w-[11rem] items-center justify-center gap-2.5 rounded-full border border-white/15 bg-white/[0.09] px-5 py-2.5 text-sm font-semibold text-white backdrop-blur-xl transition-colors hover:border-accent/55 hover:bg-white/[0.14]"
+          >
+            <ControllerButtonHint
+              button="east"
+              className="flex h-5 min-w-5 items-center justify-center rounded-md border border-white/15 bg-black/25 px-1 text-[9px] font-black text-white/65"
+            />
+            <X size={14} />
+            {t('launch.cancel')}
+          </button>
+        )}
+
+        {showLauncher && (
+          <button
+            ref={revealRef}
             data-focusable
             type="button"
+            aria-keyshortcuts="Y"
             onClick={() => void window.api.game.revealLauncher()}
             className="mt-6 inline-flex items-center gap-2 rounded-full border border-white/12 bg-black/35 px-4 py-2 text-xs font-semibold text-white/65 backdrop-blur-xl transition-colors hover:border-accent/45 hover:text-white focus:border-accent/60 focus:text-white"
           >
-            <span className="rounded-md border border-white/15 bg-white/[0.07] px-1.5 py-0.5 text-[9px] font-black text-white/55">
-              Y
-            </span>
+            <ControllerButtonHint
+              button="north"
+              className="flex h-5 min-w-5 items-center justify-center rounded-md border border-white/15 bg-white/[0.07] px-1 text-[9px] font-black text-white/55"
+            />
             <ExternalLink size={13} />
             {t('launch.showLauncher')}
           </button>

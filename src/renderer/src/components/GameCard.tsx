@@ -1,14 +1,15 @@
 import { motion, useReducedMotion } from 'framer-motion'
-import { Download, Play } from 'lucide-react'
+import { Download } from 'lucide-react'
 import type { LibraryGame } from '@shared/ipc'
 import { GameImage } from './GameImage'
 import { useT } from '@renderer/i18n/useT'
 import { formatPlaytime } from '@renderer/lib/playtime'
-import { useGameDetailStore } from '@renderer/state/gameDetailStore'
+import { useLaunchGame } from '@renderer/hooks/useLaunchGame'
 import {
   HomeCardReflection,
   type HomeCardReflectionState
 } from './HomeCardReflection'
+import { GameCardMenuHint } from './GameCardMenuHint'
 
 interface Props {
   game: LibraryGame
@@ -28,7 +29,7 @@ export function GameCard({
   const t = useT()
   const reduceMotion = useReducedMotion()
   const playtime = formatPlaytime(game, t)
-  const openGame = useGameDetailStore((state) => state.openGame)
+  const launchGame = useLaunchGame()
   const isHomeCard = variant === 'home' || variant === 'float'
   const activeMotion = reduceMotion ? { scale: 1, y: 0 } : { scale: 1.025, y: -1 }
   const homeMotion = isHomeCard
@@ -49,7 +50,7 @@ export function GameCard({
           ? `${game.name}. ${t('library.updateAvailable')}`
           : game.name
       }
-      onClick={() => openGame(game.id)}
+      onClick={() => launchGame(game.id)}
       onMouseEnter={() => onActiveChange?.(true, 'pointer')}
       onMouseMove={() => onActiveChange?.(true, 'pointer')}
       onMouseLeave={(event) => {
@@ -100,13 +101,11 @@ export function GameCard({
           <span>{t('library.updateBadge')}</span>
         </div>
       )}
-      <div
-        className={`pointer-events-none absolute right-2 z-20 flex h-8 w-8 items-center justify-center rounded-full bg-accent text-black opacity-0 transition-opacity group-hover:opacity-100 group-data-[focused=true]:opacity-100 ${
+      <GameCardMenuHint
+        className={`absolute right-2 z-20 opacity-0 transition-opacity group-hover:opacity-100 group-data-[focused=true]:opacity-100 ${
           game.updateAvailable ? 'top-11' : 'top-2'
         }`}
-      >
-        <Play size={14} fill="currentColor" />
-      </div>
+      />
     </motion.button>
   )
 }

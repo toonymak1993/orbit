@@ -5,6 +5,12 @@ import {
   runArtworkNetworkAttempt,
   type ArtworkNetworkAttempt
 } from './artworkNetworkPolicy'
+import {
+  selectSteamGridDbGame,
+  steamGridDbSearchKey,
+  stripSteamGridDbEditionWords,
+  type SteamGridDbGameSearchResult
+} from './steamGridDbSearch'
 
 /**
  * Optional fallback artwork source. Steam's own CDN occasionally 404s for a given
@@ -34,11 +40,6 @@ export interface SteamGridDbArtworkCandidate extends SteamGridDbArtworkOption {
   downloadUrl: string
 }
 
-interface SteamGridDbGame {
-  id: number
-  name: string
-}
-
 interface SearchCacheEntry {
   gameId: number | null
   expiresAt: number
@@ -60,35 +61,6 @@ function cacheSearchResult(cacheKey: string, entry: SearchCacheEntry): void {
     if (oldestKey === undefined) break
     searchCache.delete(oldestKey)
   }
-}
-
-function searchKey(value: string): string {
-  return value
-    .normalize('NFKD')
-    .replace(/[®™©]/g, '')
-    .replace(/[^a-z0-9]+/gi, ' ')
-    .trim()
-    .toLowerCase()
-}
-
-function stripEditionWords(value: string): string {
-  return value
-    .replace(
-      /\b(resynced|remastered|remaster|remake|definitive|enhanced|complete|ultimate|gold|game of the year|goty)\b/gi,
-      ' '
-    )
-    .replace(/\bedition\b/gi, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
-
-function titleCoverage(query: string, candidate: string): number {
-  const queryTokens = new Set(searchKey(query).split(' ').filter((token) => token.length > 1))
-  const candidateTokens = new Set(searchKey(candidate).split(' ').filter((token) => token.length > 1))
-  if (queryTokens.size === 0) return 0
-  let matches = 0
-  for (const token of queryTokens) if (candidateTokens.has(token)) matches++
-  return matches / queryTokens.size
 }
 
 function credentialTag(apiKey: string): string {
@@ -120,7 +92,7 @@ async function searchGameId(
   gameName: string,
   apiKey: string
 ): Promise<ArtworkNetworkAttempt<number>> {
-  const normalized = searchKey(gameName)
+  const normalized = steamGridDbSearchKey(gameName)
   const cacheKey = `${normalized}:${credentialTag(apiKey)}`
   const cached = searchCache.get(cacheKey)
   if (cached && cached.expiresAt > Date.now()) {
@@ -134,18 +106,16 @@ async function searchGameId(
   if (pending) return pending
 
   const request = (async (): Promise<ArtworkNetworkAttempt<number>> => {
-    const queries = [...new Set([gameName.trim(), stripEditionWords(gameName)])].filter(Boolean)
+    const queries = [...new Set([gameName.trim(), stripSteamGridDbEditionWords(gameName)])].filter(Boolean)
     for (const query of queries) {
       const url = `https://www.steamgriddb.com/api/v2/search/autocomplete/${encodeURIComponent(query)}`
-      const result = await fetchJson<{ success: boolean; data?: SteamGridDbGame[] }>(url, apiKey)
+      const result = await fetchJson<{ success: boolean; data?: SteamGridDbGameSearchResult[] }>(url, apiKey)
       if (result.state === 'unavailable') return result
       if (result.state === 'missing' || !result.value.success || !result.value.data?.length) continue
 
-      const ranked = result.value.data
-        .map((game) => ({ game, score: titleCoverage(stripEditionWords(gameName), game.name) }))
-        .sort((a, b) => b.score - a.score || a.game.name.length - b.game.name.length)
-      if (ranked[0]?.score >= 0.65) {
-        const gameId = ranked[0].game.id
+      const match = selectSteamGridDbGame(gameName, result.value.data)
+      if (match) {
+        const gameId = match.id
         cacheSearchResult(cacheKey, { gameId, expiresAt: Date.now() + FOUND_CACHE_TTL_MS })
         return { state: 'success', value: gameId }
       }

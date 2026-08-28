@@ -49,6 +49,7 @@ export class OrbitBackgroundServiceManager {
   private refreshInFlight: Promise<OrbitBackgroundServiceStatus> | null = null
   private startInFlight: Promise<void> | null = null
   private startingUntil = 0
+  private updateSuspended = false
   private status: OrbitBackgroundServiceStatus = {
     installation: process.platform === 'win32' ? 'not-installed' : 'unsupported',
     runtime: 'stopped',
@@ -116,6 +117,22 @@ export class OrbitBackgroundServiceManager {
       const installation = this.getInstallation()
       if (installation.installation === 'installed') void this.startAgent()
     }
+    await this.refresh()
+  }
+
+  /** Prevent the login agent from reopening ORBIT while a detached installer
+   * replaces the packaged application. The next ORBIT process repairs and
+   * restarts the configured login item through the normal startup path. */
+  async prepareForAppUpdate(): Promise<void> {
+    this.updateSuspended = true
+    await this.stopAgent()
+    await this.refresh()
+  }
+
+  async recoverFromFailedAppUpdate(): Promise<void> {
+    this.updateSuspended = false
+    const installation = this.getInstallation()
+    if (installation.installation === 'installed') await this.startAgent()
     await this.refresh()
   }
 
@@ -275,6 +292,7 @@ export class OrbitBackgroundServiceManager {
     this.setStatus(next)
     if (
       !this.disposed &&
+      !this.updateSuspended &&
       next.installation === 'installed' &&
       next.runtime === 'stopped'
     ) {

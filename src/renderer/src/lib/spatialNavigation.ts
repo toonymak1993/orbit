@@ -68,7 +68,7 @@ function findCoreSenseTarget(
   }
 
   if (direction === 'up' && current.matches('[data-coresense-launcher]')) {
-    return document.querySelector<HTMLElement>('[data-top-nav] [aria-current="page"]')
+    return getPreferredTopNavEntry()
   }
 
   if (direction === 'down' && current.matches('[data-coresense-launcher]')) {
@@ -159,7 +159,30 @@ function findNearestCandidate(
     }
   }
 
+  if (direction === 'up' && best?.closest('[data-top-nav]') && !current.closest('[data-top-nav]')) {
+    return getPreferredTopNavEntry() ?? best
+  }
+
   return best
+}
+
+/**
+ * Entering the top navigation should feel deterministic instead of depending on
+ * card geometry. Restore the last item used there; before the first visit, the
+ * active view is the most useful anchor, with Home as the stable fallback.
+ */
+function getPreferredTopNavEntry(): HTMLElement | null {
+  const topNav = document.querySelector<HTMLElement>('[data-top-nav]')
+  if (!topNav || topNav.closest('[inert]')) return null
+
+  return (
+    topNav.querySelector<HTMLElement>(
+      '[data-top-nav-last-focus="true"][data-focusable]:not([data-disabled="true"])'
+    ) ??
+    topNav.querySelector<HTMLElement>('[aria-current="page"][data-focusable]') ??
+    topNav.querySelector<HTMLElement>('[data-main-view="home"][data-focusable]') ??
+    topNav.querySelector<HTMLElement>('[data-focusable]:not([data-disabled="true"])')
+  )
 }
 
 interface NavigationRect {

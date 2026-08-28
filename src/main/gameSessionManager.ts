@@ -2,8 +2,21 @@ import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { createInterface, type Interface as ReadlineInterface } from 'node:readline'
 import type { BrowserWindow } from 'electron'
-import type { GameLaunchStatus, LibraryGame, LocalGameBackupResult } from '@shared/ipc'
+import {
+  GAME_LAUNCH_CANCEL_WINDOW_MS,
+  type GameLaunchFailureReason,
+  type GameLaunchStatus,
+  type GameProvider,
+  type LibraryGame,
+  type LocalGameBackupResult
+} from '@shared/ipc'
 import { launchGame } from './gameLauncher'
+import {
+  GAME_PROCESS_CANDIDATE_STABILITY_MS,
+  LaunchStartupTracker,
+  ancestryIncludesTrackedPid,
+  hasEligibleGameProcessIdentity
+} from './gameLaunchDetectionPolicy'
 import { settingsStore } from './settingsStore'
 
 interface WindowsProcess {
@@ -38,6 +51,12 @@ interface ScoredProcess {
   visible: boolean
 }
 
+interface PendingLaunchDelay {
+  token: number
+  timer: ReturnType<typeof setTimeout>
+  resolve: (shouldLaunch: boolean) => void
+}
+
 export interface CompletedGameSession {
   detectedAt: number
   endedAt: number
@@ -61,19 +80,16 @@ const PROCESS_SAMPLE_INTERVAL_MS = 250
 const SNAPSHOT_TIMEOUT_MS = 2_000
 const PROCESS_STALL_TIMEOUT_MS = 6_000
 const BASELINE_TIMEOUT_MS = 3_000
-const STARTUP_TIMEOUT_MS = 4 * 60_000
-const CANDIDATE_STABILITY_MS = 650
 const GAME_CONFIRMATION_MS = 4_000
 const EARLY_SESSION_WINDOW_MS = 20_000
 const EARLY_HANDOFF_GRACE_MS = 6_000
 const PROCESS_EXIT_GRACE_MS = 1_200
-const SPLASH_LEAD_IN_MS = 350
 const LAUNCH_SHIELD_TIMEOUT_MS = 10_000
 const RETURN_SPLASH_MS = 520
 const BACKUP_RESULT_SPLASH_MS = 1_400
 const RETURN_FOCUS_GUARD_MS = 1_800
 const FOCUS_GUARD_POLL_MS = 250
-const ERROR_SPLASH_MS = 3_000
+const ERROR_SPLASH_MS = 5_000
 const MIN_GAME_PROCESS_SCORE = 90
 
 type LauncherFamily =
@@ -86,6 +102,16 @@ type LauncherFamily =
   | 'rockstar'
   | '2k'
   | 'xbox'
+
+const EXPECTED_LAUNCHER_FAMILIES: Record<GameProvider, ReadonlySet<LauncherFamily>> = {
+  local: new Set<LauncherFamily>(),
+  steam: new Set(['steam', 'ea', 'ubisoft', 'rockstar', '2k']),
+  epic: new Set(['epic', 'ea', 'ubisoft', 'rockstar', '2k']),
+  gog: new Set(['gog']),
+  xbox: new Set(['xbox', 'ea', 'ubisoft']),
+  ea: new Set(['ea']),
+  ubisoft: new Set(['ubisoft'])
+}
 
 const LAUNCHER_PROCESS_FAMILIES = new Map<string, LauncherFamily>([
   ['steam.exe', 'steam'],
@@ -296,6 +322,11 @@ function processKey(candidate: WindowsProcess): string {
   return normalizedPath(candidate.ExecutablePath) || processName(candidate)
 }
 
+function executableHintName(value?: string): string {
+  const name = normalizedPath(value).split('\\').pop() ?? ''
+  return name.length <= 260 && /^[a-z0-9_.+() -]+\.exe$/i.test(name) ? name : ''
+}
+
 function hasVisibleWindow(candidate: WindowsProcess): boolean {
   return Boolean(candidate.MainWindowHandle)
 }
@@ -348,6 +379,31 @@ function ancestorMatches(
   return false
 }
 
+function ancestorPidMatches(
+  candidate: WindowsProcess,
+  processesByPid: ReadonlyMap<number, WindowsProcess>,
+  processIds: ReadonlySet<number>
+): boolean {
+  return ancestryIncludesTrackedPid(
+    candidate.ParentProcessId,
+    processIds,
+    (pid) => processesByPid.get(pid)?.ParentProcessId
+  )
+}
+
+function hasExpectedLauncherAncestor(
+  candidate: WindowsProcess,
+  provider: GameProvider,
+  processesByPid: ReadonlyMap<number, WindowsProcess>
+): boolean {
+  const expectedFamilies = EXPECTED_LAUNCHER_FAMILIES[provider]
+  if (expectedFamilies.size === 0) return false
+  return ancestorMatches(candidate, processesByPid, (ancestor) => {
+    const family = launcherFamily(ancestor)
+    return Boolean(family && expectedFamilies.has(family))
+  })
+}
+
 function gameNameTokens(game: LibraryGame): string[] {
   return game.name
     .toLowerCase()
@@ -361,11 +417,17 @@ function scoreGameProcess(
   game: LibraryGame,
   baselineByPid: ReadonlyMap<number, WindowsProcess>,
   processesByPid: ReadonlyMap<number, WindowsProcess>,
-  trackedPids: ReadonlySet<number>
+  trackedPids: ReadonlySet<number>,
+  directlySpawnedGamePids: ReadonlySet<number>
 ): ScoredProcess | null {
   const pid = processId(candidate)
   const name = processName(candidate)
   const executable = normalizedPath(candidate.ExecutablePath)
+  const expectedLocalExecutable = normalizedPath(game.local?.executablePath)
+  const expectedLocalProcessName = executableHintName(game.local?.executablePath)
+  const directlySpawnedGame =
+    directlySpawnedGamePids.has(pid) &&
+    (executable === expectedLocalExecutable || name === expectedLocalProcessName)
   const exactLocalExecutable =
     game.provider === 'local' &&
     Boolean(executable && executable === normalizedPath(game.local?.executablePath))
@@ -375,7 +437,7 @@ function scoreGameProcess(
     baselineInstance(candidate, baselineByPid) ||
     launcherFamily(candidate) ||
     SYSTEM_PROCESSES.has(name) ||
-    (NON_GAME_PROCESS.test(name) && !exactLocalExecutable)
+    (NON_GAME_PROCESS.test(name) && !exactLocalExecutable && !directlySpawnedGame)
   ) {
     return null
   }
@@ -383,12 +445,8 @@ function scoreGameProcess(
   const commandLine = (candidate.CommandLine ?? '').toLowerCase()
   const visible = hasVisibleWindow(candidate)
   const insideInstallDir = isInsideInstallDir(candidate, game.installDir)
-  const fromLauncher = ancestorMatches(candidate, processesByPid, (ancestor) =>
-    Boolean(launcherFamily(ancestor))
-  )
-  const fromTrackedGame = ancestorMatches(candidate, processesByPid, (ancestor) =>
-    trackedPids.has(processId(ancestor))
-  )
+  const fromLauncher = hasExpectedLauncherAncestor(candidate, game.provider, processesByPid)
+  const fromTrackedGame = ancestorPidMatches(candidate, processesByPid, trackedPids)
   const nameMatches = gameNameTokens(game).some((token) => name.includes(token))
   const providerIds = [game.providerGameId, game.appId ? String(game.appId) : '']
     .map((value) => value.trim().toLowerCase())
@@ -396,17 +454,42 @@ function scoreGameProcess(
   const idMatches = providerIds.some(
     (value) => commandLine.includes(value) || executable.includes(value)
   )
+  const providerExecutableHint = executableHintName(game.metadata.launchExecutable)
+  const executableHintMatches =
+    Boolean(providerExecutableHint) && name === providerExecutableHint
+  const windowsAppsProcess = executable.includes('\\windowsapps\\')
+
+  // Visibility is presentation state, not identity. In particular, accepting
+  // `xbox + visible` alone made any newly opened app look like the launched game.
+  if (
+    !hasEligibleGameProcessIdentity({
+      directlySpawnedGame,
+      exactLocalExecutable,
+      insideInstallDir,
+      idMatches,
+      executableHintMatches,
+      fromTrackedGame,
+      fromLauncher,
+      visible,
+      nameMatches,
+      windowsAppsProcess
+    })
+  ) {
+    return null
+  }
 
   let score = 0
+  if (directlySpawnedGame) score += 400
   if (exactLocalExecutable) score += 320
   if (insideInstallDir) score += 140
   if (visible) score += 85
-  if (fromLauncher) score += 55
-  if (fromTrackedGame) score += 70
+  if (fromLauncher) score += 70
+  if (fromTrackedGame) score += 130
   if (nameMatches) score += 35
-  if (idMatches) score += 45
+  if (idMatches) score += 110
+  if (executableHintMatches) score += 220
   if (game.provider === 'xbox' && visible) score += 25
-  if (executable.includes('\\windowsapps\\')) score += 20
+  if (windowsAppsProcess) score += 20
 
   if (score < MIN_GAME_PROCESS_SCORE) return null
   return { process: candidate, pid, key: processKey(candidate), score, visible }
@@ -685,6 +768,7 @@ export class GameSessionManager extends EventEmitter {
   private activeToken = 0
   private sampler: WindowsProcessSampler | null = null
   private launchTargetRevealed = false
+  private pendingLaunchDelay: PendingLaunchDelay | null = null
 
   constructor(
     private readonly mainWindow: BrowserWindow,
@@ -698,23 +782,53 @@ export class GameSessionManager extends EventEmitter {
   }
 
   revealLauncher(): void {
-    if (this.status.phase === 'idle' || this.status.phase === 'returning') return
+    if (
+      (this.status.phase !== 'launching' && this.status.phase !== 'running') ||
+      this.status.cancelableUntil
+    ) {
+      return
+    }
     this.launchTargetRevealed = true
     this.releaseLaunchShield(true)
+  }
+
+  cancelPendingLaunch(): boolean {
+    const pending = this.pendingLaunchDelay
+    const cancelableUntil = this.status.cancelableUntil
+    if (
+      !pending ||
+      pending.token !== this.activeToken ||
+      this.status.phase !== 'launching' ||
+      !cancelableUntil ||
+      Date.now() >= cancelableUntil
+    ) {
+      return false
+    }
+
+    const token = pending.token
+    this.activeToken++
+    this.settlePendingLaunchDelay(token, false)
+    this.sampler?.stop()
+    this.sampler = null
+    this.releaseLaunchShield(false)
+    this.update({ phase: 'idle' })
+    return true
   }
 
   async start(game: LibraryGame): Promise<void> {
     if (this.status.phase !== 'idle') throw new Error('A game session is already active')
 
     const token = ++this.activeToken
-    const startedAt = Date.now()
+    const requestedAt = Date.now()
+    const cancelableUntil = requestedAt + GAME_LAUNCH_CANCEL_WINDOW_MS
     this.launchTargetRevealed = false
     this.update({
       phase: 'launching',
       gameId: game.id,
       gameName: game.name,
       provider: game.provider,
-      startedAt
+      requestedAt,
+      cancelableUntil
     })
     this.maintainLaunchShield(token)
 
@@ -724,31 +838,61 @@ export class GameSessionManager extends EventEmitter {
     try {
       sampler.start()
       const baselinePromise = sampler.waitForNext(0, BASELINE_TIMEOUT_MS)
-      const [initialBaseline] = await Promise.all([baselinePromise, wait(SPLASH_LEAD_IN_MS)])
-      baseline = initialBaseline
+      const [initialBaseline, shouldLaunch] = await Promise.all([
+        baselinePromise,
+        this.waitForLaunchWindow(token, cancelableUntil)
+      ])
+      if (!shouldLaunch || token !== this.activeToken) return
+      const latestBaseline = sampler.getLatest()
+      baseline =
+        latestBaseline.sequence > initialBaseline.sequence ? latestBaseline : initialBaseline
+      if (baseline.sequence <= 0) {
+        throw new Error('Game process monitor did not provide an initial snapshot')
+      }
+    } catch (error) {
+      sampler.stop()
+      if (this.sampler === sampler) this.sampler = null
+      this.settlePendingLaunchDelay(token, false)
+      if (token !== this.activeToken) return
+      await this.fail(
+        token,
+        error instanceof Error ? error.message : 'Game process monitor unavailable',
+        'monitor-unavailable'
+      )
+      return
+    }
+
+    if (token !== this.activeToken) return
+    const startedAt = Date.now()
+    this.update({
+      phase: 'launching',
+      gameId: game.id,
+      gameName: game.name,
+      provider: game.provider,
+      requestedAt,
+      startedAt
+    })
+
+    const directlySpawnedGamePids = new Set<number>()
+    try {
+      if (token !== this.activeToken) return
+      const receipt = await launchGame(game)
+      if (receipt.spawnedGamePid) directlySpawnedGamePids.add(receipt.spawnedGamePid)
     } catch (error) {
       sampler.stop()
       if (this.sampler === sampler) this.sampler = null
       await this.fail(
         token,
-        error instanceof Error ? error.message : 'Game process monitor unavailable'
+        error instanceof Error ? error.message : 'Launch failed',
+        'launch-rejected'
       )
-      return
-    }
-
-    try {
-      await launchGame(game)
-    } catch (error) {
-      sampler.stop()
-      if (this.sampler === sampler) this.sampler = null
-      await this.fail(token, error instanceof Error ? error.message : 'Launch failed')
       return
     }
 
     // The provider-neutral launch shield keeps this in-app splash in front while
     // Steam/Epic/Xbox/EA/Ubisoft hand off. The monitor releases it only for the
     // detected game's own visible process (or the explicit timeout/Y fallback).
-    void this.monitor(token, game, startedAt, sampler, baseline)
+    void this.monitor(token, game, startedAt, sampler, baseline, directlySpawnedGamePids)
   }
 
   private async monitor(
@@ -756,7 +900,8 @@ export class GameSessionManager extends EventEmitter {
     game: LibraryGame,
     startedAt: number,
     sampler: WindowsProcessSampler,
-    baseline: ProcessSnapshot
+    baseline: ProcessSnapshot,
+    directlySpawnedGamePids: Set<number>
   ): Promise<void> {
     const baselineByPid = new Map(
       baseline.processes.map((candidate) => [processId(candidate), candidate] as const)
@@ -769,8 +914,12 @@ export class GameSessionManager extends EventEmitter {
     )
     const ownedLauncherFamilies = new Set<LauncherFamily>()
     const trackedPids = new Set<number>()
+    const trackedProcessKeysByPid = new Map<number, string>()
     const primaryProcessKeys = new Set<string>()
     const candidateSeenAt = new Map<string, number>()
+    const startupTracker = new LaunchStartupTracker(startedAt, game.provider)
+    if (directlySpawnedGamePids.size > 0) startupTracker.noteCandidateSeen()
+    const observedDirectGamePids = new Set<number>()
     let sequence = baseline.sequence
     let lastFreshSnapshotAt = Date.now()
     let detectedAt: number | undefined
@@ -779,34 +928,42 @@ export class GameSessionManager extends EventEmitter {
     let gameFocusHandedOff = false
     let missingSince: number | undefined
     let lastProcesses = baseline.processes
-    const startupDeadline = startedAt + STARTUP_TIMEOUT_MS
 
     try {
       while (token === this.activeToken) {
         const snapshot = await sampler.waitForNext(sequence, SNAPSHOT_TIMEOUT_MS)
         const now = Date.now()
 
-        if (!detectedAt && !this.launchTargetRevealed) {
+        if (!gameFocusHandedOff && !this.launchTargetRevealed) {
           if (now - startedAt < LAUNCH_SHIELD_TIMEOUT_MS) this.maintainLaunchShield(token)
           else this.revealLauncher()
         }
-        if (!detectedAt && now >= startupDeadline) {
-          await this.fail(token, 'No game process was detected')
-          return
-        }
         if (snapshot.sequence <= sequence) {
           if (now - lastFreshSnapshotAt >= PROCESS_STALL_TIMEOUT_MS) {
-            await this.fail(token, 'Game process monitor stopped responding')
+            await this.fail(
+              token,
+              'Game process monitor stopped responding',
+              'monitor-unavailable'
+            )
             return
           }
           continue
         }
         sequence = snapshot.sequence
         lastFreshSnapshotAt = now
+        const previousProcesses = lastProcesses
         lastProcesses = snapshot.processes
         const processesByPid = new Map(
           lastProcesses.map((candidate) => [processId(candidate), candidate] as const)
         )
+        const ancestryProcessesByPid = new Map(
+          previousProcesses.map((candidate) => [processId(candidate), candidate] as const)
+        )
+        for (const [pid, process] of processesByPid) ancestryProcessesByPid.set(pid, process)
+        for (const pid of directlySpawnedGamePids) {
+          if (processesByPid.has(pid)) observedDirectGamePids.add(pid)
+          else if (observedDirectGamePids.has(pid)) directlySpawnedGamePids.delete(pid)
+        }
 
         for (const candidate of lastProcesses) {
           if (!isLauncherRootProcess(candidate)) continue
@@ -816,65 +973,138 @@ export class GameSessionManager extends EventEmitter {
 
         const candidates = lastProcesses
           .map((candidate) =>
-            scoreGameProcess(candidate, game, baselineByPid, processesByPid, trackedPids)
+            scoreGameProcess(
+              candidate,
+              game,
+              baselineByPid,
+              ancestryProcessesByPid,
+              trackedPids,
+              directlySpawnedGamePids
+            )
           )
           .filter((candidate): candidate is ScoredProcess => Boolean(candidate))
           .sort((left, right) => right.score - left.score)
 
         if (!detectedAt) {
+          const currentCandidateKeys = new Set(candidates.map((candidate) => candidate.key))
+          for (const key of candidateSeenAt.keys()) {
+            if (!currentCandidateKeys.has(key)) candidateSeenAt.delete(key)
+          }
+
           const best = candidates[0]
           if (best) {
+            startupTracker.noteCandidateSeen()
             const seenAt = candidateSeenAt.get(best.key) ?? now
             candidateSeenAt.set(best.key, seenAt)
-            if (now - seenAt >= CANDIDATE_STABILITY_MS) {
+            if (now - seenAt >= GAME_PROCESS_CANDIDATE_STABILITY_MS) {
+              startupTracker.noteCandidateStabilized()
               detectedAt = seenAt
               primaryStableSince = now
               sessionConfirmed = false
               trackedPids.add(best.pid)
+              trackedProcessKeysByPid.set(best.pid, best.key)
               primaryProcessKeys.add(best.key)
               missingSince = undefined
-              this.update({
-                phase: 'running',
-                gameId: game.id,
-                gameName: game.name,
-                provider: game.provider,
-                startedAt,
-                detectedAt
-              })
               if (best.visible) {
                 this.handoffToGame(token, best.pid)
                 gameFocusHandedOff = true
               }
+              continue
+            }
+
+            const failureReason = startupTracker.failureReason(now, seenAt)
+            if (failureReason) {
+              await this.fail(
+                token,
+                failureReason === 'startup-ended'
+                  ? 'Game process exited before startup completed'
+                  : 'No game process was detected',
+                failureReason
+              )
+              return
             }
           } else {
             candidateSeenAt.clear()
+            startupTracker.noteCandidateMissing(now)
+            const failureReason = startupTracker.failureReason(now)
+            if (failureReason) {
+              await this.fail(
+                token,
+                failureReason === 'startup-ended'
+                  ? 'Game process exited before startup completed'
+                  : 'No game process was detected',
+                failureReason
+              )
+              return
+            }
           }
 
           continue
         }
 
-        const activePrimary = candidates.filter((candidate) => {
-          if (primaryProcessKeys.has(candidate.key)) return true
-          const inherited = ancestorMatches(candidate.process, processesByPid, (ancestor) =>
-            trackedPids.has(processId(ancestor))
+        // Once a process is identified, PID + executable identity is the life
+        // signal. Re-scoring it on every snapshot could falsely end a running
+        // game after its launcher parent or window disappears.
+        const activePrimaryByPid = new Map<number, ScoredProcess>()
+        for (const process of lastProcesses) {
+          const pid = processId(process)
+          const key = processKey(process)
+          const expectedKey = trackedProcessKeysByPid.get(pid)
+          const pinnedProcess = Boolean(expectedKey && key === expectedKey)
+          const sameExecutableSuccessor = Boolean(
+            !expectedKey &&
+              key.includes('\\') &&
+              primaryProcessKeys.has(key) &&
+              !baselineInstance(process, baselineByPid) &&
+              processName(process).endsWith('.exe') &&
+              !launcherFamily(process) &&
+              !SYSTEM_PROCESSES.has(processName(process)) &&
+              !NON_GAME_PROCESS.test(processName(process))
           )
-          if (inherited && (candidate.visible || candidate.score >= 180)) {
+          if (!pinnedProcess && !sameExecutableSuccessor) continue
+          activePrimaryByPid.set(pid, {
+            process,
+            pid,
+            key,
+            score: Number.MAX_SAFE_INTEGER,
+            visible: hasVisibleWindow(process)
+          })
+        }
+
+        for (const candidate of candidates) {
+          if (activePrimaryByPid.has(candidate.pid)) continue
+          if (primaryProcessKeys.has(candidate.key)) {
+            activePrimaryByPid.set(candidate.pid, candidate)
+            continue
+          }
+          const inherited = ancestorPidMatches(
+            candidate.process,
+            ancestryProcessesByPid,
+            trackedPids
+          )
+          if (inherited) {
             primaryProcessKeys.add(candidate.key)
-            return true
+            activePrimaryByPid.set(candidate.pid, candidate)
+            continue
           }
           if (missingSince && candidate.visible && candidate.score >= 110) {
             primaryProcessKeys.add(candidate.key)
-            return true
+            activePrimaryByPid.set(candidate.pid, candidate)
+            continue
           }
           if (missingSince && candidate.score >= 140) {
             primaryProcessKeys.add(candidate.key)
-            return true
+            activePrimaryByPid.set(candidate.pid, candidate)
           }
-          return false
-        })
+        }
+        const activePrimary = [...activePrimaryByPid.values()]
 
         trackedPids.clear()
-        for (const candidate of activePrimary) trackedPids.add(candidate.pid)
+        trackedProcessKeysByPid.clear()
+        for (const candidate of activePrimary) {
+          trackedPids.add(candidate.pid)
+          trackedProcessKeysByPid.set(candidate.pid, candidate.key)
+        }
 
         if (activePrimary.length > 0) {
           if (!gameFocusHandedOff) {
@@ -887,10 +1117,30 @@ export class GameSessionManager extends EventEmitter {
           primaryStableSince ??= now
           if (now - primaryStableSince >= GAME_CONFIRMATION_MS && !sessionConfirmed) {
             sessionConfirmed = true
+            directlySpawnedGamePids.clear()
+            this.update({
+              phase: 'running',
+              gameId: game.id,
+              gameName: game.name,
+              provider: game.provider,
+              requestedAt: this.status.requestedAt,
+              startedAt,
+              detectedAt
+            })
             try {
               await this.callbacks.onGameConfirmed?.(game, detectedAt)
             } catch {
               // Recency persistence must never break session monitoring.
+            }
+          } else if (!sessionConfirmed) {
+            const failureReason = startupTracker.absoluteFailureReason(now)
+            if (failureReason) {
+              await this.fail(
+                token,
+                'Game process did not remain stable during startup',
+                failureReason
+              )
+              return
             }
           }
           missingSince = undefined
@@ -898,12 +1148,15 @@ export class GameSessionManager extends EventEmitter {
           if (!sessionConfirmed) {
             // Short-lived launch shims (EA/Ubisoft/Xbox bootstrap processes,
             // anti-cheat hand-offs, etc.) are provisional. Losing one returns
-            // to launch detection instead of incorrectly ending the session.
+            // to launch detection, but the startup tracker keeps a bounded
+            // hand-off grace instead of restarting the full wait.
+            startupTracker.noteCandidateMissing(now)
             detectedAt = undefined
             primaryStableSince = undefined
             gameFocusHandedOff = false
             missingSince = undefined
             trackedPids.clear()
+            trackedProcessKeysByPid.clear()
             primaryProcessKeys.clear()
             candidateSeenAt.clear()
             this.update({
@@ -911,6 +1164,7 @@ export class GameSessionManager extends EventEmitter {
               gameId: game.id,
               gameName: game.name,
               provider: game.provider,
+              requestedAt: this.status.requestedAt,
               startedAt
             })
             if (!this.launchTargetRevealed && now - startedAt < LAUNCH_SHIELD_TIMEOUT_MS) {
@@ -941,7 +1195,8 @@ export class GameSessionManager extends EventEmitter {
       if (token === this.activeToken) {
         await this.fail(
           token,
-          error instanceof Error ? error.message : 'Game process monitor unavailable'
+          error instanceof Error ? error.message : 'Game process monitor unavailable',
+          'monitor-unavailable'
         )
       }
     } finally {
@@ -963,7 +1218,9 @@ export class GameSessionManager extends EventEmitter {
         ? { gameId: status.gameId as string, durationSeconds, endedAt }
         : null
 
+    const token = this.activeToken
     this.activeToken++
+    this.settlePendingLaunchDelay(token, false)
     this.sampler?.stop()
     this.sampler = null
     this.releaseLaunchShield(false)
@@ -1037,9 +1294,20 @@ export class GameSessionManager extends EventEmitter {
     }
   }
 
-  private async fail(token: number, message: string): Promise<void> {
+  private async fail(
+    token: number,
+    message: string,
+    failureReason: GameLaunchFailureReason
+  ): Promise<void> {
     if (token !== this.activeToken) return
-    this.update({ ...this.status, phase: 'error', message, endedAt: Date.now() })
+    this.update({
+      ...this.status,
+      phase: 'error',
+      cancelableUntil: undefined,
+      failureReason,
+      message,
+      endedAt: Date.now()
+    })
     await this.focusOrbit(token)
     await wait(ERROR_SPLASH_MS)
     if (token === this.activeToken) {
@@ -1081,6 +1349,24 @@ export class GameSessionManager extends EventEmitter {
     if (token === this.activeToken && this.status.phase === 'idle') {
       this.releaseLaunchShield(false)
     }
+  }
+
+  private waitForLaunchWindow(token: number, cancelableUntil: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(
+        () => this.settlePendingLaunchDelay(token, true),
+        Math.max(0, cancelableUntil - Date.now())
+      )
+      this.pendingLaunchDelay = { token, timer, resolve }
+    })
+  }
+
+  private settlePendingLaunchDelay(token: number, shouldLaunch: boolean): void {
+    const pending = this.pendingLaunchDelay
+    if (!pending || pending.token !== token) return
+    clearTimeout(pending.timer)
+    this.pendingLaunchDelay = null
+    pending.resolve(shouldLaunch)
   }
 
   private maintainLaunchShield(token: number): void {

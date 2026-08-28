@@ -11,8 +11,16 @@
   "platform": "windows",
   "architecture": "x64",
   "packageFormats": ["nsis", "appx"],
-  "updateMode": "manual-package",
-  "automaticUpdatesEnabled": false,
+  "updateMode": "github-release",
+  "automaticUpdatesEnabled": true,
+  "updates": {
+    "owner": "toonymak1993",
+    "repository": "orbit",
+    "startupDelaySeconds": 12,
+    "checkIntervalHours": 6,
+    "autoDownload": true,
+    "signerThumbprints": ["D1D2DE6B5C77C880DFEA5184245722C67F941189"]
+  },
   "publisher": "ORBIT Development",
   "minimumWindowsVersion": "10.0.22000.0",
   "xboxMode": {

@@ -77,7 +77,9 @@ $distributionManifest = [ordered]@{
   packageVersion = $packageVersion
   releaseSequence = $releaseSequence
   channel = $releaseChannel
-  updateMode = 'manual-package'
+  updateMode = [string]$releaseMetadata.updateMode
+  automaticUpdatesEnabled = [bool]$releaseMetadata.automaticUpdatesEnabled
+  updateRepository = "$($releaseMetadata.updates.owner)/$($releaseMetadata.updates.repository)"
   generatedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
   artifacts = $verifiedFiles
 }
