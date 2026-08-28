@@ -10,6 +10,11 @@ $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $buildDir = Join-Path $repoRoot 'build'
 $releaseMetadata = Get-Content -LiteralPath (Join-Path $repoRoot 'resources\release-manifest.json') -Raw | ConvertFrom-Json
 $displayVersion = [string]$releaseMetadata.displayVersion
+$releaseChannel = ([string]$releaseMetadata.channel).Trim().ToLowerInvariant()
+if ($releaseChannel -notin @('beta', 'stable')) {
+  throw "Unsupported ORBIT release channel: $releaseChannel"
+}
+$releaseLabel = if ($releaseChannel -eq 'beta') { 'BETA' } else { 'RELEASE' }
 New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
 
 function New-RoundedPath {
@@ -117,7 +122,7 @@ function New-OrbitSidebar {
       $graphics.DrawString('ORBIT', $titleFont, $white, 43, 154)
       $graphics.DrawString('YOUR GAMES. ONE UNIVERSE.', $labelFont, $accent, 25, 185)
       $graphics.DrawString("Fast. Focused. Controller-first.", $smallFont, $muted, 25, 209)
-      $graphics.DrawString("BETA $displayVersion", $labelFont, $muted, 25, 266)
+      $graphics.DrawString("$releaseLabel $displayVersion", $labelFont, $muted, 25, 266)
     } finally {
       $titleFont.Dispose()
       $smallFont.Dispose()
@@ -163,7 +168,7 @@ function New-OrbitHeader {
     $muted = [System.Drawing.SolidBrush]::new([System.Drawing.Color]::FromArgb(176, 188, 204, 226))
     try {
       $graphics.DrawString('ORBIT', $titleFont, $white, 12, 10)
-      $graphics.DrawString("BETA  -  $displayVersion", $labelFont, $muted, 13, 34)
+      $graphics.DrawString("$releaseLabel  -  $displayVersion", $labelFont, $muted, 13, 34)
     } finally {
       $titleFont.Dispose()
       $labelFont.Dispose()
