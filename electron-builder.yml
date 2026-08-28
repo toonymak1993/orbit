@@ -1,9 +1,14 @@
 appId: com.orbit.launcher
 productName: ORBIT
-buildVersion: 0.1.0.4
-artifactName: ORBIT-Setup-0.1.0-${arch}.${ext}
+buildVersion: 0.1.1.0
+artifactName: ORBIT-Setup-0.1.1-${arch}.${ext}
 copyright: Copyright © 2026 Luis Garcia
 forceCodeSigning: true
+
+publish:
+  - provider: github
+    owner: toonymak1993
+    repo: orbit
 
 directories:
   buildResources: build
@@ -16,8 +21,13 @@ files:
 extraResources:
   - from: resources/release-manifest.json
     to: release-manifest.json
+  - from: resources/discord-social-sdk
+    to: discord-social-sdk
 
 asar: true
+asarUnpack:
+  - node_modules/koffi/**/*
+  - node_modules/@koromix/koffi-win32-x64/**/*
 compression: normal
 
 win:
@@ -42,15 +52,14 @@ nsis:
   allowToChangeInstallationDirectory: true
   installerLanguages:
     - en_US
-    - de_DE
   displayLanguageSelector: false
   createDesktopShortcut: true
   createStartMenuShortcut: true
   shortcutName: ORBIT
   runAfterFinish: true
   packElevateHelper: false
-  differentialPackage: false
-  uninstallDisplayName: ORBIT 0.1.0
+  differentialPackage: true
+  uninstallDisplayName: ORBIT 0.1.1
   installerIcon: build/installerIcon.ico
   uninstallerIcon: build/uninstallerIcon.ico
   installerHeader: build/installerHeader.bmp

@@ -74,6 +74,47 @@
   scroll-margin-block: clamp(1.5rem, 6vh, 4rem);
 }
 
+.friends-view {
+  overflow-anchor: none;
+}
+
+.friends-view [data-focusable] {
+  scroll-margin-block: clamp(1rem, 5vh, 3rem);
+}
+
+.friend-card {
+  transition:
+    border-color 140ms ease,
+    background-color 140ms ease;
+}
+
+.friend-card:hover,
+.friend-card:focus-visible,
+.friend-card[data-focused='true'] {
+  border-color: rgb(var(--color-accent) / 0.6);
+  background-color: rgb(var(--color-surface-2) / 0.94);
+}
+
+@media (orientation: landscape) and (max-height: 720px) {
+  .friends-view {
+    padding-top: 5.5rem;
+  }
+
+  .friends-state-card {
+    min-height: 8rem;
+  }
+
+  .friend-card {
+    min-height: 5rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .friend-card {
+    transition: none;
+  }
+}
+
 .release-calendar-hero {
   height: clamp(18rem, 43vh, 30rem);
 }
@@ -122,10 +163,6 @@
 }
 
 @media (orientation: landscape) and (max-height: 720px) {
-  .release-calendar-view {
-    padding-top: 5.5rem;
-  }
-
   .release-calendar-hero {
     height: 17rem;
   }
@@ -403,10 +440,15 @@
 }
 
 .game-detail-layout {
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: clamp(0.9rem, 1.8vh, 1.5rem);
+  padding: clamp(4.5rem, 8vh, 6.5rem) clamp(1.4rem, 3vw, 3.5rem)
+    clamp(1.3rem, 3vh, 2.75rem);
+}
+
+.game-detail-overview {
   grid-template-columns: minmax(15rem, 0.82fr) minmax(24rem, 1.18fr);
   gap: clamp(1.25rem, 2.5vw, 3rem);
-  padding: clamp(5rem, 13vh, 9rem) clamp(1.4rem, 3vw, 3.5rem)
-    clamp(1.3rem, 3vh, 2.75rem);
 }
 
 .game-detail-identity {
@@ -418,8 +460,33 @@
   margin-bottom: clamp(0.75rem, 1.7vh, 1.25rem);
 }
 
-.game-detail-stats {
+.game-detail-backup,
+.game-detail-completion {
   margin-bottom: clamp(0.75rem, 1.5vh, 1.15rem);
+}
+
+.game-detail-action {
+  display: flex;
+  min-width: 0;
+  min-height: 3.35rem;
+  align-items: center;
+  justify-content: center;
+  gap: 0.625rem;
+  border-width: 1px;
+  border-radius: 9999px;
+  padding: 0.6rem 1rem;
+  text-align: center;
+  font-size: 0.875rem;
+  line-height: 1.15;
+  font-weight: 600;
+  backdrop-filter: blur(12px);
+  transition-property: color, background-color, border-color, transform;
+  transition-duration: 160ms;
+}
+
+[data-density='compact'] .game-detail-action {
+  min-height: 3rem;
+  padding-block: 0.45rem;
 }
 
 @media (orientation: landscape) and (max-width: 1500px) {
@@ -431,10 +498,14 @@
   }
 
   .game-detail-layout {
-    grid-template-columns: minmax(14rem, 0.78fr) minmax(22rem, 1.22fr);
-    gap: clamp(1rem, 2vw, 1.6rem);
+    gap: clamp(0.75rem, 1.4vh, 1rem);
     padding: clamp(4.5rem, 12vh, 6rem) clamp(1.2rem, 2.5vw, 2rem)
       clamp(1.1rem, 2.5vh, 1.6rem);
+  }
+
+  .game-detail-overview {
+    grid-template-columns: minmax(14rem, 0.78fr) minmax(22rem, 1.22fr);
+    gap: clamp(1rem, 2vw, 1.6rem);
   }
 }
 
@@ -447,9 +518,13 @@
   }
 
   .game-detail-layout {
+    gap: 0.65rem;
+    padding: 4.25rem 1.25rem 1rem;
+  }
+
+  .game-detail-overview {
     grid-template-columns: minmax(13rem, 0.76fr) minmax(21rem, 1.24fr);
     gap: 1rem;
-    padding: 4.25rem 1.25rem 1rem;
   }
 
   .game-detail-summary {
@@ -458,8 +533,15 @@
 
   .game-detail-identity,
   .game-detail-meta,
-  .game-detail-stats {
+  .game-detail-backup,
+  .game-detail-completion {
     margin-bottom: 0.65rem;
+  }
+
+  .game-detail-action {
+    min-height: 2.85rem;
+    padding: 0.4rem 0.75rem;
+    font-size: 0.8rem;
   }
 
   .game-detail-achievements {

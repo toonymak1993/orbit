@@ -9,7 +9,18 @@ export default defineConfig({
         '@shared': resolve('src/shared')
       }
     },
-    plugins: [externalizeDepsPlugin()]
+    plugins: [externalizeDepsPlugin()],
+    build: {
+      rollupOptions: {
+        input: {
+          index: resolve('src/main/index.ts'),
+          discordSocialWorker: resolve('src/main/discord/discordSocialWorker.ts')
+        },
+        output: {
+          entryFileNames: '[name].js'
+        }
+      }
+    }
   },
   preload: {
     resolve: {

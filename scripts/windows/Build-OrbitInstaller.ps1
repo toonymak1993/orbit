@@ -12,6 +12,20 @@ $passwordPath = Join-Path $certificateDir 'orbit-development-password.xml'
 $releaseDir = Join-Path $repoRoot 'release'
 $securePassword = $null
 $passwordPointer = [IntPtr]::Zero
+$node = Get-Command node.exe -ErrorAction SilentlyContinue
+if (!$node) { throw 'node.exe is required to build the ORBIT Windows installer.' }
+
+function Invoke-LocalNodeTool {
+  param(
+    [string]$RelativePath,
+    [string[]]$Arguments
+  )
+
+  $toolPath = Join-Path $repoRoot $RelativePath
+  if (!(Test-Path -LiteralPath $toolPath)) { throw "The local build tool is missing: $toolPath" }
+  & $node.Source $toolPath @Arguments
+  if ($LASTEXITCODE -ne 0) { throw "Local build tool failed: $RelativePath" }
+}
 
 Push-Location $repoRoot
 try {
@@ -23,14 +37,10 @@ try {
   $env:WIN_CSC_LINK = $pfxPath
   $env:WIN_CSC_KEY_PASSWORD = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($passwordPointer)
 
-  & npm.cmd run typecheck
-  if ($LASTEXITCODE -ne 0) { throw 'TypeScript validation failed.' }
-
-  & npm.cmd run build
-  if ($LASTEXITCODE -ne 0) { throw 'Renderer/main build failed.' }
-
-  & npx.cmd electron-builder --win nsis --x64 --publish never
-  if ($LASTEXITCODE -ne 0) { throw 'Windows installer build failed.' }
+  Invoke-LocalNodeTool 'node_modules\typescript\bin\tsc' @('--noEmit', '-p', 'tsconfig.node.json')
+  Invoke-LocalNodeTool 'node_modules\typescript\bin\tsc' @('--noEmit', '-p', 'tsconfig.web.json')
+  Invoke-LocalNodeTool 'node_modules\electron-vite\bin\electron-vite.js' @('build')
+  Invoke-LocalNodeTool 'node_modules\electron-builder\out\cli\cli.js' @('--win', 'nsis', '--x64', '--publish', 'never')
 
   Copy-Item -LiteralPath $cerPath -Destination (Join-Path $releaseDir 'ORBIT-Development.cer') -Force
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Install-OrbitDevelopmentCertificate.ps1') -Destination (Join-Path $releaseDir 'Install-OrbitDevelopmentCertificate.ps1') -Force

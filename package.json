@@ -1,6 +1,6 @@
 {
   "name": "orbit",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "ORBIT — Gaming Launcher Console UI",
   "main": "./out/main/index.js",
   "author": "Luis Garcia",
@@ -12,8 +12,18 @@
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "verify:steam": "node --experimental-strip-types scripts/verify-steam-sync.ts",
+    "verify:discord": "node --experimental-strip-types scripts/verify-discord-social-sdk.ts",
+    "verify:discord-worker": "electron scripts/verify-discord-worker.cjs",
     "verify:downloads": "node --experimental-strip-types --import ./scripts/register-typescript-resolver.mjs scripts/verify-launcher-downloads.ts",
     "verify:launch-arguments": "node --experimental-strip-types scripts/verify-custom-launch-arguments.ts",
+    "verify:game-launch": "node --experimental-strip-types scripts/verify-game-launch-detection.ts",
+    "verify:dualsense": "node --experimental-strip-types scripts/verify-dualsense-monitor.ts",
+    "verify:library": "node --experimental-strip-types --import ./scripts/register-typescript-resolver.mjs scripts/verify-library-completeness.ts",
+    "verify:artwork-search": "node --experimental-strip-types scripts/verify-steamgriddb-search.ts",
+    "verify:store-releases": "node --experimental-strip-types scripts/verify-store-releases.ts",
+    "verify:store-catalog": "node --experimental-strip-types scripts/verify-store-catalog.ts",
+    "verify:updates": "node --experimental-strip-types scripts/verify-app-updates.ts",
+    "verify:xbox-installer-script": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/Verify-OrbitXboxInstallerScript.ps1",
     "build:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/Build-OrbitInstaller.ps1",
     "build:xbox": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/Build-OrbitXboxPackage.ps1",
     "build:beta": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/Build-OrbitBeta.ps1",
@@ -29,6 +39,7 @@
     "electron-updater": "^6.3.9",
     "framer-motion": "^11.11.17",
     "howlongtobeat-ts": "^1.2.0",
+    "koffi": "3.1.6",
     "lucide-react": "^0.462.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
@@ -52,6 +63,7 @@
   "allowScripts": {
     "electron@43.4.1": true,
     "esbuild@0.21.5": true,
+    "koffi@3.1.6": false,
     "protobufjs@7.6.5": true
   }
 }

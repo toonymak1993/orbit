@@ -6,6 +6,9 @@ const defaults: OrbitSettings = {
   profileAvatar: 'orbit',
   homeLayout: 'orbit',
   gameCardSize: 'standard',
+  libraryGridColumns: 6,
+  favoriteGameIds: [],
+  customLibraries: [],
   backdropIntensity: 'balanced',
   homeCardBubbleEffect: true,
   uiDensity: 'standard',
@@ -20,6 +23,7 @@ const defaults: OrbitSettings = {
   notificationsEnabled: true,
   notificationPosition: 'top-right',
   notificationMotion: 'slide',
+  appUpdateAutoDownload: true,
   hardwareControlEnabled: false,
   hardwareControlButton: 'menu',
   hardwareControlHoldSeconds: 2

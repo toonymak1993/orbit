@@ -15,6 +15,8 @@ export type ThemeId =
 export type UiDensity = 'standard' | 'compact'
 export type HomeLayoutId = 'orbit' | 'float' | 'coresense'
 export type GameCardSize = 'compact' | 'standard' | 'large'
+export const LIBRARY_GRID_COLUMN_OPTIONS = [4, 5, 6, 7, 8] as const
+export type LibraryGridColumns = (typeof LIBRARY_GRID_COLUMN_OPTIONS)[number]
 export type BackdropIntensity = 'subtle' | 'balanced' | 'vivid'
 export const PROFILE_AVATAR_IDS = [
   'orbit',
@@ -43,8 +45,35 @@ export type AudioPreset =
   | 'off'
 export type StoreRegionId = 'eu' | 'us' | 'gb' | 'ca' | 'au'
 export type SystemPowerAction = 'sleep' | 'restart' | 'shutdown'
+export type SystemSettingsTarget = 'power' | 'wifi' | 'ethernet' | 'bluetooth'
 export type AppControlAction = 'relaunch' | 'quit'
 export type GraphicsAdapterVendor = 'nvidia' | 'amd' | 'intel' | 'other'
+
+export type SystemStatusState = 'loading' | 'ready' | 'partial' | 'error' | 'unsupported'
+export type SystemNetworkType = 'wifi' | 'ethernet' | 'offline' | 'unknown'
+
+/** Sanitized, local-only device status for ORBIT's top-bar quick menu. */
+export interface SystemStatusSnapshot {
+  platform: 'windows' | 'unsupported'
+  state: SystemStatusState
+  checkedAt: number
+  battery: {
+    present: boolean
+    level?: number
+    charging: boolean
+    powerSource: 'battery' | 'ac' | 'unknown'
+  }
+  network: {
+    connected: boolean
+    type: SystemNetworkType
+    name?: string
+    linkSpeed?: string
+  }
+  bluetooth: {
+    available: boolean
+    enabled: boolean
+  }
+}
 
 export interface InstalledGraphicsAdapter {
   name: string
@@ -89,10 +118,64 @@ export interface SystemUpdateSnapshot {
     graphicsDetection?: 'graphics-detection-unavailable'
   }
 }
+
+export type AppUpdateInstallMode = 'appx' | 'nsis' | 'development' | 'unsupported'
+export type AppUpdateStage =
+  | 'unsupported'
+  | 'idle'
+  | 'checking'
+  | 'up-to-date'
+  | 'available'
+  | 'downloading'
+  | 'verifying'
+  | 'ready'
+  | 'installing'
+  | 'error'
+export type AppUpdateError =
+  | 'release-unavailable'
+  | 'release-invalid'
+  | 'download-failed'
+  | 'verification-failed'
+  | 'install-failed'
+export type AppUpdateBlockedReason = 'game-active' | 'not-downloaded'
+export type AppUpdateDownloadPauseReason = 'game-active' | 'launcher-download-active'
+export type AppUpdateVerification = 'pending' | 'verifying' | 'verified' | 'installer-managed'
+
+/** Sanitized application-update state. Download URLs, local paths and raw
+ * installer errors intentionally never cross into the renderer. */
+export interface AppUpdateSnapshot {
+  stage: AppUpdateStage
+  installMode: AppUpdateInstallMode
+  currentVersion: string
+  targetVersion?: string
+  releaseName?: string
+  releaseNotes?: string
+  releasePageUrl?: string
+  checkedAt?: number
+  downloadedAt?: number
+  installedVersion?: string
+  transferredBytes?: number
+  totalBytes?: number
+  percent?: number
+  bytesPerSecond?: number
+  channel: 'stable' | 'beta'
+  automaticChecksEnabled: boolean
+  autoDownloadEnabled: boolean
+  checkIntervalHours: number
+  nextCheckAt?: number
+  verification: AppUpdateVerification
+  downloadPausedReason?: AppUpdateDownloadPauseReason
+  canInstall: boolean
+  blockedReason?: AppUpdateBlockedReason
+  installScheduled: boolean
+  installCountdownEndsAt?: number
+  error?: AppUpdateError
+}
 export const HARDWARE_CONTROL_BUTTONS = [
   'menu',
   'view',
   'guide',
+  'playstation',
   'a',
   'b',
   'x',
@@ -111,6 +194,15 @@ export const HARDWARE_CONTROL_BUTTONS = [
 export type HardwareControlButton = (typeof HARDWARE_CONTROL_BUTTONS)[number]
 export const HARDWARE_CONTROL_HOLD_SECONDS = [1, 1.5, 2, 3] as const
 export type HardwareControlHoldSeconds = (typeof HARDWARE_CONTROL_HOLD_SECONDS)[number]
+
+/** A user-owned, provider-neutral game collection. Games remain referenced by
+ * their durable `<provider>:<providerGameId>` library identity. */
+export interface GameCollection {
+  id: string
+  name: string
+  gameIds: string[]
+  createdAt: number
+}
 
 export interface HardwareControlStatus {
   state: 'disabled' | 'starting' | 'ready' | 'unavailable'
@@ -143,6 +235,9 @@ export interface OrbitSettings {
   profileAvatar: ProfileAvatarId
   homeLayout: HomeLayoutId
   gameCardSize: GameCardSize
+  libraryGridColumns: LibraryGridColumns
+  favoriteGameIds: string[]
+  customLibraries: GameCollection[]
   backdropIntensity: BackdropIntensity
   homeCardBubbleEffect: boolean
   uiDensity: UiDensity
@@ -150,6 +245,7 @@ export interface OrbitSettings {
   audioPreset: AudioPreset
   hasCompletedOnboarding: boolean
   steamGridDbApiKey?: string
+  steamWebApiKey?: string
   storeRegion: StoreRegionId
   showStoreTab: boolean
   showHomeBanners: boolean
@@ -158,6 +254,7 @@ export interface OrbitSettings {
   notificationsEnabled: boolean
   notificationPosition: NotificationPosition
   notificationMotion: NotificationMotion
+  appUpdateAutoDownload: boolean
   hardwareControlEnabled: boolean
   hardwareControlButton: HardwareControlButton
   hardwareControlHoldSeconds: HardwareControlHoldSeconds
@@ -186,6 +283,56 @@ export type EpicLoginStatus =
 export interface EpicAccount {
   accountId: string
   displayName: string
+}
+
+export const FRIENDS_PROVIDERS = ['steam', 'discord', 'epic'] as const
+export type FriendsProvider = (typeof FRIENDS_PROVIDERS)[number]
+export type FriendPresence = 'online' | 'away' | 'busy' | 'offline' | 'unknown'
+export type FriendsProviderState =
+  | 'ready'
+  | 'not-connected'
+  | 'setup-required'
+  | 'connecting'
+  | 'external'
+  | 'error'
+export type FriendsProviderIssue =
+  | 'api-key-required'
+  | 'api-key-invalid'
+  | 'private-profile'
+  | 'provider-unavailable'
+  | 'authentication-failed'
+  | 'sdk-unavailable'
+  | 'integration-required'
+
+/** Provider-neutral social identity. Provider credentials and raw responses
+ * remain in the main process and never cross this contract. */
+export interface OrbitFriend {
+  id: string
+  provider: FriendsProvider
+  providerUserId: string
+  displayName: string
+  avatarUrl?: string
+  profileUrl?: string
+  presence: FriendPresence
+  activity?: string
+  lastSeenAt?: number
+}
+
+export interface FriendsProviderStatus {
+  provider: FriendsProvider
+  state: FriendsProviderState
+  friendCount: number
+  onlineCount: number
+  updatedAt?: number
+  accountName?: string
+  issue?: FriendsProviderIssue
+}
+
+export interface FriendsSnapshot {
+  friends: OrbitFriend[]
+  providers: Record<FriendsProvider, FriendsProviderStatus>
+  updatedAt: number
+  isRefreshing: boolean
 }
 
 export type GameProvider = 'steam' | 'epic' | 'gog' | 'xbox' | 'ea' | 'ubisoft' | 'local'
@@ -295,6 +442,8 @@ export interface GameMetadata {
   storeUrl?: string
   /** Validated provider launch target, such as a Windows AppsFolder AUMID. */
   launchUri?: string
+  /** Provider manifest executable hint used only to identify the launched process. */
+  launchExecutable?: string
   languages?: string[]
   controllerSupport?: string
   platforms?: GamePlatform[]
@@ -398,6 +547,7 @@ export type LibraryDetectionMethod =
   | 'launcher-session'
   | 'epic-catalog'
   | 'xbox-app-cache'
+  | 'xbox-display-catalog'
   | 'windows-packages'
   | 'cached-data'
 export type LibraryProviderIssue =
@@ -444,9 +594,9 @@ export interface LibraryActivitySummary {
 }
 
 export interface LibrarySnapshot {
-  /** Cross-store canonical games used by Home and the combined library. */
+  /** Lossless provider-identity records used by Home and the combined library. */
   games: LibraryGame[]
-  /** Complete provider records used by Steam/Epic/Xbox-specific tabs. */
+  /** Compatibility projection used by provider-specific tabs. */
   providerGames: LibraryGame[]
   recentGameIds: string[]
   loadedAt: number
@@ -468,18 +618,28 @@ export interface LibraryStats {
 }
 
 export type GameLaunchPhase = 'idle' | 'launching' | 'running' | 'returning' | 'error'
+export const GAME_LAUNCH_CANCEL_WINDOW_MS = 3_000
+
+export type GameLaunchFailureReason =
+  | 'launch-rejected'
+  | 'not-started'
+  | 'startup-ended'
+  | 'monitor-unavailable'
 
 export interface GameLaunchStatus {
   phase: GameLaunchPhase
   gameId?: string
   gameName?: string
   provider?: GameProvider
+  requestedAt?: number
+  cancelableUntil?: number
   startedAt?: number
   detectedAt?: number
   endedAt?: number
   sessionDurationSeconds?: number
   totalPlaytimeSeconds?: number
   returnTask?: 'backing-up' | 'backup-complete' | 'backup-failed'
+  failureReason?: GameLaunchFailureReason
   message?: string
 }
 
@@ -575,6 +735,7 @@ export interface StoreSnapshot {
   releaseCalendarMonth?: string
   releaseCalendarUpdatedAt?: number
   releaseCalendarError: boolean
+  catalogError: boolean
   region: StoreRegionId
   updatedAt: number
   lastSuccessfulRefreshAt?: number
@@ -646,6 +807,12 @@ export const IPC = {
   epicLoginStatus: 'epic:login:status',
   epicLogout: 'epic:logout',
   epicGetAccount: 'epic:get-account',
+  friendsGet: 'friends:get',
+  friendsRefresh: 'friends:refresh',
+  friendsConnect: 'friends:provider:connect',
+  friendsDisconnect: 'friends:provider:disconnect',
+  friendsUpdated: 'friends:updated',
+  friendsOpenProvider: 'friends:provider:open',
   libraryGet: 'library:get',
   libraryStatsGet: 'library:stats:get',
   libraryRefresh: 'library:refresh',
@@ -663,6 +830,7 @@ export const IPC = {
   customGameBackup: 'library:custom:backup',
   customGameOpenBackups: 'library:custom:backups:open',
   gameLaunch: 'game:launch',
+  gameLaunchCancel: 'game:launch:cancel',
   gameLaunchGet: 'game:launch:get',
   gameLaunchRevealLauncher: 'game:launch:reveal-launcher',
   gameLaunchStatus: 'game:launch:status',
@@ -673,6 +841,12 @@ export const IPC = {
   profileAvatarGetCustom: 'profile-avatar:custom:get',
   profileAvatarSelectCustom: 'profile-avatar:custom:select',
   appVersion: 'app:version',
+  appUpdateGet: 'app:update:get',
+  appUpdateCheck: 'app:update:check',
+  appUpdateDownload: 'app:update:download',
+  appUpdateInstall: 'app:update:install',
+  appUpdateDefer: 'app:update:defer',
+  appUpdateStatus: 'app:update:status',
   backgroundServiceGetStatus: 'background-service:status:get',
   backgroundServiceControl: 'background-service:control',
   backgroundServiceStatus: 'background-service:status',
@@ -682,6 +856,7 @@ export const IPC = {
   imageSteamGridDbList: 'image:steamgriddb:list',
   imageSteamGridDbApply: 'image:steamgriddb:apply',
   imageSelectCustom: 'image:custom:select',
+  imagePasteCustom: 'image:custom:paste',
   imageResetCustom: 'image:custom:reset',
   imageHasCustom: 'image:custom:has',
   imageReportFailure: 'image:failure:report',
@@ -699,6 +874,10 @@ export const IPC = {
   syncUpdated: 'sync:updated',
   systemUpdatesCheck: 'system:updates:check',
   systemOpenUpdateSettings: 'system:updates:open-settings',
+  systemStatusGet: 'system:status:get',
+  systemStatusRefresh: 'system:status:refresh',
+  systemStatusUpdated: 'system:status:updated',
+  systemOpenSettings: 'system:settings:open',
   systemPower: 'system:power',
   appControl: 'app:control',
   openExternal: 'shell:open-external'

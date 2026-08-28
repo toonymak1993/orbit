@@ -8,11 +8,13 @@ import {
   Gamepad2,
   HardDriveDownload,
   ImagePlus,
+  LibraryBig,
   Loader2,
   Play,
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
+  Star,
   Timer,
   Trophy,
   Trash2,
@@ -21,12 +23,14 @@ import {
 import type {
   GameAchievementsSnapshot,
   GameCompletionTimes,
+  ImageOrientation,
   ImageUpdate,
   LibraryGame
 } from '@shared/ipc'
 import { GameImage } from './GameImage'
 import { ArtworkPicker } from './ArtworkPicker'
 import { LaunchOptionsDialog } from './LaunchOptionsDialog'
+import { LibraryCollectionDialog } from './LibraryCollectionDialog'
 import { useBackHandler } from '@renderer/hooks/useBackHandler'
 import { useLaunchGame } from '@renderer/hooks/useLaunchGame'
 import { useT } from '@renderer/i18n/useT'
@@ -35,10 +39,17 @@ import { useGameDetailStore } from '@renderer/state/gameDetailStore'
 import { focusElement } from '@renderer/lib/spatialNavigation'
 import { formatPlaytime } from '@renderer/lib/playtime'
 import { useLibraryStore } from '@renderer/state/libraryStore'
+import { useLibraryCollectionsStore } from '@renderer/state/libraryCollectionsStore'
 
 interface Props {
   game: LibraryGame
 }
+
+const EDITABLE_ARTWORK_ORIENTATIONS: readonly ImageOrientation[] = [
+  'vertical',
+  'horizontal',
+  'icon'
+]
 
 function formatHours(minutes: number | undefined, language: 'en' | 'de'): string {
   if (!minutes) return '—'
@@ -60,6 +71,7 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
   const launchRef = useRef<HTMLButtonElement>(null)
   const artworkRef = useRef<HTMLButtonElement>(null)
   const launchOptionsRef = useRef<HTMLButtonElement>(null)
+  const collectionsRef = useRef<HTMLButtonElement>(null)
   const [completionTimes, setCompletionTimes] = useState<GameCompletionTimes | null>(
     game.metadata.completionTimes ?? null
   )
@@ -71,11 +83,17 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
   const [confirmRemove, setConfirmRemove] = useState(false)
   const [artworkPickerOpen, setArtworkPickerOpen] = useState(false)
   const [launchOptionsOpen, setLaunchOptionsOpen] = useState(false)
+  const [collectionsOpen, setCollectionsOpen] = useState(false)
+  const [favoriteBusy, setFavoriteBusy] = useState(false)
   const [hasArtworkOverrides, setHasArtworkOverrides] = useState({
     vertical: false,
-    horizontal: false
+    horizontal: false,
+    icon: false
   })
   const [artworkFeedback, setArtworkFeedback] = useState<'updated' | 'reset' | 'failed' | null>(null)
+  const favoriteGameIds = useLibraryCollectionsStore((state) => state.favoriteGameIds)
+  const toggleFavorite = useLibraryCollectionsStore((state) => state.toggleFavorite)
+  const isFavorite = favoriteGameIds.includes(game.id)
 
   useBackHandler(closeGame)
 
@@ -85,7 +103,12 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
     const frame = requestAnimationFrame(() => focusElement(launchRef.current))
     return () => {
       cancelAnimationFrame(frame)
-      if (previousFocus?.isConnected) requestAnimationFrame(() => focusElement(previousFocus))
+      requestAnimationFrame(() => {
+        const fallback =
+          document.querySelector<HTMLElement>('[data-library-source][aria-pressed="true"]') ??
+          document.querySelector<HTMLElement>('[data-top-nav] [aria-current="page"]')
+        focusElement(previousFocus?.isConnected ? previousFocus : fallback)
+      })
     }
   }, [])
 
@@ -133,10 +156,14 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
 
   useEffect(() => {
     let active = true
-    const generations = { vertical: 0, horizontal: 0 }
+    const generations: Record<ImageOrientation, number> = {
+      vertical: 0,
+      horizontal: 0,
+      icon: 0
+    }
     setArtworkFeedback(null)
-    setHasArtworkOverrides({ vertical: false, horizontal: false })
-    const refreshOrientation = (orientation: 'vertical' | 'horizontal'): void => {
+    setHasArtworkOverrides({ vertical: false, horizontal: false, icon: false })
+    const refreshOrientation = (orientation: ImageOrientation): void => {
       const generation = ++generations[orientation]
       void window.api.image
         .hasCustom(game.id, orientation)
@@ -149,20 +176,15 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
           setHasArtworkOverrides((current) => ({ ...current, [orientation]: false }))
         })
     }
-    refreshOrientation('vertical')
-    refreshOrientation('horizontal')
+    for (const orientation of EDITABLE_ARTWORK_ORIENTATIONS) refreshOrientation(orientation)
     const dispose = window.api.image.onUpdated((update: ImageUpdate) => {
-      if (
-        update.gameId === game.id &&
-        (update.orientation === 'vertical' || update.orientation === 'horizontal')
-      ) {
+      if (update.gameId === game.id) {
         refreshOrientation(update.orientation)
       }
     })
     return () => {
       active = false
-      generations.vertical++
-      generations.horizontal++
+      for (const orientation of EDITABLE_ARTWORK_ORIENTATIONS) generations[orientation]++
       dispose()
     }
   }, [game.id])
@@ -176,10 +198,10 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
   useEffect(() => {
     const root = detailRootRef.current
     if (!root) return
-    if (artworkPickerOpen || launchOptionsOpen) root.setAttribute('inert', '')
+    if (artworkPickerOpen || launchOptionsOpen || collectionsOpen) root.setAttribute('inert', '')
     else root.removeAttribute('inert')
     return () => root.removeAttribute('inert')
-  }, [artworkPickerOpen, launchOptionsOpen])
+  }, [artworkPickerOpen, collectionsOpen, launchOptionsOpen])
 
   const playtime = formatPlaytime(game, t) ?? t('details.notPlayed')
   const summary = game.metadata.summary ?? game.metadata.description
@@ -282,16 +304,26 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
     requestAnimationFrame(() => focusElement(artworkRef.current))
   }
 
-  const handleArtworkApplied = (orientation: 'vertical' | 'horizontal'): void => {
+  const handleArtworkApplied = (orientation: ImageOrientation): void => {
     setHasArtworkOverrides((current) => ({ ...current, [orientation]: true }))
     setArtworkFeedback('updated')
-    closeArtworkPicker()
   }
 
-  const handleArtworkReset = (orientation: 'vertical' | 'horizontal'): void => {
+  const handleToggleFavorite = async (): Promise<void> => {
+    if (favoriteBusy) return
+    setFavoriteBusy(true)
+    try {
+      await toggleFavorite(game.id)
+    } catch {
+      // The collection store rolls the optimistic state back on persistence failure.
+    } finally {
+      setFavoriteBusy(false)
+    }
+  }
+
+  const handleArtworkReset = (orientation: ImageOrientation): void => {
     setHasArtworkOverrides((current) => ({ ...current, [orientation]: false }))
     setArtworkFeedback('reset')
-    closeArtworkPicker()
   }
 
   const closeLaunchOptions = (): void => {
@@ -303,8 +335,8 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
     <>
     <motion.div
       ref={detailRootRef}
-      data-focus-scope={artworkPickerOpen || launchOptionsOpen ? undefined : 'active'}
-      aria-hidden={artworkPickerOpen || launchOptionsOpen || undefined}
+      data-focus-scope={artworkPickerOpen || launchOptionsOpen || collectionsOpen ? undefined : 'active'}
+      aria-hidden={artworkPickerOpen || launchOptionsOpen || collectionsOpen || undefined}
       role="dialog"
       aria-modal="true"
       aria-label={game.name}
@@ -345,8 +377,9 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
         </button>
 
         <div className="absolute inset-0 z-20 overflow-hidden">
-          <div className="game-detail-layout grid h-full items-end">
-            <div className="min-w-0 self-end">
+          <div className="game-detail-layout grid h-full">
+            <div className="game-detail-overview grid min-h-0 items-start">
+              <div className="min-w-0">
               <div className="game-detail-identity flex items-end gap-[clamp(0.8rem,1.4vw,1.35rem)]">
                 <div className="h-[clamp(4rem,6vw,6rem)] w-[clamp(4rem,6vw,6rem)] shrink-0 overflow-hidden rounded-[26%] border border-white/15 bg-black/35 shadow-2xl">
                   <GameImage
@@ -385,6 +418,16 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
                   </span>
                 )}
                 {genreText && <span className="truncate">{genreText}</span>}
+                {game.metadata.storeUrl && (
+                  <button
+                    data-focusable
+                    onClick={() => void window.api.app.openExternal(game.metadata.storeUrl as string)}
+                    className="flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1.5 text-[11px] font-semibold text-white/60 transition-colors hover:bg-white/[0.12] hover:text-white"
+                  >
+                    <ExternalLink size={13} />
+                    {t('details.storePage')}
+                  </button>
+                )}
               </div>
 
               {summary && (
@@ -394,8 +437,8 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
               )}
 
               {local && (
-                <div className="mb-[clamp(0.75rem,1.7vh,1.25rem)] rounded-xl border border-white/10 bg-black/30 px-3.5 py-3 backdrop-blur-md">
-                  <div className="flex items-start gap-2.5">
+                <div className="game-detail-backup rounded-xl border border-white/10 bg-black/30 px-3.5 py-3 backdrop-blur-md">
+                  <div className="flex items-start justify-between gap-3">
                     <ShieldCheck size={16} className="mt-0.5 shrink-0 text-accent" />
                     <div className="min-w-0">
                       <p className="text-xs font-semibold text-white/80">
@@ -412,117 +455,42 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
                         </p>
                       )}
                     </div>
+                    {local.backupEnabled && (
+                      <button
+                      data-focusable
+                      onClick={() => void window.api.library.custom.openBackups(game.id)}
+                      className="flex shrink-0 items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.06] px-3 py-2 text-[11px] font-semibold text-white/60 transition-colors hover:bg-white/[0.12] hover:text-white"
+                      >
+                        <FolderOpen size={14} />
+                        {t('details.openBackups')}
+                      </button>
+                    )}
                   </div>
                 </div>
               )}
-
-              <div className="game-detail-actions flex flex-wrap items-center gap-2.5">
-                <button
-                  ref={launchRef}
-                  data-focusable
-                  onClick={handleLaunch}
-                  className="flex min-w-[9.5rem] items-center justify-center gap-2.5 rounded-full bg-accent px-6 py-3 text-sm font-bold text-black shadow-[0_12px_40px_rgb(var(--color-accent)/0.25)] transition-transform hover:scale-[1.025]"
-                >
-                  {game.installed ? <Play size={17} fill="currentColor" /> : <HardDriveDownload size={17} />}
-                  {game.installed ? t('details.play') : t('details.install')}
-                </button>
-
-                <button
-                  ref={artworkRef}
-                  data-focusable
-                  onClick={() => {
-                    setArtworkFeedback(null)
-                    setArtworkPickerOpen(true)
-                  }}
-                  className="flex items-center gap-2 rounded-full border border-white/15 bg-white/[0.07] px-4 py-3 text-sm font-semibold text-white backdrop-blur-md transition-colors hover:bg-white/15"
-                >
-                  <ImagePlus size={16} />
-                  {artworkFeedback === 'updated'
-                    ? t('details.artworkChanged')
-                    : artworkFeedback === 'reset'
-                      ? t('details.artworkReset')
-                      : artworkFeedback === 'failed'
-                        ? t('details.artworkFailed')
-                        : t('details.changeArtwork')}
-                </button>
-
-                {game.metadata.storeUrl && (
-                  <button
-                    data-focusable
-                    onClick={() => void window.api.app.openExternal(game.metadata.storeUrl as string)}
-                    className="flex items-center gap-2 rounded-full border border-white/15 bg-white/[0.07] px-5 py-3 text-sm font-semibold text-white backdrop-blur-md transition-colors hover:bg-white/15"
-                  >
-                    <ExternalLink size={16} />
-                    {t('details.storePage')}
-                  </button>
-                )}
-
-                {completionTimes?.sourceUrl && (
-                  <button
-                    data-focusable
-                    onClick={() => void window.api.app.openExternal(completionTimes.sourceUrl as string)}
-                    className="flex items-center gap-2 rounded-full px-3 py-3 text-xs font-medium text-white/55 transition-colors hover:text-white"
-                  >
-                    <Sparkles size={14} className="text-accent" />
-                    HLTB
-                  </button>
-                )}
-
-                {local?.backupEnabled && (
-                  <button
-                    data-focusable
-                    data-disabled={backupBusy ? 'true' : undefined}
-                    aria-busy={backupBusy}
-                    disabled={backupBusy}
-                    onClick={() => void handleBackup()}
-                    className="flex items-center gap-2 rounded-full border border-white/15 bg-white/[0.07] px-4 py-3 text-sm font-semibold text-white backdrop-blur-md transition-colors hover:bg-white/15"
-                  >
-                    {backupBusy ? <Loader2 size={16} className="animate-spin" /> : <Archive size={16} />}
-                    {backupBusy ? t('details.backupRunning') : t('details.backupNow')}
-                  </button>
-                )}
-
-                {local && (
-                  <button
-                    ref={launchOptionsRef}
-                    data-focusable
-                    onClick={() => setLaunchOptionsOpen(true)}
-                    className="flex items-center gap-2 rounded-full border border-white/15 bg-white/[0.07] px-4 py-3 text-sm font-semibold text-white backdrop-blur-md transition-colors hover:bg-white/15"
-                  >
-                    <SlidersHorizontal size={16} />
-                    {t('details.launchOptions')}
-                  </button>
-                )}
-
-                {local?.backupEnabled && (
-                  <button
-                    data-focusable
-                    onClick={() => void window.api.library.custom.openBackups(game.id)}
-                    className="flex items-center gap-2 rounded-full px-3 py-3 text-xs font-medium text-white/55 transition-colors hover:text-white"
-                  >
-                    <FolderOpen size={15} />
-                    {t('details.openBackups')}
-                  </button>
-                )}
-
-                {local && (
-                  <button
-                    data-focusable
-                    onClick={() => void handleRemove()}
-                    className={`flex items-center gap-2 rounded-full px-3 py-3 text-xs font-semibold transition-colors ${
-                      confirmRemove ? 'bg-rose-300/12 text-rose-200' : 'text-white/45 hover:text-rose-200'
-                    }`}
-                  >
-                    <Trash2 size={15} />
-                    {confirmRemove ? t('details.confirmRemoveCustom') : t('details.removeCustom')}
-                  </button>
-                )}
-              </div>
             </div>
 
-            <div className="min-w-0 self-end">
-              <div className="game-detail-stats grid grid-cols-2 gap-2.5">
-                <div className="rounded-xl2 border border-white/10 bg-black/30 px-3.5 py-3 backdrop-blur-md">
+            <div className="min-w-0">
+              <section className="game-detail-completion rounded-xl2 border border-white/10 bg-black/30 p-3.5 backdrop-blur-md">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <p className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.14em] text-white/60">
+                    <Sparkles size={14} className="text-accent" />
+                    HLTB
+                  </p>
+                  {completionTimes?.sourceUrl && (
+                    <button
+                      data-focusable
+                      onClick={() => void window.api.app.openExternal(completionTimes.sourceUrl as string)}
+                      aria-label="HowLongToBeat"
+                      className="flex h-8 w-8 items-center justify-center rounded-full border border-white/10 bg-white/[0.06] text-white/60 transition-colors hover:bg-white/[0.12] hover:text-white"
+                    >
+                      <ExternalLink size={13} />
+                    </button>
+                  )}
+                </div>
+
+                <div className="game-detail-stats grid grid-cols-4 gap-2">
+                  <div className="rounded-xl border border-white/[0.08] bg-white/[0.045] px-3 py-2.5">
                   <div className="mb-1.5 flex items-center gap-2 text-[11px] font-medium text-white/55">
                     <Timer size={14} className="text-accent" />
                     {t('details.yourPlaytime')}
@@ -534,7 +502,7 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
                   [0, 1, 2].map((index) => (
                     <div
                       key={index}
-                      className="min-h-[4.5rem] animate-pulse rounded-xl2 border border-white/5 bg-white/[0.06]"
+                      className="min-h-[4.25rem] animate-pulse rounded-xl border border-white/5 bg-white/[0.06]"
                     />
                   ))
                 ) : completionAvailable ? (
@@ -553,11 +521,12 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
                     />
                   </>
                 ) : (
-                  <div className="flex min-h-[4.5rem] items-center rounded-xl2 border border-white/10 bg-black/30 px-3.5 py-3 text-sm text-white/55">
+                  <div className="col-span-3 flex min-h-[4.25rem] items-center rounded-xl border border-white/[0.08] bg-white/[0.045] px-3 py-2.5 text-sm text-white/55">
                     {t('details.noCompletionData')}
                   </div>
                 )}
-              </div>
+                </div>
+              </section>
 
               {showAchievements && (loadingAchievements || achievements?.state === 'available') && (
                 <AchievementGallery
@@ -565,6 +534,114 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
                   loading={loadingAchievements}
                   t={t}
                 />
+              )}
+            </div>
+            </div>
+
+            <div className="game-detail-actions grid grid-cols-4 gap-2.5">
+              <button
+                ref={launchRef}
+                data-focusable
+                onClick={handleLaunch}
+                className="game-detail-action border-transparent bg-accent font-bold text-black shadow-[0_12px_40px_rgb(var(--color-accent)/0.25)] hover:scale-[1.015]"
+              >
+                {game.installed ? <Play size={17} fill="currentColor" /> : <HardDriveDownload size={17} />}
+                {game.installed ? t('details.play') : t('details.install')}
+              </button>
+
+              <button
+                data-focusable
+                type="button"
+                aria-pressed={isFavorite}
+                disabled={favoriteBusy}
+                onClick={() => void handleToggleFavorite()}
+                className={`game-detail-action ${
+                  isFavorite
+                    ? 'border-accent/45 bg-accent/15 text-accent'
+                    : 'border-white/15 bg-white/[0.07] text-white hover:bg-white/15'
+                }`}
+              >
+                {favoriteBusy ? (
+                  <Loader2 size={16} className="shrink-0 animate-spin" />
+                ) : (
+                  <Star size={16} className="shrink-0" fill={isFavorite ? 'currentColor' : 'none'} />
+                )}
+                {t(isFavorite ? 'details.favoriteRemove' : 'details.favoriteAdd')}
+              </button>
+
+              <button
+                ref={collectionsRef}
+                data-focusable
+                type="button"
+                onClick={() => setCollectionsOpen(true)}
+                className="game-detail-action border-white/15 bg-white/[0.07] text-white hover:bg-white/15"
+              >
+                <LibraryBig size={16} className="shrink-0" />
+                {t('details.collections')}
+              </button>
+
+              <button
+                ref={artworkRef}
+                data-focusable
+                onClick={() => {
+                  setArtworkFeedback(null)
+                  setArtworkPickerOpen(true)
+                }}
+                className="game-detail-action border-white/15 bg-white/[0.07] text-white hover:bg-white/15"
+              >
+                <ImagePlus size={16} className="shrink-0" />
+                {artworkFeedback === 'updated'
+                  ? t('details.artworkChanged')
+                  : artworkFeedback === 'reset'
+                    ? t('details.artworkReset')
+                    : artworkFeedback === 'failed'
+                      ? t('details.artworkFailed')
+                      : t('details.changeArtwork')}
+              </button>
+
+              {local?.backupEnabled && (
+                <button
+                  data-focusable
+                  data-disabled={backupBusy ? 'true' : undefined}
+                  aria-busy={backupBusy}
+                  disabled={backupBusy}
+                  onClick={() => void handleBackup()}
+                  className="game-detail-action border-white/15 bg-white/[0.07] text-white hover:bg-white/15"
+                >
+                  {backupBusy ? (
+                    <Loader2 size={16} className="shrink-0 animate-spin" />
+                  ) : (
+                    <Archive size={16} className="shrink-0" />
+                  )}
+                  {backupBusy ? t('details.backupRunning') : t('details.backupNow')}
+                </button>
+              )}
+
+              {local && (
+                <button
+                  ref={launchOptionsRef}
+                  data-focusable
+                  onClick={() => setLaunchOptionsOpen(true)}
+                  className="game-detail-action border-white/15 bg-white/[0.07] text-white hover:bg-white/15"
+                >
+                  <SlidersHorizontal size={16} className="shrink-0" />
+                  {t('details.launchOptions')}
+                </button>
+              )}
+
+              {local && (
+                <button
+                  data-focusable
+                  onClick={() => void handleRemove()}
+                  className={`game-detail-action ${
+                    confirmRemove
+                      ? 'border-rose-200/25 bg-rose-300/[0.12] text-rose-200'
+                      : 'border-white/10 bg-white/[0.045] text-white/55 hover:border-rose-200/20 hover:text-rose-200'
+                  }`}
+                >
+                  <Trash2 size={15} className="shrink-0" />
+                  {confirmRemove ? t('details.confirmRemoveCustom') : t('details.removeCustom')}
+                </button>
               )}
             </div>
           </div>
@@ -591,6 +668,15 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
           closeLaunchOptions()
         }}
         onClose={closeLaunchOptions}
+      />
+    )}
+    {collectionsOpen && (
+      <LibraryCollectionDialog
+        gameId={game.id}
+        onClose={() => {
+          setCollectionsOpen(false)
+          requestAnimationFrame(() => focusElement(collectionsRef.current))
+        }}
       />
     )}
     </>
@@ -682,7 +768,7 @@ function AchievementGallery({
 
 function TimeCard({ label, value }: { label: string; value: string }): JSX.Element {
   return (
-    <div className="rounded-xl2 border border-white/10 bg-black/30 px-3.5 py-3 backdrop-blur-md">
+    <div className="rounded-xl border border-white/[0.08] bg-white/[0.045] px-3 py-2.5">
       <p className="mb-1.5 text-[11px] font-medium text-white/55">{label}</p>
       <p className="text-lg font-semibold text-white">{value}</p>
     </div>

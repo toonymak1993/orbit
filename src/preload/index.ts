@@ -3,12 +3,15 @@ import { electronAPI } from '@electron-toolkit/preload'
 import {
   IPC,
   type AppControlAction,
+  type AppUpdateSnapshot,
   type CustomGameCommitInput,
   type CustomGameDraft,
   type CustomGameImportSource,
   type CustomGameLaunchArgumentsInput,
   type CustomGameSaveSource,
   type EpicLoginStatus,
+  type FriendsProvider,
+  type FriendsSnapshot,
   type GameCompletionTimes,
   type GameAchievementsSnapshot,
   type GameLaunchStatus,
@@ -30,6 +33,8 @@ import {
   type StoreSearchResponse,
   type StoreSnapshot,
   type SystemPowerAction,
+  type SystemSettingsTarget,
+  type SystemStatusSnapshot,
   type SystemUpdateSnapshot,
   type SystemSyncStatus
 } from '@shared/ipc'
@@ -98,6 +103,22 @@ const orbitApi = {
       return () => ipcRenderer.removeListener(IPC.epicLoginStatus, listener)
     }
   },
+  friends: {
+    get: (): Promise<FriendsSnapshot> => ipcRenderer.invoke(IPC.friendsGet),
+    refresh: (): Promise<FriendsSnapshot> => ipcRenderer.invoke(IPC.friendsRefresh),
+    connect: (provider: FriendsProvider): Promise<FriendsSnapshot> =>
+      ipcRenderer.invoke(IPC.friendsConnect, provider),
+    disconnect: (provider: FriendsProvider): Promise<FriendsSnapshot> =>
+      ipcRenderer.invoke(IPC.friendsDisconnect, provider),
+    openProvider: (provider: FriendsProvider): Promise<void> =>
+      ipcRenderer.invoke(IPC.friendsOpenProvider, provider),
+    onUpdated: (callback: (snapshot: FriendsSnapshot) => void): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, snapshot: FriendsSnapshot): void =>
+        callback(snapshot)
+      ipcRenderer.on(IPC.friendsUpdated, listener)
+      return () => ipcRenderer.removeListener(IPC.friendsUpdated, listener)
+    }
+  },
   library: {
     get: (): Promise<LibrarySnapshot> => ipcRenderer.invoke(IPC.libraryGet),
     stats: (): Promise<LibraryStats> => ipcRenderer.invoke(IPC.libraryStatsGet),
@@ -147,6 +168,7 @@ const orbitApi = {
   },
   game: {
     launch: (gameId: string): Promise<void> => ipcRenderer.invoke(IPC.gameLaunch, gameId),
+    cancelLaunch: (): Promise<boolean> => ipcRenderer.invoke(IPC.gameLaunchCancel),
     getLaunchStatus: (): Promise<GameLaunchStatus> => ipcRenderer.invoke(IPC.gameLaunchGet),
     revealLauncher: (): Promise<void> => ipcRenderer.invoke(IPC.gameLaunchRevealLauncher),
     onLaunchStatus: (callback: (status: GameLaunchStatus) => void): (() => void) => {
@@ -178,15 +200,19 @@ const orbitApi = {
       ipcRenderer.invoke(IPC.imageSteamGridDbApply, gameId, artworkId, orientation, query),
     selectCustom: (
       gameId: string,
-      orientation: Exclude<ImageOrientation, 'icon'>
+      orientation: ImageOrientation
     ): Promise<boolean> => ipcRenderer.invoke(IPC.imageSelectCustom, gameId, orientation),
+    pasteCustom: (
+      gameId: string,
+      orientation: ImageOrientation
+    ): Promise<boolean> => ipcRenderer.invoke(IPC.imagePasteCustom, gameId, orientation),
     resetCustom: (
       gameId: string,
-      orientation: Exclude<ImageOrientation, 'icon'>
+      orientation: ImageOrientation
     ): Promise<boolean> => ipcRenderer.invoke(IPC.imageResetCustom, gameId, orientation),
     hasCustom: (
       gameId: string,
-      orientation: Exclude<ImageOrientation, 'icon'>
+      orientation: ImageOrientation
     ): Promise<boolean> => ipcRenderer.invoke(IPC.imageHasCustom, gameId, orientation),
     reportFailure: (
       gameId: string,
@@ -231,6 +257,20 @@ const orbitApi = {
     }
   },
   system: {
+    status: {
+      get: (): Promise<SystemStatusSnapshot> => ipcRenderer.invoke(IPC.systemStatusGet),
+      refresh: (): Promise<SystemStatusSnapshot> => ipcRenderer.invoke(IPC.systemStatusRefresh),
+      openSettings: (target: SystemSettingsTarget): Promise<void> =>
+        ipcRenderer.invoke(IPC.systemOpenSettings, target),
+      onUpdated: (callback: (snapshot: SystemStatusSnapshot) => void): (() => void) => {
+        const listener = (
+          _e: Electron.IpcRendererEvent,
+          snapshot: SystemStatusSnapshot
+        ): void => callback(snapshot)
+        ipcRenderer.on(IPC.systemStatusUpdated, listener)
+        return () => ipcRenderer.removeListener(IPC.systemStatusUpdated, listener)
+      }
+    },
     checkUpdates: (): Promise<SystemUpdateSnapshot> =>
       ipcRenderer.invoke(IPC.systemUpdatesCheck),
     openUpdateSettings: (): Promise<void> =>
@@ -240,6 +280,21 @@ const orbitApi = {
   },
   app: {
     getVersion: (): Promise<string> => ipcRenderer.invoke(IPC.appVersion),
+    updates: {
+      get: (): Promise<AppUpdateSnapshot> => ipcRenderer.invoke(IPC.appUpdateGet),
+      check: (): Promise<AppUpdateSnapshot> => ipcRenderer.invoke(IPC.appUpdateCheck),
+      download: (): Promise<AppUpdateSnapshot> => ipcRenderer.invoke(IPC.appUpdateDownload),
+      install: (): Promise<AppUpdateSnapshot> => ipcRenderer.invoke(IPC.appUpdateInstall),
+      defer: (): Promise<AppUpdateSnapshot> => ipcRenderer.invoke(IPC.appUpdateDefer),
+      onStatus: (callback: (snapshot: AppUpdateSnapshot) => void): (() => void) => {
+        const listener = (
+          _e: Electron.IpcRendererEvent,
+          snapshot: AppUpdateSnapshot
+        ): void => callback(snapshot)
+        ipcRenderer.on(IPC.appUpdateStatus, listener)
+        return () => ipcRenderer.removeListener(IPC.appUpdateStatus, listener)
+      }
+    },
     control: (action: AppControlAction): Promise<void> => ipcRenderer.invoke(IPC.appControl, action),
     openExternal: (url: string): Promise<void> => ipcRenderer.invoke(IPC.openExternal, url)
   }

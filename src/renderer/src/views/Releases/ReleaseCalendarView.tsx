@@ -1,12 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { motion } from 'framer-motion'
 import { CalendarDays, ExternalLink, Heart, RefreshCw, Sparkles } from 'lucide-react'
 import { GameImage } from '@renderer/components/GameImage'
 import { useT } from '@renderer/i18n/useT'
 import { usePreferencesStore } from '@renderer/state/preferencesStore'
-import { useNavigationStore } from '@renderer/state/navigationStore'
 import { useStoreStore } from '@renderer/state/storeStore'
-import { focusElement } from '@renderer/lib/spatialNavigation'
 import type { StoreRelease } from '@shared/ipc'
 
 const DAY_MS = 86_400_000
@@ -34,33 +32,46 @@ function isTodayOrLater(timestamp: number): boolean {
 }
 
 export function ReleaseCalendarView(): JSX.Element {
-  const viewRef = useRef<HTMLDivElement>(null)
-  const featuredRef = useRef<HTMLButtonElement>(null)
-  const refreshRef = useRef<HTMLButtonElement>(null)
-  const entryFocusHandledRef = useRef(false)
   const t = useT()
   const language = usePreferencesStore((state) => state.language)
   const snapshot = useStoreStore((state) => state.snapshot)
   const initialized = useStoreStore((state) => state.initialized)
   const refresh = useStoreStore((state) => state.refresh)
   const toggleWishlist = useStoreStore((state) => state.toggleWishlist)
-  const isActive = useNavigationStore((state) => state.mainView === 'releases')
   const [pendingFavoriteIds, setPendingFavoriteIds] = useState<Set<string>>(() => new Set())
   const locale = language === 'de' ? 'de-DE' : 'en-US'
-  const expectedMonth = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`
-  const releases =
-    snapshot.releaseCalendarMonth === expectedMonth
-      ? snapshot.monthlyReleases.filter(
-          (release) => isTodayOrLater(release.releaseDate) && release.name.length <= 72
-        )
-      : []
+  const releases = useMemo(
+    () =>
+      snapshot.monthlyReleases.filter(
+        (release) => isTodayOrLater(release.releaseDate) && release.name.length <= 72
+      ),
+    [snapshot.monthlyReleases]
+  )
   const featured = releases.find((release) => release.featured) ?? releases[0]
   const chronological = featured
     ? releases.filter((release) => release.id !== featured.id)
     : releases
-  const monthLabel = new Intl.DateTimeFormat(locale, { month: 'long', year: 'numeric' }).format(
-    new Date()
-  )
+  const releaseWindowLabel = useMemo(() => {
+    if (releases.length === 0) {
+      return new Intl.DateTimeFormat(locale, { month: 'long', year: 'numeric' }).format(new Date())
+    }
+    const first = new Date(Math.min(...releases.map((release) => release.releaseDate)))
+    const last = new Date(Math.max(...releases.map((release) => release.releaseDate)))
+    const sameMonth =
+      first.getUTCFullYear() === last.getUTCFullYear() &&
+      first.getUTCMonth() === last.getUTCMonth()
+    if (sameMonth) {
+      return new Intl.DateTimeFormat(locale, { month: 'long', year: 'numeric' }).format(first)
+    }
+    const firstOptions: Intl.DateTimeFormatOptions =
+      first.getUTCFullYear() === last.getUTCFullYear()
+        ? { month: 'short' }
+        : { month: 'short', year: 'numeric' }
+    return `${new Intl.DateTimeFormat(locale, firstOptions).format(first)} – ${new Intl.DateTimeFormat(
+      locale,
+      { month: 'short', year: 'numeric' }
+    ).format(last)}`
+  }, [locale, releases])
   const dateFormatter = useMemo(
     () => new Intl.DateTimeFormat(locale, { weekday: 'long', day: 'numeric', month: 'long' }),
     [locale]
@@ -83,26 +94,6 @@ export function ReleaseCalendarView(): JSX.Element {
   }, [chronological])
   const isInitialLoading = !initialized || (snapshot.isRefreshing && releases.length === 0)
   const hasError = snapshot.releaseCalendarError && releases.length === 0
-
-  useEffect(() => {
-    if (!isActive) {
-      entryFocusHandledRef.current = false
-      return
-    }
-    if (isInitialLoading || entryFocusHandledRef.current) return
-    entryFocusHandledRef.current = true
-    viewRef.current?.scrollTo({ top: 0 })
-    let settleTimer: number | undefined
-    const frame = requestAnimationFrame(() => {
-      focusElement(featuredRef.current ?? refreshRef.current)
-      viewRef.current?.scrollTo({ top: 0 })
-      settleTimer = window.setTimeout(() => viewRef.current?.scrollTo({ top: 0 }), 160)
-    })
-    return () => {
-      cancelAnimationFrame(frame)
-      if (settleTimer !== undefined) window.clearTimeout(settleTimer)
-    }
-  }, [featured?.id, isActive, isInitialLoading])
 
   const relativeDate = (timestamp: number): string => {
     const days = daysUntil(timestamp)
@@ -135,16 +126,11 @@ export function ReleaseCalendarView(): JSX.Element {
   }
 
   return (
-    <div
-      ref={viewRef}
-      className="release-calendar-view scrollbar-none h-full overflow-y-auto px-5 pb-12 pt-24 xl:px-8"
-    >
+    <div className="release-calendar-view pb-12 pt-1">
       <section className="release-calendar-hero relative mx-auto max-w-[112rem] overflow-hidden rounded-[calc(var(--radius-card)+0.55rem)] border border-white/10 bg-surface shadow-card">
         {featured ? (
           <motion.button
-            ref={featuredRef}
             data-focusable
-            onFocus={() => viewRef.current?.scrollTo({ top: 0 })}
             onClick={() => openRelease(featured)}
             aria-label={`${featured.name} – ${t('release.openStore')}`}
             whileHover={{ scale: 1.004 }}
@@ -167,7 +153,7 @@ export function ReleaseCalendarView(): JSX.Element {
                 {t('release.spotlight')}
               </div>
               <p className="text-xs font-black uppercase tracking-[0.24em] text-accent">
-                {t('release.eyebrow')} · {monthLabel}
+                {t('release.eyebrow')} · {releaseWindowLabel}
               </p>
               <h1 className="mt-2 text-[clamp(2rem,4.5vw,4.75rem)] font-black leading-[0.94] tracking-[-0.045em]">
                 {featured.name}
@@ -236,12 +222,11 @@ export function ReleaseCalendarView(): JSX.Element {
             <p className="truncate text-xs font-bold text-white">
               {releases.length > 0
                 ? t('release.count', { count: releases.length })
-                : monthLabel}
+                : releaseWindowLabel}
             </p>
           </div>
         </div>
         <button
-          ref={refreshRef}
           data-focusable
           data-disabled={snapshot.isRefreshing ? 'true' : undefined}
           disabled={snapshot.isRefreshing}

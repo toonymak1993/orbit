@@ -120,6 +120,7 @@ foreach ($temporaryPath in @($stageDir, $bundleDir)) {
 
 Push-Location $repoRoot
 try {
+  & (Join-Path $PSScriptRoot 'Verify-OrbitXboxInstallerScript.ps1')
   New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
   & (Join-Path $PSScriptRoot 'Generate-OrbitBranding.ps1')
   & (Join-Path $PSScriptRoot 'New-OrbitDevCertificate.ps1')

@@ -5,7 +5,6 @@ import {
   CalendarDays,
   ExternalLink,
   Heart,
-  Play,
   Sparkles,
   Timer,
   Trophy
@@ -18,6 +17,7 @@ import { useStoreStore } from '@renderer/state/storeStore'
 import { useStoreNavigationStore } from '@renderer/state/storeNavigationStore'
 import { GameImage } from '@renderer/components/GameImage'
 import { GameCard } from '@renderer/components/GameCard'
+import { GameCardMenuHint } from '@renderer/components/GameCardMenuHint'
 import {
   HomeCardReflection,
   resolveHomeCardReflection
@@ -33,7 +33,7 @@ import type {
   StoreProduct
 } from '@shared/ipc'
 import { latestLibraryActivity, normalizeLibraryTimestamp } from '@shared/libraryTime'
-import { useGameDetailStore } from '@renderer/state/gameDetailStore'
+import { useLaunchGame } from '@renderer/hooks/useLaunchGame'
 import { formatPlaytime } from '@renderer/lib/playtime'
 import { usePreferencesStore } from '@renderer/state/preferencesStore'
 import { focusElement, HOME_SHOW_BANNERS_EVENT } from '@renderer/lib/spatialNavigation'
@@ -89,7 +89,7 @@ export function HomeView(): JSX.Element {
   const storeProducts = useStoreStore((s) => s.snapshot.products)
   const setMainView = useNavigationStore((s) => s.setMainView)
   const setStorePage = useStoreNavigationStore((s) => s.setPage)
-  const openGame = useGameDetailStore((state) => state.openGame)
+  const launchGame = useLaunchGame()
   const language = usePreferencesStore((state) => state.language)
   const homeLayout = usePreferencesStore((state) => state.homeLayout)
   const configuredShowHomeBanners = usePreferencesStore((state) => state.showHomeBanners)
@@ -331,7 +331,7 @@ export function HomeView(): JSX.Element {
         activity={activity}
         language={language}
         onSelectGame={activateGame}
-        onOpenGame={(game) => openGame(game.id)}
+        onLaunchGame={(game) => launchGame(game.id)}
         onOpenStoreProduct={openStoreProduct}
         t={t}
       />
@@ -384,7 +384,7 @@ export function HomeView(): JSX.Element {
                 data-game-card="true"
                 data-game-id={featured.id}
                 data-home-jump-back="true"
-                onClick={() => openGame(featured.id)}
+                onClick={() => launchGame(featured.id)}
                 whileHover={{ scale: 1.012 }}
                 whileFocus={{ scale: 1.012 }}
                 transition={{ type: 'spring', stiffness: 360, damping: 30 }}
@@ -459,9 +459,10 @@ export function HomeView(): JSX.Element {
                         </div>
                       </div>
                     </div>
-                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-accent text-black shadow-[0_8px_30px_rgba(0,0,0,0.3)]">
-                      <Play size={15} fill="currentColor" />
-                    </div>
+                    <GameCardMenuHint
+                      size="large"
+                      className="shadow-[0_8px_30px_rgba(0,0,0,0.3)]"
+                    />
                   </div>
                 </div>
               </motion.button>
@@ -842,7 +843,7 @@ function CoreSenseHome({
   activity,
   language,
   onSelectGame,
-  onOpenGame,
+  onLaunchGame,
   onOpenStoreProduct,
   t
 }: {
@@ -855,7 +856,7 @@ function CoreSenseHome({
   activity?: LibraryActivitySummary
   language: 'en' | 'de'
   onSelectGame: (game: LibraryGame) => void
-  onOpenGame: (game: LibraryGame) => void
+  onLaunchGame: (game: LibraryGame) => void
   onOpenStoreProduct: (product: StoreProduct) => void
   t: TFunction
 }): JSX.Element {
@@ -1047,7 +1048,7 @@ function CoreSenseHome({
                         }
                         updateLauncherInteraction(game.id, false, 'pointer')
                       }}
-                      onClick={() => onOpenGame(game)}
+                      onClick={() => onLaunchGame(game)}
                       animate={activeMotion}
                       transition={
                         reduceMotion
@@ -1070,9 +1071,10 @@ function CoreSenseHome({
                           <HomeCardReflection reflection={reflection} />
                         )}
                         <span className="absolute inset-0 z-20 bg-gradient-to-t from-black/45 via-transparent to-white/[0.08]" />
-                        <span className="absolute bottom-2 right-2 z-20 flex h-7 w-7 items-center justify-center rounded-full bg-white text-black opacity-0 shadow-lg transition-opacity group-hover:opacity-100 group-data-[focused=true]:opacity-100">
-                          <Play size={11} fill="currentColor" />
-                        </span>
+                        <GameCardMenuHint
+                          size="compact"
+                          className="absolute bottom-2 right-2 z-20 opacity-0 transition-opacity group-hover:opacity-100 group-data-[focused=true]:opacity-100"
+                        />
                       </span>
                       <span className="mt-2 block max-w-full truncate text-xs font-semibold text-white/72 transition-colors group-hover:text-white group-data-[focused=true]:text-white">
                         {game.name}
@@ -1088,8 +1090,10 @@ function CoreSenseHome({
                 <motion.button
                   key={selectedGame.id}
                   data-focusable
+                  data-game-card="true"
+                  data-game-id={selectedGame.id}
                   data-coresense-primary="true"
-                  onClick={() => onOpenGame(selectedGame)}
+                  onClick={() => onLaunchGame(selectedGame)}
                   initial={{ opacity: 0, x: -18 }}
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
@@ -1099,9 +1103,8 @@ function CoreSenseHome({
                     <GameImage
                       gameId={selectedGame.id}
                       name={selectedGame.name}
-                      orientation="vertical"
-                      fit="cover"
-                      className="h-full w-full object-cover object-top"
+                      orientation="icon"
+                      className="h-full w-full object-cover"
                     />
                   </span>
                   <span className="min-w-0 flex-1">
@@ -1119,9 +1122,10 @@ function CoreSenseHome({
                       </span>
                     </span>
                   </span>
-                  <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-white text-black shadow-[0_10px_32px_rgba(0,0,0,0.35)] transition-transform group-hover:scale-105 group-data-[focused=true]:scale-105">
-                    <Play size={16} fill="currentColor" />
-                  </span>
+                  <GameCardMenuHint
+                    size="large"
+                    className="transition-transform group-hover:scale-105 group-data-[focused=true]:scale-105"
+                  />
                 </motion.button>
               )}
             </div>

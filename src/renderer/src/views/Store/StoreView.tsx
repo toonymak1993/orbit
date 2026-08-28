@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from 'framer-motion'
 import {
   Check,
   Bell,
+  CalendarDays,
   Globe2,
   Heart,
   Loader2,
@@ -21,6 +22,7 @@ import { focusElement } from '@renderer/lib/spatialNavigation'
 import { STORE_SEARCH_EVENT } from '@renderer/lib/librarySearch'
 import { GameImage } from '@renderer/components/GameImage'
 import { ControllerButtonHint } from '@renderer/components/ControllerButtonHint'
+import { ReleaseCalendarView } from '@renderer/views/Releases/ReleaseCalendarView'
 import { useExpandableViewSearch } from '@renderer/hooks/useExpandableViewSearch'
 import { useStoreStore } from '@renderer/state/storeStore'
 import { useLibraryStore } from '@renderer/state/libraryStore'
@@ -37,9 +39,14 @@ import type {
   StoreRegionId
 } from '@shared/ipc'
 import { latestLibraryActivity } from '@shared/libraryTime'
+import {
+  hasStoreArtwork,
+  isStoreDiscoverProductVisible
+} from '@shared/storeVisibility'
 
 const STORE_PAGES: Array<{ id: StorePage; key: TranslationKey; icon: typeof Sparkles }> = [
   { id: 'discover', key: 'store.page.discover', icon: Sparkles },
+  { id: 'releases', key: 'nav.releases', icon: CalendarDays },
   { id: 'deals', key: 'store.page.deals', icon: Percent },
   { id: 'wishlist', key: 'store.page.wishlist', icon: Heart },
   { id: 'alerts', key: 'store.page.alerts', icon: Bell }
@@ -114,6 +121,7 @@ export function StoreView(): JSX.Element {
   const t = useT()
   const snapshot = useStoreStore((state) => state.snapshot)
   const initialized = useStoreStore((state) => state.initialized)
+  const loadError = useStoreStore((state) => state.loadError)
   const refresh = useStoreStore((state) => state.refresh)
   const compareProduct = useStoreStore((state) => state.compareProduct)
   const searchStore = useStoreStore((state) => state.search)
@@ -202,7 +210,7 @@ export function StoreView(): JSX.Element {
         .filter(
           (product) =>
             product.artworkStatus === 'available' &&
-            Boolean(product.heroUrl ?? product.headerUrl ?? product.portraitUrl)
+            hasStoreArtwork(product)
         )
         .sort((left, right) => right.recommendationScore - left.recommendationScore)
     }
@@ -212,7 +220,7 @@ export function StoreView(): JSX.Element {
           (product) =>
             (product.steamWishlisted || product.orbitWishlisted) &&
             product.artworkStatus === 'available' &&
-            Boolean(product.heroUrl ?? product.headerUrl ?? product.portraitUrl)
+            hasStoreArtwork(product)
         )
         .sort(
           (left, right) =>
@@ -236,20 +244,7 @@ export function StoreView(): JSX.Element {
         )
     }
     return matches
-      .filter((product) => {
-        if (normalizedQuery) return true
-        if (ownedSteamAppIds.has(product.steamAppId ?? -1)) return false
-        if (product.steamWishlisted || product.orbitWishlisted) return true
-        if (
-          product.searchOnly ||
-          product.artworkStatus !== 'available' ||
-          !Boolean(product.heroUrl ?? product.headerUrl ?? product.portraitUrl)
-        )
-          return false
-        if (!product.detailsUpdatedAt || !product.summary || !product.genres?.length) return false
-        if (product.discoverEligible === false) return false
-        return !/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/u.test(product.name)
-      })
+      .filter((product) => isStoreDiscoverProductVisible(product, ownedSteamAppIds))
       .sort(
         (left, right) =>
           personalizedProductScore(right, identityProfile) -
@@ -452,47 +447,72 @@ export function StoreView(): JSX.Element {
             className="scrollbar-none absolute inset-0 overflow-y-auto px-[clamp(0.35rem,0.8vw,0.75rem)] pb-[clamp(4rem,10vh,6rem)] pt-1"
             style={{ scrollPaddingBlock: 'clamp(1rem, 5vh, 3rem)' }}
           >
-            <div className="mb-[clamp(0.75rem,1.6vh,1rem)] flex min-h-12 items-end justify-between gap-4 px-1">
-              <div className="min-w-0">
-                <p className="truncate text-[10px] font-bold uppercase tracking-[0.2em] text-accent">
-                  {contentEyebrow}
-                </p>
-                <h1 className="mt-0.5 truncate text-[clamp(1.25rem,2.2vw,1.75rem)] font-black tracking-tight">
-                  {contentHeading}
-                </h1>
-              </div>
-              <p className="shrink-0 pb-0.5 text-xs font-medium text-muted">
-                {isSearching || snapshot.isRefreshing
-                  ? t('store.updating')
-                  : page === 'alerts' && !activeQuery
-                    ? t('store.alert.count', { count: visibleItemCount })
-                    : t('store.productsCount', { count: visibleItemCount })}
-              </p>
-            </div>
-
-            {page === 'alerts' && !activeQuery ? (
-              <PriceAlerts
-                alerts={snapshot.priceAlerts}
-                products={snapshot.products}
-                history={snapshot.priceHistory}
-                onRemove={(productId) => void removePriceAlert(productId)}
-                t={t}
-              />
-            ) : products.length > 0 ? (
-              <StoreProductGrid
-                products={products}
-                matchScores={page === 'discover' && !activeQuery ? matchScores : undefined}
-                onOpen={openProduct}
-                t={t}
-              />
+            {page === 'releases' && !activeQuery ? (
+              <ReleaseCalendarView />
             ) : (
-              <div className="flex h-full min-h-72 flex-col items-center justify-center gap-3 text-center">
-                <ShoppingBag size={30} className="text-accent" />
-                <p className="text-lg font-semibold">
-                  {!initialized || snapshot.isRefreshing || isSearching ? t('store.loading') : t('store.empty')}
-                </p>
-                <p className="max-w-md text-sm text-muted">{t('store.emptyBody')}</p>
-              </div>
+              <>
+                <div className="mb-[clamp(0.75rem,1.6vh,1rem)] flex min-h-12 items-end justify-between gap-4 px-1">
+                  <div className="min-w-0">
+                    <p className="truncate text-[10px] font-bold uppercase tracking-[0.2em] text-accent">
+                      {contentEyebrow}
+                    </p>
+                    <h1 className="mt-0.5 truncate text-[clamp(1.25rem,2.2vw,1.75rem)] font-black tracking-tight">
+                      {contentHeading}
+                    </h1>
+                  </div>
+                  <p className="shrink-0 pb-0.5 text-xs font-medium text-muted">
+                    {isSearching || snapshot.isRefreshing
+                      ? t('store.updating')
+                      : page === 'alerts' && !activeQuery
+                        ? t('store.alert.count', { count: visibleItemCount })
+                        : t('store.productsCount', { count: visibleItemCount })}
+                  </p>
+                </div>
+
+                {page === 'alerts' && !activeQuery ? (
+                  <PriceAlerts
+                    alerts={snapshot.priceAlerts}
+                    products={snapshot.products}
+                    history={snapshot.priceHistory}
+                    onRemove={(productId) => void removePriceAlert(productId)}
+                    t={t}
+                  />
+                ) : products.length > 0 ? (
+                  <StoreProductGrid
+                    products={products}
+                    matchScores={page === 'discover' && !activeQuery ? matchScores : undefined}
+                    onOpen={openProduct}
+                    t={t}
+                  />
+                ) : (
+                  <div className="flex h-full min-h-72 flex-col items-center justify-center gap-3 text-center">
+                    <ShoppingBag size={30} className="text-accent" />
+                    <p className="text-lg font-semibold">
+                      {!initialized || snapshot.isRefreshing || isSearching
+                        ? t('store.loading')
+                        : loadError || snapshot.catalogError
+                          ? t('store.loadError')
+                          : t('store.empty')}
+                    </p>
+                    <p className="max-w-md text-sm text-muted">
+                      {loadError || snapshot.catalogError
+                        ? t('store.loadErrorBody')
+                        : t('store.emptyBody')}
+                    </p>
+                    {(loadError || snapshot.catalogError) && !snapshot.isRefreshing && (
+                      <button
+                        data-focusable
+                        type="button"
+                        onClick={() => void refresh()}
+                        className="mt-1 flex items-center gap-2 rounded-full bg-accent px-5 py-2.5 text-sm font-black text-black"
+                      >
+                        <RefreshCw size={15} />
+                        {t('store.retry')}
+                      </button>
+                    )}
+                  </div>
+                )}
+              </>
             )}
           </motion.div>
         </AnimatePresence>

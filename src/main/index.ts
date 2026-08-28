@@ -6,6 +6,10 @@ import { ORBIT_AGENT_ARGUMENT } from './orbitServiceProtocol'
 
 const isBackgroundAgent = process.argv.includes(ORBIT_AGENT_ARGUMENT)
 
+// ORBIT has a bounded set of singleton services with independent shutdown hooks.
+// Keep EventEmitter leak detection enabled above that known baseline.
+app.setMaxListeners(20)
+
 if (isBackgroundAgent) {
   app.disableHardwareAcceleration()
   app.commandLine.appendSwitch('disable-gpu')

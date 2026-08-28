@@ -25,6 +25,11 @@ interface XboxAppCacheRecord {
 interface XboxAppCachePayload {
   available?: boolean
   activeSubscription?: boolean
+  complete?: boolean
+  eligibleProductCount?: number
+  resolvedProductCount?: number
+  unresolvedProductCount?: number
+  unresolvedProductIds?: unknown
   games?: XboxAppCacheRecord[]
 }
 
@@ -38,6 +43,11 @@ export interface XboxAppGame {
 export interface XboxAppLibrarySnapshot {
   available: boolean
   activeSubscription: boolean
+  complete: boolean
+  eligibleProductCount: number
+  resolvedProductCount: number
+  unresolvedProductCount: number
+  unresolvedProductIds: string[]
   games: Map<string, XboxAppGame>
   byPackageFamilyName: Map<string, XboxAppGame>
 }
@@ -51,7 +61,7 @@ $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $databasePath = Join-Path $env:LOCALAPPDATA 'Packages\Microsoft.GamingApp_8wekyb3d8bbwe\LocalState\AsyncCache.db'
 if (-not (Test-Path -LiteralPath $databasePath)) {
-  [pscustomobject]@{ available = $false; activeSubscription = $false; games = @() } |
+  [pscustomobject]@{ available = $false; activeSubscription = $false; complete = $false; eligibleProductCount = 0; resolvedProductCount = 0; unresolvedProductCount = 0; unresolvedProductIds = @(); games = @() } |
     ConvertTo-Json -Compress
   exit 0
 }
@@ -127,10 +137,6 @@ function Get-Urls([object[]]$artwork, [string[]]$purposes) {
   return @($result | Select-Object -Unique)
 }
 
-function Get-CanonicalTitle([string]$title) {
-  return ($title -replace '[®™©]', '' -replace '\s*[-–]\s*(Windows|PC)\s*$', '' -replace '\s*\((Windows|PC)\)\s*$', '' -replace '\s+', ' ').Trim().ToLowerInvariant()
-}
-
 $subscriptionRows = [OrbitXboxSqliteReader]::ReadScope($databasePath, 'game_subscriptions_info')
 $subscriptionRow = $subscriptionRows | Where-Object { $_[0] -eq '' } | Select-Object -First 1
 $subscriptionData = if ($subscriptionRow) { ($subscriptionRow[1] | ConvertFrom-Json).products.data } else { $null }
@@ -177,21 +183,26 @@ foreach ($row in $packageFamilyRows) {
 $hasActiveSubscription = $activeProductIds.Count -gt 0
 $allowedPlans = @('GPPC', 'NAKUTOMIPC')
 
-$deduplicated = @{}
+$eligibleProductIds = @()
+$gamesByProductId = @{}
+$unresolvedProductCount = 0
+$unresolvedProductIds = @()
 if ($hasActiveSubscription -and $subscriptionData) {
-  foreach ($data in $products.Values) {
-    if ($data.productKind -ne 'GAME' -or -not (@($data.availablePlatforms) -contains 'PC')) { continue }
-    $storeId = [string]$data.StoreId
-    $relationProperty = $subscriptionData.PSObject.Properties[$storeId]
-    if (-not $relationProperty) { continue }
+  foreach ($relationProperty in $subscriptionData.PSObject.Properties) {
+    $storeId = ([string]$relationProperty.Name).Trim().ToUpperInvariant()
+    if ($storeId -notmatch '^[A-Z0-9]{12}$') { continue }
     $included = $false
     foreach ($plan in $allowedPlans) {
       $planProperty = $relationProperty.Value.subscriptions.PSObject.Properties[$plan]
       if ($planProperty -and $planProperty.Value.included -eq $true) { $included = $true; break }
     }
     if (-not $included) { continue }
+    $eligibleProductIds += $storeId
+    $data = $products[$storeId]
+    if (-not $data) { $unresolvedProductCount++; $unresolvedProductIds += $storeId; continue }
+    if ($data.productKind -ne 'GAME' -or -not (@($data.availablePlatforms) -contains 'PC')) { continue }
     $title = ([string]$data.title).Trim()
-    if (-not $title) { continue }
+    if (-not $title) { $unresolvedProductCount++; $unresolvedProductIds += $storeId; continue }
 
     $packageFamilyName = @($data.alternateIds |
       Where-Object { $_.idType -eq 'PACKAGEFAMILYNAME' } |
@@ -201,7 +212,7 @@ if ($hasActiveSubscription -and $subscriptionData) {
     $verticalUrls = Get-Urls @($data.artwork) @('POSTER', 'BRANDEDKEYART')
     $horizontalUrls = Get-Urls @($data.artwork) @('SUPERHEROART', 'TITLEDHEROART')
     $iconUrls = Get-Urls @($data.artwork) @('LOGO', 'BOXART')
-    $record = [pscustomobject]@{
+    $gamesByProductId[$storeId] = [pscustomobject]@{
       productId = $storeId
       title = $title
       description = [string]$data.shortDescription
@@ -213,22 +224,19 @@ if ($hasActiveSubscription -and $subscriptionData) {
       verticalUrls = $verticalUrls
       horizontalUrls = $horizontalUrls
       iconUrls = $iconUrls
-      downloadable = $data.isDownloadable -eq $true
     }
-    $canonical = Get-CanonicalTitle $title
-    $current = $deduplicated[$canonical]
-    $score = ($(if ($record.downloadable) { 4 } else { 0 })) + ($(if ($packageFamilyName) { 2 } else { 0 })) + ($(if ($verticalUrls.Count -gt 0) { 1 } else { 0 }))
-    $currentScore = if ($current) {
-      ($(if ($current.downloadable) { 4 } else { 0 })) + ($(if ($current.packageFamilyName) { 2 } else { 0 })) + ($(if ($current.verticalUrls.Count -gt 0) { 1 } else { 0 }))
-    } else { -1 }
-    if (-not $current -or $score -gt $currentScore) { $deduplicated[$canonical] = $record }
   }
 }
 
 [pscustomobject]@{
   available = $true
   activeSubscription = $hasActiveSubscription
-  games = @($deduplicated.Values)
+  complete = $hasActiveSubscription -and $subscriptionData -and $unresolvedProductCount -eq 0
+  eligibleProductCount = @($eligibleProductIds | Select-Object -Unique).Count
+  resolvedProductCount = $gamesByProductId.Count
+  unresolvedProductCount = $unresolvedProductCount
+  unresolvedProductIds = @($unresolvedProductIds | Select-Object -Unique)
+  games = @($gamesByProductId.Values)
 } | ConvertTo-Json -Depth 7 -Compress
 `
 
@@ -284,6 +292,11 @@ export async function scanXboxAppLibrary(): Promise<XboxAppLibrarySnapshot> {
     return {
       available: false,
       activeSubscription: false,
+      complete: false,
+      eligibleProductCount: 0,
+      resolvedProductCount: 0,
+      unresolvedProductCount: 0,
+      unresolvedProductIds: [],
       games: new Map(),
       byPackageFamilyName: new Map()
     }
@@ -293,6 +306,14 @@ export async function scanXboxAppLibrary(): Promise<XboxAppLibrarySnapshot> {
   const payload = JSON.parse(output) as XboxAppCachePayload
   const games = new Map<string, XboxAppGame>()
   const byPackageFamilyName = new Map<string, XboxAppGame>()
+  const unresolvedProductIds = [
+    ...new Set(
+      (Array.isArray(payload.unresolvedProductIds) ? payload.unresolvedProductIds : [])
+        .map(text)
+        .filter((id): id is string => Boolean(id && /^[A-Z0-9]{12}$/i.test(id)))
+        .map((id) => id.toUpperCase())
+    )
+  ]
 
   for (const record of payload.games ?? []) {
     const productId = text(record.productId)?.toUpperCase()
@@ -331,6 +352,13 @@ export async function scanXboxAppLibrary(): Promise<XboxAppLibrarySnapshot> {
   return {
     available: payload.available === true,
     activeSubscription: payload.activeSubscription === true,
+    complete:
+      payload.complete === true &&
+      games.size === Math.max(0, Number(payload.resolvedProductCount ?? 0)),
+    eligibleProductCount: Math.max(0, Number(payload.eligibleProductCount ?? 0)),
+    resolvedProductCount: games.size,
+    unresolvedProductCount: Math.max(0, Number(payload.unresolvedProductCount ?? 0)),
+    unresolvedProductIds,
     games,
     byPackageFamilyName
   }

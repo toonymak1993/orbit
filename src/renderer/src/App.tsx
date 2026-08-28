@@ -4,6 +4,8 @@ import { usePreferencesStore } from '@renderer/state/preferencesStore'
 import { useAuthStore } from '@renderer/state/authStore'
 import { useEpicAuthStore } from '@renderer/state/epicAuthStore'
 import { useNavigationStore } from '@renderer/state/navigationStore'
+import { useLibraryCollectionsStore } from '@renderer/state/libraryCollectionsStore'
+import { useAppUpdateStore } from '@renderer/state/appUpdateStore'
 import { OnboardingFlow } from '@renderer/views/Onboarding/OnboardingFlow'
 import { MainShell } from '@renderer/components/MainShell'
 import { installPointerUiSounds } from '@renderer/lib/uiAudio'
@@ -14,6 +16,8 @@ function App(): JSX.Element | null {
   const hydratePreferences = usePreferencesStore((s) => s.hydrate)
   const restoreAuth = useAuthStore((s) => s.restore)
   const restoreEpicAuth = useEpicAuthStore((s) => s.restore)
+  const hydrateLibraryCollections = useLibraryCollectionsStore((s) => s.hydrate)
+  const initAppUpdates = useAppUpdateStore((s) => s.init)
   const phase = useNavigationStore((s) => s.phase)
   const setPhase = useNavigationStore((s) => s.setPhase)
 
@@ -26,6 +30,8 @@ function App(): JSX.Element | null {
       const [settings] = await Promise.all([
         window.api.settings.get(),
         hydratePreferences(),
+        hydrateLibraryCollections(),
+        initAppUpdates(),
         restoreAuth(),
         restoreEpicAuth()
       ])

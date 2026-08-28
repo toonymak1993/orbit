@@ -14,3 +14,7 @@ Thumbs.db
 .tools/
 .claude/
 .vs/
+.codex-qa/
+pnpm-lock.yaml
+pnpm-workspace.yaml
+resources/discord-social-sdk/win32-x64/discord_partner_sdk.dll

@@ -1,8 +1,14 @@
 import { create } from 'zustand'
 
-export type StorePage = 'discover' | 'deals' | 'wishlist' | 'alerts'
+export type StorePage = 'discover' | 'releases' | 'deals' | 'wishlist' | 'alerts'
 
-export const STORE_PAGE_ORDER: StorePage[] = ['discover', 'deals', 'wishlist', 'alerts']
+export const STORE_PAGE_ORDER: StorePage[] = [
+  'discover',
+  'releases',
+  'deals',
+  'wishlist',
+  'alerts'
+]
 
 interface StoreNavigationState {
   page: StorePage

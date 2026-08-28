@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { app, dialog, nativeImage, type BrowserWindow, type NativeImage } from 'electron'
+import { app, clipboard, dialog, nativeImage, type BrowserWindow, type NativeImage } from 'electron'
 import { existsSync } from 'node:fs'
 import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -14,14 +14,15 @@ const MAX_SOURCE_BYTES = 25 * 1024 * 1024
 const MAX_SOURCE_PIXELS = 50_000_000
 const REMOTE_TIMEOUT_MS = 12_000
 
-export type CustomArtworkOrientation = Exclude<ImageOrientation, 'icon'>
+export type CustomArtworkOrientation = ImageOrientation
 
 const ARTWORK_TARGETS: Record<
   CustomArtworkOrientation,
   { width: number; height: number; filePrefix: string }
 > = {
   vertical: { width: 600, height: 900, filePrefix: 'custom-cover-' },
-  horizontal: { width: 1600, height: 900, filePrefix: 'custom-background-' }
+  horizontal: { width: 1600, height: 900, filePrefix: 'custom-background-' },
+  icon: { width: 512, height: 512, filePrefix: 'custom-icon-' }
 }
 
 interface CustomArtworkEntry {
@@ -43,11 +44,20 @@ const customArtworkStore = new Store<CustomArtworkDatabase>({
 const customArtworkEntries: Record<string, CustomArtworkEntry> = {
   ...customArtworkStore.get('entries')
 }
+let lastCustomArtworkRevision = Math.max(
+  Date.now(),
+  ...Object.values(customArtworkEntries).map((entry) => entry.revision || 0)
+)
+
+function nextCustomArtworkRevision(): number {
+  lastCustomArtworkRevision = Math.max(Date.now(), lastCustomArtworkRevision + 1)
+  return lastCustomArtworkRevision
+}
 
 function entryKey(gameId: string, orientation: CustomArtworkOrientation): string {
-  // Existing vertical entries remain keyed by game ID. Horizontal entries use
-  // their own namespace, so the original store needs no migration.
-  return orientation === 'vertical' ? gameId : `horizontal:${gameId}`
+  // Existing vertical and horizontal keys remain untouched. Icon overrides get
+  // their own namespace, so the store stays backwards compatible.
+  return orientation === 'vertical' ? gameId : `${orientation}:${gameId}`
 }
 
 function isSafeFileName(
@@ -66,20 +76,28 @@ function persistEntries(): void {
   customArtworkStore.set('entries', customArtworkEntries)
 }
 
-function toResolved(entry: CustomArtworkEntry): ResolvedImage {
+function toResolved(
+  entry: CustomArtworkEntry,
+  orientation: CustomArtworkOrientation
+): ResolvedImage {
   return {
     url: `orbit-image://${entry.fileName}`,
-    contain: false,
+    contain: orientation === 'icon',
     revision: entry.revision
   }
 }
 
-function cropArtwork(
+function normalizeArtworkImage(
   image: NativeImage,
   orientation: CustomArtworkOrientation
 ): NativeImage {
   const target = ARTWORK_TARGETS[orientation]
   const { width, height } = image.getSize()
+  if (orientation === 'icon') {
+    return width >= height
+      ? image.resize({ width: target.width, quality: 'best' })
+      : image.resize({ height: target.height, quality: 'best' })
+  }
   const targetRatio = target.width / target.height
   const sourceRatio = width / height
   const cropWidth = sourceRatio > targetRatio ? Math.round(height * targetRatio) : width
@@ -123,7 +141,7 @@ function prepareArtwork(
   ) {
     throw new Error(`${context} has unsupported dimensions`)
   }
-  const artwork = cropArtwork(image, orientation)
+  const artwork = normalizeArtworkImage(image, orientation)
   if (artwork.isEmpty()) throw new Error(`${context} could not be prepared`)
   return artwork
 }
@@ -162,7 +180,9 @@ class CustomArtworkService {
       .map((entry) => entry.fileName)
       .filter(
         (fileName) =>
-          isSafeFileName(fileName, 'vertical') || isSafeFileName(fileName, 'horizontal')
+          isSafeFileName(fileName, 'vertical') ||
+          isSafeFileName(fileName, 'horizontal') ||
+          isSafeFileName(fileName, 'icon')
       )
   }
 
@@ -173,7 +193,7 @@ class CustomArtworkService {
     const key = entryKey(gameId, orientation)
     const entry = customArtworkEntries[key]
     if (!entry || !isSafeFileName(entry.fileName, orientation)) return null
-    if (existsSync(join(CACHE_DIR, entry.fileName))) return toResolved(entry)
+    if (existsSync(join(CACHE_DIR, entry.fileName))) return toResolved(entry, orientation)
 
     delete customArtworkEntries[key]
     persistEntries()
@@ -190,22 +210,20 @@ class CustomArtworkService {
     orientation: CustomArtworkOrientation = 'vertical'
   ): Promise<ResolvedImage | null> {
     const german = settingsStore.store.language === 'de'
-    const horizontal = orientation === 'horizontal'
+    const labels = german
+      ? {
+          vertical: ['ORBIT · Cover auswählen', 'Cover verwenden'],
+          horizontal: ['ORBIT · Hintergrund auswählen', 'Hintergrund verwenden'],
+          icon: ['ORBIT · Icon auswählen', 'Icon verwenden']
+        }
+      : {
+          vertical: ['ORBIT · Select cover', 'Use cover'],
+          horizontal: ['ORBIT · Select background', 'Use background'],
+          icon: ['ORBIT · Select icon', 'Use icon']
+        }
     const result = await dialog.showOpenDialog(mainWindow, {
-      title: german
-        ? horizontal
-          ? 'ORBIT · Hintergrund auswählen'
-          : 'ORBIT · Artwork auswählen'
-        : horizontal
-          ? 'ORBIT · Select background'
-          : 'ORBIT · Select artwork',
-      buttonLabel: german
-        ? horizontal
-          ? 'Hintergrund verwenden'
-          : 'Artwork verwenden'
-        : horizontal
-          ? 'Use background'
-          : 'Use artwork',
+      title: labels[orientation][0],
+      buttonLabel: labels[orientation][1],
       properties: ['openFile'],
       filters: [
         { name: german ? 'Bilder' : 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] },
@@ -229,10 +247,28 @@ class CustomArtworkService {
     )
   }
 
+  async paste(
+    gameId: string,
+    orientation: CustomArtworkOrientation = 'vertical'
+  ): Promise<ResolvedImage | null> {
+    const sourceImage = clipboard.readImage()
+    if (sourceImage.isEmpty()) return null
+    const { width, height } = sourceImage.getSize()
+    if (width <= 0 || height <= 0 || width * height > MAX_SOURCE_PIXELS) {
+      throw new Error('Clipboard artwork has unsupported dimensions')
+    }
+    const source = sourceImage.toPNG()
+    return this.persistArtwork(
+      gameId,
+      orientation,
+      prepareArtwork(source, 'Clipboard artwork', orientation)
+    )
+  }
+
   async applySteamGridDb(
     gameId: string,
     sourceUrl: string,
-    orientation: CustomArtworkOrientation = 'vertical'
+    orientation: Exclude<CustomArtworkOrientation, 'icon'> = 'vertical'
   ): Promise<ResolvedImage> {
     if (!isSteamGridDbAssetUrl(sourceUrl)) {
       throw new Error('SteamGridDB returned an unsupported artwork URL')
@@ -276,11 +312,12 @@ class CustomArtworkService {
     await writeAtomically(join(CACHE_DIR, fileName), buffer)
 
     const previous = customArtworkEntries[key]
+    const artworkSize = artwork.getSize()
     const entry: CustomArtworkEntry = {
       fileName,
-      width: target.width,
-      height: target.height,
-      revision: Date.now()
+      width: artworkSize.width,
+      height: artworkSize.height,
+      revision: nextCustomArtworkRevision()
     }
     customArtworkEntries[key] = entry
     persistEntries()
@@ -292,7 +329,7 @@ class CustomArtworkService {
     ) {
       await unlink(join(CACHE_DIR, previous.fileName)).catch(() => undefined)
     }
-    return toResolved(entry)
+    return toResolved(entry, orientation)
   }
 
   async reset(gameId: string, expectedRevision?: number): Promise<boolean>

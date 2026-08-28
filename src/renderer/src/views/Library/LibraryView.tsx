@@ -1,10 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { CircleAlert, Loader2, Plus, RefreshCw, Search, X } from 'lucide-react'
+import {
+  CircleAlert,
+  FolderPlus,
+  Loader2,
+  Plus,
+  RefreshCw,
+  Search,
+  Star,
+  Trash2,
+  X
+} from 'lucide-react'
 import { useAutoFocus } from '@renderer/hooks/useAutoFocus'
 import { useLibraryStore } from '@renderer/state/libraryStore'
 import {
   LIBRARY_SOURCE_ORDER,
+  collectionIdFromLibrarySource,
+  collectionLibrarySource,
   useLibraryFilterStore,
   type LibrarySource
 } from '@renderer/state/libraryFilterStore'
@@ -14,19 +26,20 @@ import { useNavigationStore } from '@renderer/state/navigationStore'
 import { usePreferencesStore } from '@renderer/state/preferencesStore'
 import { GameCard } from '@renderer/components/GameCard'
 import { CustomGameWizard } from '@renderer/components/CustomGameWizard'
+import {
+  DeleteLibraryConfirmationDialog,
+  LibraryCollectionDialog
+} from '@renderer/components/LibraryCollectionDialog'
 import { ControllerButtonHint } from '@renderer/components/ControllerButtonHint'
 import { useExpandableViewSearch } from '@renderer/hooks/useExpandableViewSearch'
 import { useT } from '@renderer/i18n/useT'
 import { focusElement } from '@renderer/lib/spatialNavigation'
 import { LIBRARY_SEARCH_EVENT } from '@renderer/lib/librarySearch'
+import { useLibraryCollectionsStore } from '@renderer/state/libraryCollectionsStore'
 
-import type { GameCardSize } from '@shared/ipc'
+import { shouldShowSteamSyncNotice } from '@shared/steamSyncPolicy'
+import type { GameCollection } from '@shared/ipc'
 
-const GRID_COLUMNS: Record<GameCardSize, number> = {
-  compact: 7,
-  standard: 6,
-  large: 5
-}
 const INITIAL_RENDER_LIMIT = 30
 const RENDER_BATCH_SIZE = 18
 
@@ -41,13 +54,20 @@ export function LibraryView(): JSX.Element {
   const refreshLibrary = useLibraryStore((s) => s.refresh)
   const source = useLibraryFilterStore((s) => s.source)
   const setSource = useLibraryFilterStore((s) => s.setSource)
+  const setCollectionIds = useLibraryFilterStore((s) => s.setCollectionIds)
   const isActive = useNavigationStore((s) => s.mainView === 'library')
-  const gameCardSize = usePreferencesStore((s) => s.gameCardSize)
-  const gridColumns = GRID_COLUMNS[gameCardSize]
+  const gridColumns = usePreferencesStore((s) => s.libraryGridColumns)
+  const favoriteGameIds = useLibraryCollectionsStore((s) => s.favoriteGameIds)
+  const collections = useLibraryCollectionsStore((s) => s.collections)
   const preloadCardThreshold = gridColumns * 2
   const [query, setQuery] = useState('')
   const [showCustomWizard, setShowCustomWizard] = useState(false)
+  const [showCollectionDialog, setShowCollectionDialog] = useState(false)
+  const [collectionPendingDeletion, setCollectionPendingDeletion] =
+    useState<GameCollection | null>(null)
   const [renderLimit, setRenderLimit] = useState(INITIAL_RENDER_LIMIT)
+  const collectionButtonRef = useRef<HTMLButtonElement>(null)
+  const deleteCollectionButtonRef = useRef<HTMLButtonElement>(null)
   const revealLockedRef = useRef(false)
   const revealUnlockTimerRef = useRef<ReturnType<typeof setTimeout>>()
   const t = useT()
@@ -66,8 +86,7 @@ export function LibraryView(): JSX.Element {
   const showSteamSyncNotice = Boolean(
     account &&
       (source === 'all' || source === 'steam') &&
-      steamStatus &&
-      (steamStatus.state === 'partial' || steamStatus.state === 'error')
+      shouldShowSteamSyncNotice(steamStatus)
   )
   const steamSyncMessage =
     steamStatus?.issue === 'metadata-pending'
@@ -77,25 +96,58 @@ export function LibraryView(): JSX.Element {
         ? t('library.sync.visibility')
         : t('library.sync.partial')
 
+  const availableGames = useMemo(() => {
+    const byId = new Map(games.map((game) => [game.id, game]))
+    for (const game of providerGames) {
+      if (!byId.has(game.id)) byId.set(game.id, game)
+    }
+    return [...byId.values()]
+  }, [games, providerGames])
+
+  const favoriteIds = useMemo(() => new Set(favoriteGameIds), [favoriteGameIds])
+  const activeCollectionId = collectionIdFromLibrarySource(source)
+  const activeCollection = activeCollectionId
+    ? collections.find((collection) => collection.id === activeCollectionId)
+    : undefined
+
   const sourceCounts = useMemo(
     () => ({
+      favorites: availableGames.filter((game) => favoriteIds.has(game.id)).length,
       all: games.length,
       steam: providerGames.filter((game) => game.provider === 'steam').length,
       epic: providerGames.filter((game) => game.provider === 'epic').length,
       xbox: providerGames.filter((game) => game.provider === 'xbox').length,
       local: providerGames.filter((game) => game.provider === 'local').length
     }),
-    [games, providerGames]
+    [availableGames, favoriteIds, games.length, providerGames]
   )
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
-    const sorted = [
-      ...(source === 'all' ? games : providerGames.filter((game) => game.provider === source))
-    ].sort((a, b) => a.name.localeCompare(b.name))
+    const collectionIds = new Set(activeCollection?.gameIds ?? [])
+    const selectedGames =
+      source === 'favorites'
+        ? availableGames.filter((game) => favoriteIds.has(game.id))
+        : activeCollection
+          ? availableGames.filter((game) => collectionIds.has(game.id))
+          : source === 'all'
+            ? games
+            : providerGames.filter((game) => game.provider === source)
+    const sorted = [...selectedGames].sort((a, b) => a.name.localeCompare(b.name))
     if (!q) return sorted
     return sorted.filter((g) => g.name.toLowerCase().includes(q))
-  }, [games, providerGames, query, source])
+  }, [activeCollection, availableGames, favoriteIds, games, providerGames, query, source])
+
+  useEffect(() => {
+    setCollectionIds(collections.map((collection) => collection.id))
+  }, [collections, setCollectionIds])
+
+  useEffect(() => {
+    const root = containerRef.current
+    if (!root) return
+    root.toggleAttribute('inert', showCollectionDialog || Boolean(collectionPendingDeletion))
+    return () => root.removeAttribute('inert')
+  }, [collectionPendingDeletion, containerRef, showCollectionDialog])
 
   const revealNextBatch = useCallback((): void => {
     if (revealLockedRef.current) return
@@ -148,6 +200,7 @@ export function LibraryView(): JSX.Element {
   }, [containerRef, source])
 
   function sourceLabel(value: LibrarySource): string {
+    if (value === 'favorites') return t('library.source.favorites')
     if (value === 'steam') return t('library.source.steam')
     if (value === 'epic') return t('library.source.epic')
     if (value === 'xbox') return t('library.source.xbox')
@@ -156,6 +209,7 @@ export function LibraryView(): JSX.Element {
   }
 
   return (
+    <>
     <div
       ref={containerRef}
       onScroll={(event) => {
@@ -192,12 +246,56 @@ export function LibraryView(): JSX.Element {
                   : 'text-muted hover:bg-white/10 hover:text-white'
               }`}
             >
+              {value === 'favorites' && (
+                <Star
+                  size={13}
+                  className="mr-1.5 inline-block -translate-y-px"
+                  fill={source === value ? 'currentColor' : 'none'}
+                />
+              )}
               {sourceLabel(value)}
               <span className={`ml-1.5 ${source === value ? 'text-black/60' : 'text-white/35'}`}>
                 {sourceCounts[value as keyof typeof sourceCounts] ?? 0}
               </span>
             </button>
           ))}
+          <span aria-hidden="true" className="mx-1 h-6 w-px shrink-0 bg-white/15" />
+          {collections.map((collection) => {
+            const value = collectionLibrarySource(collection.id)
+            return (
+              <button
+                key={collection.id}
+                data-focusable
+                data-library-source={value}
+                data-search-focus-fallback={source === value ? 'true' : undefined}
+                aria-pressed={source === value}
+                onClick={() => setSource(value)}
+                className={`max-w-[12rem] shrink-0 rounded-full px-3 py-2 text-xs font-semibold transition-colors ${
+                  source === value
+                    ? 'bg-accent text-black'
+                    : 'text-muted hover:bg-white/10 hover:text-white'
+                }`}
+              >
+                <span className="inline-block max-w-[8rem] truncate align-bottom">
+                  {collection.name}
+                </span>
+                <span className={`ml-1.5 ${source === value ? 'text-black/60' : 'text-white/35'}`}>
+                  {collection.gameIds.length}
+                </span>
+              </button>
+            )
+          })}
+          <button
+            ref={collectionButtonRef}
+            data-focusable
+            type="button"
+            onClick={() => setShowCollectionDialog(true)}
+            aria-label={t('collections.manageTitle')}
+            className="flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-full px-3 text-xs font-semibold text-muted transition-colors hover:bg-white/10 hover:text-white"
+          >
+            <FolderPlus size={15} />
+            {t('collections.newShort')}
+          </button>
           <ControllerButtonHint
             button="rightTrigger"
             className="mx-1 rounded-md border border-white/15 px-1.5 py-0.5 text-[10px] font-bold text-muted"
@@ -258,6 +356,19 @@ export function LibraryView(): JSX.Element {
               </button>
             )}
           </motion.div>
+          {activeCollection && (
+            <button
+              ref={deleteCollectionButtonRef}
+              data-focusable
+              type="button"
+              onClick={() => setCollectionPendingDeletion(activeCollection)}
+              aria-label={t('library.collection.deleteAction', { name: activeCollection.name })}
+              className="flex shrink-0 items-center gap-2 rounded-full border border-rose-200/15 bg-rose-300/[0.06] px-3.5 py-2.5 text-sm font-bold text-rose-100/75 transition-colors hover:bg-rose-300/10 hover:text-rose-100"
+            >
+              <Trash2 size={16} />
+              <span className="hidden sm:inline">{t('library.collection.deleteShort')}</span>
+            </button>
+          )}
           <button
             data-focusable
             type="button"
@@ -304,6 +415,12 @@ export function LibraryView(): JSX.Element {
           <p className="text-sm font-semibold text-white/70">
             {games.length === 0 && loadedAt === 0
               ? t('library.loading')
+              : query.trim()
+                ? t('library.empty')
+              : source === 'favorites'
+                ? t('library.favorites.empty')
+                : activeCollection
+                  ? t('library.collection.empty')
               : source === 'local'
                 ? t('customGame.empty')
                 : !account && !epicAccount && games.length === 0
@@ -355,5 +472,37 @@ export function LibraryView(): JSX.Element {
         )}
       </AnimatePresence>
     </div>
+    <AnimatePresence>
+      {showCollectionDialog && (
+        <LibraryCollectionDialog
+          key="library-collections"
+          onClose={() => {
+            setShowCollectionDialog(false)
+            requestAnimationFrame(() => focusElement(collectionButtonRef.current))
+          }}
+          onSelectCollection={(collectionId) => {
+            setSource(collectionLibrarySource(collectionId))
+            setShowCollectionDialog(false)
+          }}
+        />
+      )}
+    </AnimatePresence>
+    <AnimatePresence>
+      {collectionPendingDeletion && (
+        <DeleteLibraryConfirmationDialog
+          key={`delete-library-${collectionPendingDeletion.id}`}
+          collection={collectionPendingDeletion}
+          onCancel={() => {
+            setCollectionPendingDeletion(null)
+            requestAnimationFrame(() => focusElement(deleteCollectionButtonRef.current))
+          }}
+          onDeleted={() => {
+            setCollectionPendingDeletion(null)
+            setSource('all')
+          }}
+        />
+      )}
+    </AnimatePresence>
+    </>
   )
 }

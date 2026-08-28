@@ -5,6 +5,7 @@ import { useNavigationStore, MAIN_VIEW_ORDER } from '@renderer/state/navigationS
 import { useLibraryFilterStore } from '@renderer/state/libraryFilterStore'
 import { useSettingsNavigationStore } from '@renderer/state/settingsNavigationStore'
 import { useStoreNavigationStore } from '@renderer/state/storeNavigationStore'
+import { useFriendsStore } from '@renderer/state/friendsStore'
 import { usePreferencesStore } from '@renderer/state/preferencesStore'
 import { LIBRARY_SEARCH_EVENT, STORE_SEARCH_EVENT } from '@renderer/lib/librarySearch'
 import { playUiSound } from '@renderer/lib/uiAudio'
@@ -13,6 +14,7 @@ import {
   getGamepadInputSignature
 } from '@renderer/lib/controllerProfile'
 import { useControllerStore } from '@renderer/state/controllerStore'
+import { useGameDetailStore } from '@renderer/state/gameDetailStore'
 
 const STICK_DEADZONE = 0.5
 const REPEAT_DELAY_MS = 420
@@ -43,8 +45,18 @@ function confirmFocused(): void {
   active.click()
 }
 
+function openGameDetails(card: HTMLElement | null): boolean {
+  const gameId = card?.dataset.gameId
+  if (!gameId) return false
+  playUiSound('open')
+  useGameDetailStore.getState().openGame(gameId)
+  return true
+}
+
 function openViewSearch(): void {
-  if (document.querySelector('[data-game-launch-splash="true"]')) {
+  const launchSplash = document.querySelector<HTMLElement>('[data-game-launch-splash="true"]')
+  if (launchSplash) {
+    if (launchSplash.dataset.launchRevealable !== 'true') return
     playUiSound('open')
     void window.api.game.revealLauncher()
     return
@@ -72,11 +84,12 @@ function cycleMainView(step: 1 | -1): void {
   playUiSound('switch')
 }
 
-/** Cycles the current view's secondary tabs â€” bound to LT/RT. */
+/** Cycles the current view's secondary tabs — bound to LT/RT. */
 function cycleSecondaryView(step: 1 | -1): void {
   if (document.querySelector('[data-focus-scope="active"]')) return
   const { mainView } = useNavigationStore.getState()
   if (mainView === 'library') useLibraryFilterStore.getState().cycleSource(step)
+  else if (mainView === 'friends') useFriendsStore.getState().cycleFilter(step)
   else if (mainView === 'settings') useSettingsNavigationStore.getState().cyclePage(step)
   else if (mainView === 'store') useStoreNavigationStore.getState().cyclePage(step)
   else return
@@ -260,13 +273,7 @@ export function useGamepadNavigation(): void {
       const startPressed = anyButtonPressed(BTN_START)
       if (startPressed && !prevButtons[BTN_START]) {
         const active = document.activeElement as HTMLElement | null
-        const gameId = active?.matches('[data-game-card="true"]')
-          ? active.dataset.gameId
-          : undefined
-        if (gameId) {
-          playUiSound('confirm')
-          void window.api.game.launch(gameId).catch(() => playUiSound('error'))
-        }
+        openGameDetails(active?.closest<HTMLElement>('[data-game-card="true"]') ?? null)
       }
       prevButtons[BTN_START] = startPressed
 
@@ -294,6 +301,13 @@ export function useGamepadNavigation(): void {
           e.preventDefault()
           if (moveFocus(e.key === 'ArrowUp' ? 'up' : 'down')) playUiSound('navigate')
         }
+        return
+      }
+
+      if (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) {
+        const active = document.activeElement as HTMLElement | null
+        const card = active?.closest<HTMLElement>('[data-game-card="true"]') ?? null
+        if (openGameDetails(card)) e.preventDefault()
         return
       }
 
@@ -344,10 +358,24 @@ export function useGamepadNavigation(): void {
       }
     }
 
+    function handleContextMenu(e: MouseEvent): void {
+      const target = e.target
+      const card =
+        target instanceof Element
+          ? target.closest<HTMLElement>('[data-game-card="true"]')
+          : null
+      if (!card) return
+      e.preventDefault()
+      card.focus({ preventScroll: true })
+      openGameDetails(card)
+    }
+
     window.addEventListener('keydown', handleKeyDown)
+    window.addEventListener('contextmenu', handleContextMenu)
     return () => {
       cancelAnimationFrame(rafId)
       window.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('contextmenu', handleContextMenu)
     }
   }, [])
 }

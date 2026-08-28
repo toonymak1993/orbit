@@ -6,6 +6,7 @@ const initialSnapshot: StoreSnapshot = {
   products: [],
   monthlyReleases: [],
   releaseCalendarError: false,
+  catalogError: false,
   region: 'eu',
   updatedAt: 0,
   isRefreshing: false,
@@ -17,6 +18,7 @@ const initialSnapshot: StoreSnapshot = {
 interface StoreState {
   snapshot: StoreSnapshot
   initialized: boolean
+  loadError: boolean
   searchResults: StoreProduct[]
   isSearching: boolean
   init: () => Promise<void>
@@ -78,12 +80,26 @@ function commitSnapshot(snapshot: StoreSnapshot, checkTriggers = true): void {
   if (checkTriggers && useStoreStore.getState().initialized) {
     notifyTriggeredPriceAlerts(previous, snapshot)
   }
-  useStoreStore.setState({ snapshot })
+  useStoreStore.setState({ snapshot, loadError: false })
+}
+
+async function loadSnapshot(
+  request: Promise<StoreSnapshot>,
+  checkTriggers = true
+): Promise<boolean> {
+  try {
+    commitSnapshot(await request, checkTriggers)
+    return true
+  } catch {
+    useStoreStore.setState({ loadError: true })
+    return false
+  }
 }
 
 export const useStoreStore = create<StoreState>((set) => ({
   snapshot: initialSnapshot,
   initialized: false,
+  loadError: false,
   searchResults: [],
   isSearching: false,
   init: async () => {
@@ -91,11 +107,11 @@ export const useStoreStore = create<StoreState>((set) => ({
       listening = true
       window.api.store.onUpdated((snapshot) => commitSnapshot(snapshot))
     }
-    commitSnapshot(await window.api.store.get(), false)
+    await loadSnapshot(window.api.store.get(), false)
     set({ initialized: true })
   },
   refresh: async () => {
-    commitSnapshot(await window.api.store.refresh())
+    await loadSnapshot(window.api.store.refresh())
   },
   refreshIfStale: async () => {
     const snapshot = useStoreStore.getState().snapshot
@@ -104,9 +120,10 @@ export const useStoreStore = create<StoreState>((set) => ({
     const expectedCalendarMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
     if (
       Date.now() - lastRefresh < 30 * 60 * 1000 &&
-      snapshot.releaseCalendarMonth === expectedCalendarMonth
+      snapshot.releaseCalendarMonth === expectedCalendarMonth &&
+      snapshot.monthlyReleases.length > 0
     ) return
-    commitSnapshot(await window.api.store.refresh())
+    await loadSnapshot(window.api.store.refresh())
   },
   compareProduct: async (productId) => {
     commitSnapshot(await window.api.store.compareProduct(productId))
@@ -177,7 +194,6 @@ export const useStoreStore = create<StoreState>((set) => ({
     }
   },
   setRegion: async (region) => {
-    const current = await window.api.store.setRegion(region)
-    commitSnapshot(current, false)
+    await loadSnapshot(window.api.store.setRegion(region), false)
   }
 }))

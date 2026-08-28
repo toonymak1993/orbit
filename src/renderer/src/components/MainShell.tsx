@@ -2,8 +2,8 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 're
 import { AnimatePresence, motion } from 'framer-motion'
 import { TopBar } from './TopBar'
 import { HomeView } from '@renderer/views/Home/HomeView'
+import { FriendsView } from '@renderer/views/Friends/FriendsView'
 import { LibraryView } from '@renderer/views/Library/LibraryView'
-import { ReleaseCalendarView } from '@renderer/views/Releases/ReleaseCalendarView'
 import { StoreView } from '@renderer/views/Store/StoreView'
 import { SettingsView } from '@renderer/views/Settings/SettingsView'
 import {
@@ -15,10 +15,13 @@ import { useBackHandler } from '@renderer/hooks/useBackHandler'
 import { useSyncStore } from '@renderer/state/syncStore'
 import { GameDetailPanel } from './GameDetailPanel'
 import { useGameDetailStore } from '@renderer/state/gameDetailStore'
-import { focusFirstIn } from '@renderer/lib/spatialNavigation'
+import { focusElement, focusFirstIn } from '@renderer/lib/spatialNavigation'
 import { useStoreStore } from '@renderer/state/storeStore'
 import { GameLaunchSplash } from './GameLaunchSplash'
 import { SessionSummaryToast } from './SessionSummaryToast'
+import { AppUpdateBanner } from './AppUpdateBanner'
+import { useAppUpdateStore } from '@renderer/state/appUpdateStore'
+import { BottomStatusHud } from './BottomStatusHud'
 import type { GameLaunchStatus } from '@shared/ipc'
 
 const SESSION_SUMMARY_VISIBLE_MS = 6_000
@@ -34,10 +37,16 @@ export function MainShell(): JSX.Element {
   const detailGameId = useGameDetailStore((s) => s.gameId)
   const [launchStatus, setLaunchStatus] = useState<GameLaunchStatus>({ phase: 'idle' })
   const [sessionSummary, setSessionSummary] = useState<GameLaunchStatus | null>(null)
+  const updateStage = useAppUpdateStore((state) => state.snapshot.stage)
+  const updateBannerVisible = useAppUpdateStore((state) => state.bannerVisible)
   const pendingSessionSummaryRef = useRef<GameLaunchStatus | null>(null)
   const games = useLibraryStore((s) => s.snapshot.games)
+  const providerGames = useLibraryStore((s) => s.snapshot.providerGames)
   const shellRef = useRef<HTMLDivElement>(null)
-  const detailGame = detailGameId ? games.find((game) => game.id === detailGameId) : undefined
+  const detailGame = detailGameId
+    ? (games.find((game) => game.id === detailGameId) ??
+      providerGames.find((game) => game.id === detailGameId))
+    : undefined
 
   useEffect(() => {
     void initSync()
@@ -57,10 +66,8 @@ export function MainShell(): JSX.Element {
         pendingSessionSummaryRef.current = null
       }
     }
-    void window.api.game.getLaunchStatus().then((status) => {
-      receiveLaunchStatus(status)
-    })
     const unsubscribe = window.api.game.onLaunchStatus(receiveLaunchStatus)
+    void window.api.game.getLaunchStatus().then(receiveLaunchStatus)
     return () => {
       active = false
       unsubscribe()
@@ -79,7 +86,7 @@ export function MainShell(): JSX.Element {
   }, [])
 
   useEffect(() => {
-    if (mainView === 'store' || mainView === 'releases') void refreshStoreIfStale()
+    if (mainView === 'store') void refreshStoreIfStale()
   }, [mainView, refreshStoreIfStale])
 
   useBackHandler(() => {
@@ -89,25 +96,29 @@ export function MainShell(): JSX.Element {
   useEffect(() => {
     const shell = shellRef.current
     if (!shell) return
-    if (detailGame || launchStatus.phase !== 'idle') shell.setAttribute('inert', '')
+    if (detailGame || launchStatus.phase !== 'idle' || updateStage === 'installing') {
+      shell.setAttribute('inert', '')
+    }
     else shell.removeAttribute('inert')
     return () => shell.removeAttribute('inert')
-  }, [detailGame, launchStatus.phase])
+  }, [detailGame, launchStatus.phase, updateStage])
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
       const activePane = shellRef.current?.querySelector<HTMLElement>(
         `[data-view-pane="${mainView}"]`
       )
-      if (activePane) focusFirstIn(activePane)
+      const preferredEntry = activePane?.querySelector<HTMLElement>('[data-view-entry="true"]')
+      if (preferredEntry) focusElement(preferredEntry)
+      else if (activePane) focusFirstIn(activePane)
     })
     return () => cancelAnimationFrame(frame)
   }, [mainView])
 
   function renderView(view: MainView): JSX.Element {
     if (view === 'home') return <HomeView />
+    if (view === 'friends') return <FriendsView />
     if (view === 'library') return <LibraryView />
-    if (view === 'releases') return <ReleaseCalendarView />
     if (view === 'store') return <StoreView />
     return <SettingsView />
   }
@@ -126,6 +137,7 @@ export function MainShell(): JSX.Element {
             {renderView(mainView)}
           </PersistentViewPane>
         </main>
+        <BottomStatusHud />
       </div>
 
       <AnimatePresence>{detailGame && <GameDetailPanel key={detailGame.id} game={detailGame} />}</AnimatePresence>
@@ -145,6 +157,13 @@ export function MainShell(): JSX.Element {
             visibleSeconds={SESSION_SUMMARY_VISIBLE_MS / 1_000}
           />
         )}
+      </AnimatePresence>
+      <AnimatePresence>
+        {updateBannerVisible &&
+          (updateStage === 'installing' ||
+            (updateStage === 'ready' && launchStatus.phase === 'idle')) && (
+            <AppUpdateBanner key="app-update" />
+          )}
       </AnimatePresence>
     </div>
   )

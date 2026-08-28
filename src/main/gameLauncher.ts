@@ -4,6 +4,11 @@ import { win32 as path } from 'node:path'
 import { shell } from 'electron'
 import type { LibraryGame } from '@shared/ipc'
 
+export interface GameLaunchReceipt {
+  /** Present only when ORBIT spawned the configured game executable itself. */
+  spawnedGamePid?: number
+}
+
 function epicGameId(value: string): string {
   const id = value.trim()
   if (!id || id.length > 512 || !/^[a-z0-9_.-]+$/i.test(id)) {
@@ -42,11 +47,11 @@ function installedXboxApplicationId(game: LibraryGame): string | undefined {
   return undefined
 }
 
-function launchWindowsApplication(applicationId: string): Promise<void> {
+function launchWindowsApplication(applicationId: string): Promise<number> {
   return launchDetached('explorer.exe', [`shell:AppsFolder\\${applicationId}`])
 }
 
-function launchDetached(executable: string, args: readonly string[], cwd?: string): Promise<void> {
+function launchDetached(executable: string, args: readonly string[], cwd?: string): Promise<number> {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, {
       cwd,
@@ -58,7 +63,7 @@ function launchDetached(executable: string, args: readonly string[], cwd?: strin
     child.once('error', reject)
     child.once('spawn', () => {
       child.unref()
-      resolve()
+      resolve(child.pid ?? 0)
     })
   })
 }
@@ -83,7 +88,7 @@ function steamExecutable(game: LibraryGame): string | undefined {
 }
 
 /** Delegates launch/install actions to the owning local store client. */
-export async function launchGame(game: LibraryGame): Promise<void> {
+export async function launchGame(game: LibraryGame): Promise<GameLaunchReceipt> {
   if (game.provider === 'local' && game.installed) {
     const executable = game.local?.executablePath?.trim()
     if (!executable || !executable.toLocaleLowerCase('en-US').endsWith('.exe') || !existsSync(executable)) {
@@ -91,8 +96,8 @@ export async function launchGame(game: LibraryGame): Promise<void> {
     }
     const installDir = game.installDir?.trim()
     const cwd = installDir && existsSync(installDir) ? installDir : path.dirname(executable)
-    await launchDetached(executable, game.local?.launchArguments ?? [], cwd)
-    return
+    const spawnedGamePid = await launchDetached(executable, game.local?.launchArguments ?? [], cwd)
+    return spawnedGamePid > 0 ? { spawnedGamePid } : {}
   }
 
   if (game.provider === 'steam' && game.appId) {
@@ -100,18 +105,18 @@ export async function launchGame(game: LibraryGame): Promise<void> {
       const executable = steamExecutable(game)
       if (executable) {
         await launchDetached(executable, ['-silent', '-applaunch', String(game.appId)])
-        return
+        return {}
       }
     }
     await shell.openExternal(game.installed ? `steam://rungameid/${game.appId}` : `steam://install/${game.appId}`)
-    return
+    return {}
   }
 
   if (game.provider === 'epic') {
     const id = epicGameId(game.providerGameId)
     const action = game.installed ? 'launch&silent=true' : 'install'
     await shell.openExternal(`com.epicgames.launcher://apps/${id}?action=${action}`)
-    return
+    return {}
   }
 
   if (game.provider === 'xbox') {
@@ -119,7 +124,7 @@ export async function launchGame(game: LibraryGame): Promise<void> {
       const applicationId = installedXboxApplicationId(game)
       if (applicationId) {
         await launchWindowsApplication(applicationId)
-        return
+        return {}
       }
     }
 
@@ -127,19 +132,19 @@ export async function launchGame(game: LibraryGame): Promise<void> {
     // Microsoft Store, EA and Ubisoft hand-offs themselves.
     const productId = xboxProductId(game.providerGameId)
     await shell.openExternal(`msxbox://game/?productId=${productId}`)
-    return
+    return {}
   }
 
   if (game.provider === 'ea' && game.installed) {
     const id = providerId(game.providerGameId, 'EA')
     await shell.openExternal(`origin2://game/launch?offerIds=${encodeURIComponent(id)}`)
-    return
+    return {}
   }
 
   if (game.provider === 'ubisoft' && game.installed) {
     const id = providerId(game.providerGameId, 'Ubisoft')
     await shell.openExternal(`uplay://launch/${encodeURIComponent(id)}/0`)
-    return
+    return {}
   }
 
   throw new Error('Game provider is not launchable')

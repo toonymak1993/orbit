@@ -26,6 +26,7 @@ export const HARDWARE_CONTROL_BUTTON_LABEL_KEYS: Record<
   menu: 'settings.hardwareControl.button.menu',
   view: 'settings.hardwareControl.button.view',
   guide: 'settings.hardwareControl.button.guide',
+  playstation: 'settings.hardwareControl.button.playstation',
   a: 'settings.hardwareControl.button.a',
   b: 'settings.hardwareControl.button.b',
   x: 'settings.hardwareControl.button.x',
@@ -47,7 +48,6 @@ const HARDWARE_CONTROL_CONTROLLER_BUTTONS: Partial<
 > = {
   menu: 'menu',
   view: 'view',
-  guide: 'guide',
   a: 'south',
   b: 'east',
   x: 'west',

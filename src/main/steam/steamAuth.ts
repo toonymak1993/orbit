@@ -217,11 +217,17 @@ export class SteamAuthManager extends EventEmitter {
       this.loginWindow = win
       win.webContents.setUserAgent(CHROME_USER_AGENT)
 
+      const loginWebContents = win.webContents
+      let cleanedUp = false
       const cleanup = (): void => {
+        if (cleanedUp) return
+        cleanedUp = true
         if (verificationTimer) clearTimeout(verificationTimer)
         verificationTimer = undefined
         loginSession.cookies.removeListener('changed', onCookieChanged)
-        win.webContents.removeListener('did-finish-load', onDidFinishLoad)
+        if (!loginWebContents.isDestroyed()) {
+          loginWebContents.removeListener('did-finish-load', onDidFinishLoad)
+        }
       }
 
       const failLibraryVerification = (): void => {

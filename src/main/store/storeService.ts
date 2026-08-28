@@ -6,6 +6,7 @@ import type {
   StoreSearchResponse,
   StoreSnapshot
 } from '@shared/ipc'
+import { isStoreDiscoverProductVisible } from '@shared/storeVisibility'
 import { settingsStore } from '../settingsStore'
 import { steamAuthManager } from '../steam/steamAuth'
 import { syncCoordinator } from '../sync/syncCoordinator'
@@ -14,7 +15,7 @@ import { STORE_REGIONS } from './storeRegions'
 import { storeRepository } from './storeRepository'
 import {
   fetchFeaturedProducts,
-  fetchMonthlySteamReleases,
+  fetchUpcomingSteamReleases,
   fetchPersonalizedCandidateIds,
   fetchSteamProduct,
   fetchSteamWishlist
@@ -64,6 +65,7 @@ export class StoreService extends EventEmitter {
   private productComparisons = new Map<string, Promise<StoreSnapshot>>()
   private searchCache = new Map<string, { expiresAt: number; response: StoreSearchResponse }>()
   private releaseCalendarError = false
+  private catalogError = false
 
   constructor() {
     super()
@@ -76,7 +78,8 @@ export class StoreService extends EventEmitter {
       settingsStore.store.storeRegion,
       this.isRefreshing,
       this.changedSinceLastRefresh,
-      this.releaseCalendarError
+      this.releaseCalendarError,
+      this.catalogError
     )
   }
 
@@ -211,39 +214,57 @@ export class StoreService extends EventEmitter {
     this.isRefreshing = true
     this.changedSinceLastRefresh = 0
     this.releaseCalendarError = false
+    this.catalogError = false
     this.emitSnapshot()
 
     try {
-      const account = steamAuthManager.getAccount() ?? (await steamAuthManager.restoreSession())
       const ownedAppIds = new Set(
         gameRepository
           .getSnapshot()
           .games.map((game) => game.appId)
           .filter((appId): appId is number => Number.isInteger(appId))
       )
-      const [wishlist, featured, personalizedIds, releaseCalendar] = await Promise.all([
-        account ? fetchSteamWishlist(account.steamId, steamAuthManager).catch(() => []) : Promise.resolve([]),
-        fetchFeaturedProducts(region).catch(() => []),
-        fetchPersonalizedCandidateIds(region).catch(() => []),
-        fetchMonthlySteamReleases(region)
-          .then((releases) => ({ ok: true as const, releases }))
-          .catch(() => ({ ok: false as const, releases: [] }))
-      ])
+      const featuredRequest = fetchFeaturedProducts(region)
+        .then((products) => ({ ok: true as const, products }))
+        .catch(() => ({ ok: false as const, products: [] }))
+      const wishlistRequest = (async () => {
+        const account = steamAuthManager.getAccount() ?? (await steamAuthManager.restoreSession())
+        return account ? fetchSteamWishlist(account.steamId, steamAuthManager) : []
+      })().catch(() => [])
+      const personalizedRequest = fetchPersonalizedCandidateIds(region).catch(() => [])
+      const releaseCalendarRequest = fetchUpcomingSteamReleases(region)
+        .then((releases) => ({ ok: true as const, releases }))
+        .catch(() => ({ ok: false as const, releases: [] }))
 
+      // The featured endpoint is sufficient for the first useful paint. Do
+      // not hold it behind the authenticated wishlist or release calendar.
+      const featuredResult = await featuredRequest
+      const featured = featuredResult.products
+      for (const product of featured) {
+        if (ownedAppIds.has(product.steamAppId ?? -1)) continue
+        if (storeRepository.upsert(regionId, product)) this.changedSinceLastRefresh++
+      }
+      this.catalogError =
+        !featuredResult.ok &&
+        !storeRepository
+          .getProducts(regionId)
+          .some((product) => isStoreDiscoverProductVisible(product, ownedAppIds))
+      this.emitSnapshot()
+
+      const [wishlist, personalizedIds, releaseCalendar] = await Promise.all([
+        wishlistRequest,
+        personalizedRequest,
+        releaseCalendarRequest
+      ])
       this.releaseCalendarError = !releaseCalendar.ok
       if (releaseCalendar.ok) {
         const now = new Date()
         const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
         storeRepository.replaceMonthlyReleases(regionId, month, releaseCalendar.releases)
       }
-
       storeRepository.replaceSteamWishlist(
         wishlist.map((item) => ({ productId: `steam:${item.appId}`, addedAt: item.addedAt }))
       )
-      for (const product of featured) {
-        if (ownedAppIds.has(product.steamAppId ?? -1)) continue
-        if (storeRepository.upsert(regionId, product)) this.changedSinceLastRefresh++
-      }
       this.emitSnapshot()
 
       const targetIds = [
@@ -275,6 +296,9 @@ export class StoreService extends EventEmitter {
             this.changedSinceLastRefresh++
             this.emitSnapshot()
           }
+          if (product && isStoreDiscoverProductVisible(product, ownedAppIds)) {
+            this.catalogError = false
+          }
         } catch {
           // Preserve the last successful delta and continue with the queue.
         }
@@ -288,12 +312,27 @@ export class StoreService extends EventEmitter {
         if (index + 1 < uniqueTargets.length) await delay(REQUEST_GAP_MS)
       }
 
-      storeRepository.pruneUnverifiedProducts(regionId)
+      storeRepository.pruneUnverifiedProducts(
+        regionId,
+        new Set(featured.map((product) => product.id))
+      )
 
-      storeRepository.markRefreshComplete(regionId)
-      syncCoordinator.complete('store', undefined, 'orbit-store')
+      this.catalogError =
+        !featuredResult.ok &&
+        !storeRepository
+          .getProducts(regionId)
+          .some((product) => isStoreDiscoverProductVisible(product, ownedAppIds))
+      if (featuredResult.ok) {
+        storeRepository.markRefreshComplete(regionId)
+        syncCoordinator.complete('store', undefined, 'orbit-store')
+      } else {
+        syncCoordinator.fail('store', 'Steam catalog unavailable', 'orbit-store')
+      }
     } catch (error) {
       this.releaseCalendarError = true
+      this.catalogError = !storeRepository
+        .getProducts(regionId)
+        .some((product) => isStoreDiscoverProductVisible(product, new Set()))
       syncCoordinator.fail(
         'store',
         error instanceof Error ? error.message : 'Store refresh failed',

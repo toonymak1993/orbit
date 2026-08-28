@@ -1,22 +1,28 @@
 # ORBIT Windows packaging
 
-ORBIT `0.1.0` is distributed as a signed x64 Windows release. The primary public artifact is the self-contained Xbox Mode setup:
+ORBIT `0.1.1` is distributed as a signed x64 Windows release. The primary public artifact is the self-contained Xbox Mode setup:
 
-`release/ORBIT-XboxMode-Setup-0.1.0-x64.exe`
+`release/ORBIT-XboxMode-Setup-0.1.1-x64.exe`
 
 This single executable embeds the complete signed AppX, the public ORBIT certificate and the hardened installation script. The private PFX and its DPAPI-protected password remain in the ignored `.certificates` directory and must never be distributed.
 
 The release pipeline also creates a normal NSIS installer as a local verification and fallback artifact. It is not required as a second public download when the Xbox Mode setup is the selected distribution path.
 
+Both interactive NSIS setup executables contain English as their only installer language, and the bundled Xbox Mode PowerShell installer pins its own output and diagnostics to `en-US`. Windows-owned interfaces—including UAC, SmartScreen and Settings—continue to follow the Windows display language.
+
+Packaged ORBIT builds check the configured GitHub Releases channel automatically. The Xbox Mode build downloads only the exact `ORBIT-XboxMode-Setup-<version>-x64.exe` asset (or its Beta equivalent), verifies the SHA-256 digest reported by GitHub and the pinned Authenticode signer, and then invokes that same setup in a silent update-only mode. The NSIS fallback uses electron-builder update metadata from the same GitHub release. Source archives, branch contents and unversioned files are never update inputs.
+
+The already published `0.1.0` build predates this updater and therefore cannot discover its successor by itself. Install the first updater-enabled release once through the normal Xbox Mode setup; all correctly versioned releases after that can use the in-app flow. Never replace a published asset under the same version tag—advance all version metadata before publishing.
+
 ## Stable release flow
 
 Version metadata must move together across `package.json`, `package-lock.json`, `electron-builder.yml`, `resources/release-manifest.json` and `build/xbox/AppxManifest.xml`. Stable product versions use three-part SemVer (`X.Y.Z`); Windows and AppX identities use four numeric components.
 
-For the first stable promotion:
+For the `0.1.1` stable promotion:
 
-- product and Git tag: `0.1.0` / `v0.1.0`;
-- Windows and AppX identity: `0.1.0.4`;
-- release sequence: `8`.
+- product and Git tag: `0.1.1` / `v0.1.1`;
+- Windows and AppX identity: `0.1.1.0`;
+- release sequence: `9`.
 
 Build and verify the normal Windows installer first, then create the Xbox package from the same compiled source:
 
@@ -46,6 +52,8 @@ Before modifying Windows, setup validates certificate lifetime and usage, AppX h
 
 The installer refuses downgrades, treats an equal package version as an idempotent verification, rolls back newly added trust and the previous Developer Mode value after a clean first-install failure, and writes diagnostics atomically to `C:\ProgramData\ORBIT\Logs\xbox-mode-diagnostics.json`.
 
+For an existing Xbox Mode installation, ORBIT invokes the setup with `/ORBIT-UPDATE=1`. This hidden path requires an already installed package, existing certificate trust and already enabled Developer Mode; it never elevates or changes machine prerequisites. It force-closes the running AppX only for package deployment, launches the upgraded Gaming Home registration afterward, and writes per-user diagnostics to `%LOCALAPPDATA%\ORBIT\Logs\xbox-mode-update-diagnostics.json`. A failed update attempts to reopen the previous installed version.
+
 It deliberately does not write `GamingHomeApp` directly. Windows Settings remains the owner of the selected home app.
 
 ## Platform requirements
@@ -61,6 +69,10 @@ Xbox Mode availability remains controlled by Microsoft through supported markets
 The current release uses the self-signed code-signing certificate `CN=ORBIT Development`. The EXE, AppX and their timestamps are cryptographically verifiable, but Windows cannot establish public trust before the certificate is installed. Users can therefore see an unknown-publisher or SmartScreen warning until ORBIT adopts a publicly trusted signing certificate or service.
 
 Publish the release SHA-256 and certificate thumbprint in the GitHub release notes. The setup embeds only the public CER and never a private key. Neither the normal nor Xbox Mode path adds the certificate to a Root store.
+
+Every GitHub release intended for automatic updates must use the matching `v<version>` tag, channel flag and exact asset filename. For the supported public Xbox Mode distribution, upload only `ORBIT-XboxMode-Setup-<version>-x64.exe`; never wildcard-upload stale files from `release/`. The GitHub asset API supplies the digest used by the Xbox updater, so this path does not require `latest.yml`.
+
+Only if a future release publicly distributes the normal desktop fallback should that same release also upload its matching NSIS installer and `latest.yml`. Keep the signer thumbprint allowlist in `resources/release-manifest.json` aligned during planned certificate rotation; include the old and new signer for one bridging release before removing the old signer.
 
 Back up `.certificates` separately and securely. Losing the private key prevents future AppX versions from preserving the same publisher identity. The password XML is protected by Windows DPAPI and may not decrypt for a different Windows user or PC.
 

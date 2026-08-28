@@ -3,6 +3,7 @@ import { existsSync, readdirSync } from 'node:fs'
 import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { GameMetadata } from '@shared/ipc'
+import { normalizeXboxPackageFamilyName } from './xboxPackageIdentity'
 
 const XBOX_SCAN_TIMEOUT_MS = 30_000
 const MAX_SCAN_OUTPUT_BYTES = 8 * 1024 * 1024
@@ -36,6 +37,7 @@ export interface InstalledXboxGame {
 const XBOX_PACKAGE_SCAN_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$targetPackageFamilyName = ([string]$env:ORBIT_XBOX_PACKAGE_FAMILY).Trim()
 $gamingRoot = 'HKLM:\SOFTWARE\Microsoft\GamingServices\GameConfig'
 $gamingPackages = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 if (Test-Path -LiteralPath $gamingRoot) {
@@ -56,6 +58,11 @@ function Get-PlainText([object[]]$values) {
 
 $records = @(
   foreach ($package in @(Get-AppxPackage -PackageTypeFilter Main -ErrorAction SilentlyContinue)) {
+    if ($targetPackageFamilyName -and -not [string]::Equals(
+      [string]$package.PackageFamilyName,
+      $targetPackageFamilyName,
+      [System.StringComparison]::OrdinalIgnoreCase
+    )) { continue }
     $isGamingPackage = $gamingPackages.Contains([string]$package.PackageFullName)
     $packageName = [string]$package.Name
     if ($packageName -match '^Microsoft\.(GamingApp|GamingServices|Xbox|XboxGamingOverlay|XboxIdentityProvider)') {
@@ -145,7 +152,7 @@ $records = @(
 $records | ConvertTo-Json -Depth 5 -Compress
 `
 
-function runXboxPackageScan(): Promise<string> {
+function runXboxPackageScan(packageFamilyName?: string): Promise<string> {
   return new Promise((resolveOutput, reject) => {
     execFile(
       'powershell.exe',
@@ -154,7 +161,11 @@ function runXboxPackageScan(): Promise<string> {
         encoding: 'utf8',
         windowsHide: true,
         timeout: XBOX_SCAN_TIMEOUT_MS,
-        maxBuffer: MAX_SCAN_OUTPUT_BYTES
+        maxBuffer: MAX_SCAN_OUTPUT_BYTES,
+        env: {
+          ...process.env,
+          ORBIT_XBOX_PACKAGE_FAMILY: packageFamilyName ?? ''
+        }
       },
       (error, stdout) => {
         if (error) reject(error)
@@ -211,9 +222,10 @@ function parseRecords(output: string): XboxPackageRecord[] {
   return Array.isArray(parsed) ? parsed : [parsed]
 }
 
-/** Returns only locally installed, launchable Xbox/Microsoft Store games. */
-export async function scanInstalledXboxGames(): Promise<Map<string, InstalledXboxGame>> {
-  const records = parseRecords(await runXboxPackageScan())
+async function scanInstalledXboxGamesInternal(
+  packageFamilyName?: string
+): Promise<Map<string, InstalledXboxGame>> {
+  const records = parseRecords(await runXboxPackageScan(packageFamilyName))
   const result = new Map<string, InstalledXboxGame>()
 
   for (const record of records) {
@@ -235,6 +247,7 @@ export async function scanInstalledXboxGames(): Promise<Map<string, InstalledXbo
       platforms: ['windows'],
       storeUrl: `ms-windows-store://pdp/?PFN=${encodeURIComponent(family)}`,
       launchUri: `shell:AppsFolder\\${providerGameId}`,
+      launchExecutable: safeText(record.executable),
       backgroundUrl: splash ? pathToFileURL(splash).href : undefined,
       iconUrl: logo ? pathToFileURL(logo).href : undefined,
       artwork: {
@@ -254,4 +267,22 @@ export async function scanInstalledXboxGames(): Promise<Map<string, InstalledXbo
   }
 
   return result
+}
+
+/** Returns only locally installed, launchable Xbox/Microsoft Store games. */
+export async function scanInstalledXboxGames(): Promise<Map<string, InstalledXboxGame>> {
+  return scanInstalledXboxGamesInternal()
+}
+
+/** Resolves one completed PackageCatalog operation without rescanning every
+ * AppX manifest. The family name is validated before it reaches PowerShell. */
+export async function scanInstalledXboxGameByFamily(
+  packageFamilyName: string
+): Promise<InstalledXboxGame | undefined> {
+  const normalized = normalizeXboxPackageFamilyName(packageFamilyName)
+  if (!normalized) return undefined
+  const games = await scanInstalledXboxGamesInternal(normalized)
+  return [...games.values()].find(
+    (game) => game.packageFamilyName.toLowerCase() === normalized.toLowerCase()
+  )
 }

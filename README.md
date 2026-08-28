@@ -21,12 +21,15 @@ ORBIT is an Electron-based Windows launcher designed for handhelds, TVs and desk
 - Steam, Epic Games, Xbox / Microsoft Store and custom local games
 - Console-style spatial navigation with visible focus and gamepad support
 - Three Home layouts, including CoreSense recommendations and optional 3D card depth
+- Friends Hub with Steam, Epic and optional Discord presence
+- Favorites, custom collections and adjustable 4–8-column library layouts
 - Live Steam, Epic Games and Xbox download/update activity
 - Release calendar, wishlist offers and regional store prices
 - Update badges for pending Steam game updates
 - Session history, activity summaries and second-accurate local playtime
-- Custom covers/backgrounds, profile avatars, local save backups, notifications and themes
+- Artwork Studio for covers, backgrounds and icons, plus profile avatars, local save backups, notifications and themes
 - Safe per-game launch options and adaptive Xbox/PlayStation controller hints
+- Quick Settings and a compact system HUD for battery, network and Bluetooth status
 - Read-only Windows Update and graphics-driver checks
 - Optional Xbox Mode and background Hardware Control
 
@@ -38,7 +41,7 @@ ORBIT is an Electron-based Windows launcher designed for handhelds, TVs and desk
 
 ## Download
 
-ORBIT `0.1.0` is the first stable release. Download **`ORBIT-XboxMode-Setup-0.1.0-x64.exe`** from the [latest GitHub Release](https://github.com/toonymak1993/orbit/releases/latest). This is the only file required: the setup contains ORBIT, the signed Xbox Mode AppX, the public ORBIT certificate and the verified installation flow.
+ORBIT `0.1.1` is the current stable release. Download **`ORBIT-XboxMode-Setup-0.1.1-x64.exe`** from the [latest GitHub Release](https://github.com/toonymak1993/orbit/releases/latest). This is the only file required: the setup contains ORBIT, the signed Xbox Mode AppX, the public ORBIT certificate and the verified installation flow.
 
 Run the setup from the Windows account that should own ORBIT and approve the administrator prompt. After installation, Windows opens **Settings > Gaming > Xbox mode** so ORBIT can be selected as the home app.
 
@@ -52,15 +55,18 @@ Run the setup from the Windows account that should own ORBIT and approve the adm
 
 Xbox Mode visibility still depends on Microsoft's supported markets, device policy and phased Windows rollout. Keep Windows, the Xbox app and Game Bar current.
 
-## What's new in 0.1.0
+## What's new in 0.1.1
 
-- A redesigned CoreSense Home with recent activity, personalized game context, related store titles and richer card presentation
-- Live Steam, Epic Games and Xbox download progress in the launcher
-- Session summaries, 7/30-day activity history and more accurate playtime tracking
-- Preset, Steam and custom profile avatars plus separate cover and background artwork overrides
-- Controller-friendly launch options for safe per-game arguments and adaptive Xbox/PlayStation button hints
-- Read-only Windows and graphics-driver update checks from Hardware Control
-- More resilient partial Steam synchronization, manifest parsing and Xbox package identity detection
+- A new Friends Hub brings Steam, Epic and optional Discord friends, presence and activity into ORBIT
+- Favorites, custom collections, denser library layouts and a richer Artwork Studio make larger libraries easier to organize
+- Safer in-app updates verify the exact GitHub release asset, its SHA-256 digest and the pinned Authenticode signer before installation
+- Steam, Epic and Xbox library synchronization now preserves valid games through partial provider failures and handles multi-store editions more accurately
+- Xbox download progress now follows streaming, staging, installation and update phases without forcing a full library rescan
+- Game launching now includes a three-second cancel window, stricter process detection and clearer provider-specific failures
+- DualSense PS-button support, Quick Settings and the bottom status HUD improve handheld and controller use
+- The all-in-one Xbox Mode setup is English-only and safely handles Windows systems where the optional `GamingHomeApp` registry value does not exist yet
+
+See the complete [0.1.1 release notes](docs/releases/0.1.1.md) for details.
 
 ## Build from source
 
@@ -72,6 +78,7 @@ npm run typecheck
 npm run verify:steam
 npm run verify:downloads
 npm run verify:launch-arguments
+npm run verify:updates
 npm run dev
 ```
 
@@ -79,7 +86,7 @@ Create a production build with `npm run build`. Windows installer and Xbox Mode 
 
 ## Project status
 
-ORBIT `0.1.0` is the first stable public release. Integrations and packaging will continue to evolve as the launcher is tested across more PCs, handhelds and game libraries.
+ORBIT `0.1.1` is the current stable public release. Integrations and packaging will continue to evolve as the launcher is tested across more PCs, handhelds and game libraries.
 
 ORBIT is an independent project and is not affiliated with Valve, Epic Games, Microsoft, Xbox or the publishers shown in screenshots.
 
@@ -88,3 +95,5 @@ ORBIT is an independent project and is not affiliated with Valve, Epic Games, Mi
 Copyright (C) 2026 Luis Garcia.
 
 ORBIT is free software licensed under the [GNU General Public License v3.0](LICENSE). You may use, study, modify and redistribute it under those terms. Distributed modified versions must preserve the license and make the corresponding source code available.
+
+The optional Discord integration uses the separately licensed Discord Social SDK. See the [GPL linking exception](LICENSE_EXCEPTION.md) and [third-party notices](THIRD_PARTY_NOTICES.md); the Discord SDK itself is not covered by the GPL.

@@ -29,6 +29,7 @@ $installBatchPath = Join-Path $releaseDir 'Install-OrbitXboxMode.bat'
 $certificateMetadataPath = Join-Path $repoRoot '.certificates\orbit-development.json'
 $inspectionDir = Join-Path $releaseDir '_orbit-xbox-inspection'
 $readmePath = Join-Path $releaseDir 'XBOX-MODE-README.txt'
+$installerDefinitionPath = Join-Path $repoRoot 'build\xbox\OrbitXboxInstaller.nsi'
 $certificate = $null
 
 if (!(Test-Path -LiteralPath $packagePath)) { throw "Missing Xbox Mode package: $packagePath" }
@@ -37,6 +38,17 @@ if (!(Test-Path -LiteralPath $certificatePath)) { throw "Missing public Xbox Mod
 if (!(Test-Path -LiteralPath $installScriptPath)) { throw "Missing fallback Xbox Mode installer: $installScriptPath" }
 if (!(Test-Path -LiteralPath $installBatchPath)) { throw "Missing fallback Xbox Mode launcher: $installBatchPath" }
 if (!(Test-Path -LiteralPath $certificateMetadataPath)) { throw "Missing certificate metadata: $certificateMetadataPath" }
+if (!(Test-Path -LiteralPath $installerDefinitionPath)) { throw "Missing Xbox Mode installer definition: $installerDefinitionPath" }
+
+$installerDefinition = Get-Content -LiteralPath $installerDefinitionPath -Raw
+$installerLanguageMatches = [regex]::Matches(
+  $installerDefinition,
+  '(?m)^\s*!insertmacro\s+MUI_LANGUAGE\s+"(?<language>[^"]+)"\s*$'
+)
+$installerLanguages = @($installerLanguageMatches | ForEach-Object { $_.Groups['language'].Value })
+if ($installerLanguages.Count -ne 1 -or $installerLanguages[0] -cne 'English') {
+  throw "The Xbox Mode installer must contain English as its only UI language. Found: $([string]::Join(', ', $installerLanguages))"
+}
 
 $resolvedRelease = [System.IO.Path]::GetFullPath($releaseDir).TrimEnd('\') + '\'
 $resolvedInspection = [System.IO.Path]::GetFullPath($inspectionDir)
@@ -129,7 +141,10 @@ try {
     (Join-Path $inspectionDir 'CustomCapability.SCCD'),
     (Join-Path $inspectionDir 'Public\registration.json'),
     (Join-Path $inspectionDir 'app\ORBIT.exe'),
-    (Join-Path $inspectionDir 'app\resources\release-manifest.json')
+    (Join-Path $inspectionDir 'app\resources\release-manifest.json'),
+    (Join-Path $inspectionDir 'app\resources\discord-social-sdk\License-Notices.txt'),
+    (Join-Path $inspectionDir 'app\resources\discord-social-sdk\README.md'),
+    (Join-Path $inspectionDir 'app\resources\discord-social-sdk\win32-x64\discord_partner_sdk.dll')
   )) {
     if (!(Test-Path -LiteralPath $requiredPath)) { throw "Package is missing: $requiredPath" }
   }
@@ -186,6 +201,9 @@ try {
     packageVersion = $packageVersion
     releaseSequence = $releaseSequence
     channel = $releaseChannel
+    updateMode = [string]$releaseMetadata.updateMode
+    automaticUpdatesEnabled = [bool]$releaseMetadata.automaticUpdatesEnabled
+    updateRepository = "$($releaseMetadata.updates.owner)/$($releaseMetadata.updates.repository)"
     packageIdentity = 'ORBIT.GamingHome'
     applicationId = 'ORBIT'
     xboxMode = $true

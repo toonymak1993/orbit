@@ -64,9 +64,23 @@ const DEVICE_OPTIONS: PowerOption[] = [
 ]
 const POWER_OPTIONS = [...APP_OPTIONS, ...DEVICE_OPTIONS]
 
-export function PowerMenu(): JSX.Element {
+interface PowerMenuProps {
+  onOpenChange?: (open: boolean) => void
+}
+
+export function PowerMenu({ onOpenChange }: PowerMenuProps): JSX.Element {
   const [open, setOpen] = useState(false)
   const t = useT()
+
+  const openMenu = (): void => {
+    setOpen(true)
+    onOpenChange?.(true)
+  }
+
+  const closeMenu = (): void => {
+    setOpen(false)
+    onOpenChange?.(false)
+  }
 
   return (
     <>
@@ -74,8 +88,9 @@ export function PowerMenu(): JSX.Element {
         data-focusable
         type="button"
         aria-label={t('system.power.open')}
+        title={t('system.power.open')}
         aria-expanded={open}
-        onClick={() => setOpen(true)}
+        onClick={openMenu}
         whileHover={{ scale: 1.07 }}
         whileTap={{ scale: 0.92 }}
         animate={open ? { rotate: 90, scale: 1.05 } : { rotate: 0, scale: 1 }}
@@ -88,7 +103,7 @@ export function PowerMenu(): JSX.Element {
 
       {createPortal(
         <AnimatePresence>
-          {open && <PowerMenuDialog onClose={() => setOpen(false)} />}
+          {open && <PowerMenuDialog onClose={closeMenu} />}
         </AnimatePresence>,
         document.body
       )}

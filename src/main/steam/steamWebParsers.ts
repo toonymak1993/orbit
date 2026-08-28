@@ -16,6 +16,15 @@ export interface ParsedSteamOwnedGames {
   reportedCount: number
 }
 
+export interface ParsedSteamCommunityFriend {
+  steamId: string
+  displayName: string
+  avatarUrl?: string
+  profileUrl?: string
+  presence: 'online' | 'away' | 'busy' | 'offline' | 'unknown'
+  activity?: string
+}
+
 const HTML_ENTITIES: Record<string, string> = {
   amp: '&',
   apos: "'",
@@ -58,6 +67,70 @@ function applicationConfigTag(source: string): string | undefined {
     if (htmlAttribute(match[0], 'id') === 'application_config') return match[0]
   }
   return undefined
+}
+
+function plainHtmlText(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined
+  const text = decodeHtmlEntities(value.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim()
+  return text || undefined
+}
+
+function communityPresence(className: string | undefined): ParsedSteamCommunityFriend['presence'] {
+  const classes = new Set(className?.toLowerCase().split(/\s+/).filter(Boolean))
+  if (classes.has('busy')) return 'busy'
+  if (classes.has('away') || classes.has('snooze')) return 'away'
+  if (classes.has('in-game') || classes.has('online')) return 'online'
+  if (classes.has('offline')) return 'offline'
+  return 'unknown'
+}
+
+/** Parses Steam's authenticated Community friends page, so no personal API key is needed. */
+export function parseSteamCommunityFriendsHtml(source: string): ParsedSteamCommunityFriend[] {
+  const starts = [...source.matchAll(/<div\b[^>]*class\s*=\s*(?:"[^"]*\bfriend_block_v2\b[^"]*"|'[^']*\bfriend_block_v2\b[^']*')[^>]*>/gi)]
+  const friends: ParsedSteamCommunityFriend[] = []
+  const seen = new Set<string>()
+
+  for (let index = 0; index < starts.length; index++) {
+    const start = starts[index]
+    const openingTag = start[0]
+    const steamId = htmlAttribute(openingTag, 'data-steamid')
+    if (!steamId || !/^\d{17}$/.test(steamId) || seen.has(steamId)) continue
+
+    const offset = start.index ?? 0
+    const nextOffset = starts[index + 1]?.index ?? source.length
+    const block = source.slice(offset, nextOffset)
+    const displayName = plainHtmlText(
+      block.match(
+        /<div\b[^>]*class\s*=\s*(?:"[^"]*\bfriend_block_content\b[^"]*"|'[^']*\bfriend_block_content\b[^']*')[^>]*>([\s\S]*?)<br\s*\/?\s*>/i
+      )?.[1]
+    )
+    if (!displayName) continue
+
+    const overlayTag = block.match(
+      /<a\b[^>]*class\s*=\s*(?:"[^"]*\bselectable_overlay\b[^"]*"|'[^']*\bselectable_overlay\b[^']*')[^>]*>/i
+    )?.[0]
+    const imageTag = block.match(/<img\b[^>]*>/i)?.[0]
+    const smallText = plainHtmlText(
+      block.match(
+        /<span\b[^>]*class\s*=\s*(?:"[^"]*\bfriend_small_text\b[^"]*"|'[^']*\bfriend_small_text\b[^']*')[^>]*>([\s\S]*?)<\/span>/i
+      )?.[1]
+    )
+    const searchActivity = htmlAttribute(openingTag, 'data-search')
+      ?.split(';')[1]
+      ?.trim()
+
+    seen.add(steamId)
+    friends.push({
+      steamId,
+      displayName,
+      avatarUrl: imageTag ? htmlAttribute(imageTag, 'src') : undefined,
+      profileUrl: overlayTag ? htmlAttribute(overlayTag, 'href') : undefined,
+      presence: communityPresence(htmlAttribute(openingTag, 'class')),
+      activity: smallText || searchActivity || undefined
+    })
+  }
+
+  return friends
 }
 
 function jsonObject(value: string | undefined): Record<string, unknown> | undefined {

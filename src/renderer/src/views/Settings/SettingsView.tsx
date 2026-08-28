@@ -7,9 +7,11 @@ import {
   CheckCircle2,
   CircleAlert,
   Download,
+  DownloadCloud,
   ExternalLink,
   AudioLines,
   Globe2,
+  Grid3X3,
   Gamepad2,
   Eye,
   ImageIcon,
@@ -33,6 +35,7 @@ import {
   THEME_OPTIONS,
   HOME_LAYOUT_OPTIONS,
   GAME_CARD_SIZE_OPTIONS,
+  LIBRARY_GRID_COLUMN_OPTIONS,
   BACKDROP_INTENSITY_OPTIONS,
   LANGUAGE_OPTIONS
 } from '@renderer/state/preferencesStore'
@@ -60,9 +63,12 @@ import { useControllerButtonLabels } from '@renderer/state/controllerStore'
 import { useT } from '@renderer/i18n/useT'
 import { focusElement } from '@renderer/lib/spatialNavigation'
 import { notify } from '@renderer/state/notificationStore'
+import { useLibraryCollectionsStore } from '@renderer/state/libraryCollectionsStore'
+import { useAppUpdateStore } from '@renderer/state/appUpdateStore'
 import type { TranslationKey } from '@renderer/i18n/translations'
 import type {
   AudioPreset,
+  AppUpdateSnapshot,
   BackdropIntensity,
   GameCardSize,
   HomeLayoutId,
@@ -262,6 +268,7 @@ const LIBRARY_METHOD_KEYS: Record<LibraryDetectionMethod, TranslationKey> = {
   'launcher-session': 'settings.libraryStatus.method.launcherSession',
   'epic-catalog': 'settings.libraryStatus.method.epicCatalog',
   'xbox-app-cache': 'settings.libraryStatus.method.xboxAppCache',
+  'xbox-display-catalog': 'settings.libraryStatus.method.xboxDisplayCatalog',
   'windows-packages': 'settings.libraryStatus.method.windowsPackages',
   'cached-data': 'settings.libraryStatus.method.cachedData'
 }
@@ -305,6 +312,7 @@ export function SettingsView(): JSX.Element {
     customAvatarUrl,
     homeLayout,
     gameCardSize,
+    libraryGridColumns,
     backdropIntensity,
     homeCardBubbleEffect,
     uiDensity,
@@ -325,6 +333,7 @@ export function SettingsView(): JSX.Element {
     selectCustomAvatar,
     setHomeLayout,
     setGameCardSize,
+    setLibraryGridColumns,
     setBackdropIntensity,
     setHomeCardBubbleEffect,
     setDensity,
@@ -338,6 +347,7 @@ export function SettingsView(): JSX.Element {
     setNotificationPosition,
     setNotificationMotion
   } = usePreferencesStore()
+  const customLibraryCount = useLibraryCollectionsStore((s) => s.collections.length)
   const page = useSettingsNavigationStore((s) => s.page)
   const direction = useSettingsNavigationStore((s) => s.direction)
   const setPage = useSettingsNavigationStore((s) => s.setPage)
@@ -352,7 +362,6 @@ export function SettingsView(): JSX.Element {
   const refreshLibrary = useLibraryStore((s) => s.refresh)
   const librarySnapshot = useLibraryStore((s) => s.snapshot)
   const isRefreshingLibrary = useLibraryStore((s) => s.isRefreshing)
-  const libraryGameCount = librarySnapshot.games.length
   const steamLibraryStatus = providerStatusOrFallback(
     librarySnapshot.providerStatuses,
     librarySnapshot.providerGames,
@@ -381,6 +390,11 @@ export function SettingsView(): JSX.Element {
   const [regionSaveState, setRegionSaveState] = useState<'idle' | 'saving' | 'error'>('idle')
   const [updateSnapshot, setUpdateSnapshot] = useState<SystemUpdateSnapshot | null>(null)
   const [updateCheckState, setUpdateCheckState] = useState<'idle' | 'checking' | 'error'>('idle')
+  const appUpdateSnapshot = useAppUpdateStore((state) => state.snapshot)
+  const checkAppUpdate = useAppUpdateStore((state) => state.check)
+  const downloadAppUpdate = useAppUpdateStore((state) => state.download)
+  const installAppUpdate = useAppUpdateStore((state) => state.install)
+  const deferAppUpdate = useAppUpdateStore((state) => state.defer)
   const updateCheckInFlight = useRef(false)
   const pendingUpdateCount =
     (updateSnapshot?.windowsUpdates.length ?? 0) +
@@ -426,22 +440,18 @@ export function SettingsView(): JSX.Element {
         : page === 'libraries'
           ? [
               {
+                label: t('settings.summary.libraryGrid'),
+                value: t('settings.libraryGrid.columns', { count: libraryGridColumns })
+              },
+              {
                 label: t('settings.summary.sources'),
                 value: t('settings.summary.sourcesValue', {
                   count: readyLibraryCount
                 })
               },
               {
-                label: t('settings.summary.games'),
-                value: t('settings.summary.gamesValue', { count: libraryGameCount })
-              },
-              {
-                label: t('settings.summary.region'),
-                value: t(
-                  STORE_REGION_OPTIONS.find(
-                    (item) => item.id === (settings?.storeRegion ?? 'eu')
-                  )?.labelKey ?? 'store.region.eu'
-                )
+                label: t('settings.summary.customLibraries'),
+                value: t('settings.summary.customLibrariesValue', { count: customLibraryCount })
               }
             ]
           : page === 'hardware'
@@ -470,6 +480,10 @@ export function SettingsView(): JSX.Element {
             : page === 'updates'
               ? [
                   {
+                    label: t('appUpdate.settings.orbit'),
+                    value: t(appUpdateStatusKey(appUpdateSnapshot))
+                  },
+                  {
                     label: t('settings.summary.pending'),
                     value: updateSnapshot
                       ? pendingUpdateCount > 0
@@ -478,15 +492,9 @@ export function SettingsView(): JSX.Element {
                       : t('settings.summary.notChecked')
                   },
                   {
-                    label: t('settings.summary.graphics'),
-                    value: t('settings.summary.adapterCount', {
-                      count: updateSnapshot?.graphicsAdapters.length ?? 0
-                    })
-                  },
-                  {
                     label: t('settings.summary.lastCheck'),
-                    value: updateSnapshot
-                      ? formatUpdateDate(updateSnapshot.checkedAt, language)
+                    value: appUpdateSnapshot.checkedAt
+                      ? formatUpdateDate(appUpdateSnapshot.checkedAt, language)
                       : t('settings.summary.notChecked')
                   }
                 ]
@@ -999,7 +1007,34 @@ export function SettingsView(): JSX.Element {
 
             {page === 'libraries' && (
               <div className="mt-5 space-y-5">
-                <SettingsSection index="01" icon={LibraryBig} title={t('settings.account.title')}>
+                <SettingsSection index="01" icon={Grid3X3} title={t('settings.libraryGrid.title')}>
+                  <p className="mb-4 max-w-3xl text-sm leading-relaxed text-muted">
+                    {t('settings.libraryGrid.body')}
+                  </p>
+                  <div className="flex flex-wrap gap-3">
+                    {LIBRARY_GRID_COLUMN_OPTIONS.map((columns) => (
+                      <OptionPill
+                        key={columns}
+                        active={libraryGridColumns === columns}
+                        onClick={() => void setLibraryGridColumns(columns)}
+                      >
+                        <span className="flex items-center gap-3">
+                          <span className="flex gap-0.5" aria-hidden="true">
+                            {Array.from({ length: columns }).map((_, index) => (
+                              <span
+                                key={index}
+                                className="h-4 w-2 rounded-[2px] border border-current/20 bg-current/20"
+                              />
+                            ))}
+                          </span>
+                          {t('settings.libraryGrid.columns', { count: columns })}
+                        </span>
+                      </OptionPill>
+                    ))}
+                  </div>
+                </SettingsSection>
+
+                <SettingsSection index="02" icon={LibraryBig} title={t('settings.account.title')}>
                   <div className="mb-4 flex flex-wrap items-center justify-between gap-4">
                     <p className="max-w-3xl text-xs leading-relaxed text-muted">
                       {t('settings.libraryStatus.body')}
@@ -1103,7 +1138,7 @@ export function SettingsView(): JSX.Element {
                   </div>
                 </SettingsSection>
 
-                <SettingsSection index="02" icon={Globe2} title={t('settings.storeRegion.title')}>
+                <SettingsSection index="03" icon={Globe2} title={t('settings.storeRegion.title')}>
                   <p className="mb-4 text-sm text-muted">{t('settings.storeRegion.body')}</p>
                   <div className="flex flex-wrap gap-3">
                     {STORE_REGION_OPTIONS.map((option) => (
@@ -1131,26 +1166,28 @@ export function SettingsView(): JSX.Element {
                   </div>
                 </SettingsSection>
 
-                <SettingsSection index="03" icon={ImageIcon} title={t('settings.images.title')}>
+                <SettingsSection index="04" icon={ImageIcon} title={t('settings.images.title')}>
                   <p className="mb-4 max-w-4xl text-sm leading-relaxed text-muted">
                     {t('settings.images.body')}
                   </p>
                   {settings ? (
-                    <ApiKeyField
-                      label={t('settings.images.apiKeyLabel')}
-                      value={settings.steamGridDbApiKey ?? ''}
-                      placeholder={t('settings.images.apiKeyPlaceholder')}
-                      getKeyLabel={t('settings.images.getKey')}
-                      getKeyUrl="https://www.steamgriddb.com/profile/preferences/api"
-                      onSave={async (value) => {
-                        await window.api.settings.set({ steamGridDbApiKey: value || undefined })
-                        setSettings((current) =>
-                          current
-                            ? { ...current, steamGridDbApiKey: value || undefined }
-                            : current
-                        )
-                      }}
-                    />
+                    <>
+                      <ApiKeyField
+                        label={t('settings.images.apiKeyLabel')}
+                        value={settings.steamGridDbApiKey ?? ''}
+                        placeholder={t('settings.images.apiKeyPlaceholder')}
+                        getKeyLabel={t('settings.images.getKey')}
+                        getKeyUrl="https://www.steamgriddb.com/profile/preferences/api"
+                        onSave={async (value) => {
+                          await window.api.settings.set({ steamGridDbApiKey: value || undefined })
+                          setSettings((current) =>
+                            current
+                              ? { ...current, steamGridDbApiKey: value || undefined }
+                              : current
+                          )
+                        }}
+                      />
+                    </>
                   ) : (
                     <div className="flex items-center gap-2 text-sm text-muted">
                       <Loader2 size={16} className="animate-spin" />
@@ -1181,12 +1218,25 @@ export function SettingsView(): JSX.Element {
             )}
 
             {page === 'updates' && (
-              <SystemUpdatesPanel
-                snapshot={updateSnapshot}
-                checkState={updateCheckState}
-                language={language}
-                onCheck={() => void checkSystemUpdates()}
-              />
+              <div className="mt-5 space-y-5">
+                <OrbitUpdatesPanel
+                  snapshot={appUpdateSnapshot}
+                  language={language}
+                  onCheck={() => void checkAppUpdate()}
+                  onDownload={() => void downloadAppUpdate()}
+                  onInstall={() => void installAppUpdate()}
+                  onDefer={() => void deferAppUpdate()}
+                  onAutoDownloadChange={(active) => {
+                    void window.api.settings.set({ appUpdateAutoDownload: active }).then(setSettings)
+                  }}
+                />
+                <SystemUpdatesPanel
+                  snapshot={updateSnapshot}
+                  checkState={updateCheckState}
+                  language={language}
+                  onCheck={() => void checkSystemUpdates()}
+                />
+              </div>
             )}
 
             {page === 'system' && (
@@ -1230,6 +1280,249 @@ export function SettingsView(): JSX.Element {
   )
 }
 
+function appUpdateStatusKey(snapshot: AppUpdateSnapshot): TranslationKey {
+  if (snapshot.installScheduled) return 'appUpdate.status.scheduled'
+  const keys: Record<AppUpdateSnapshot['stage'], TranslationKey> = {
+    unsupported: 'appUpdate.status.unsupported',
+    idle: 'appUpdate.status.idle',
+    checking: 'appUpdate.status.checking',
+    'up-to-date': 'appUpdate.status.upToDate',
+    available: 'appUpdate.status.available',
+    downloading: 'appUpdate.status.downloadingShort',
+    verifying: 'appUpdate.status.verifying',
+    ready: 'appUpdate.status.readyShort',
+    installing: 'appUpdate.status.installing',
+    error: 'appUpdate.status.error'
+  }
+  return keys[snapshot.stage]
+}
+
+function OrbitUpdatesPanel({
+  snapshot,
+  language,
+  onCheck,
+  onDownload,
+  onInstall,
+  onDefer,
+  onAutoDownloadChange
+}: {
+  snapshot: AppUpdateSnapshot
+  language: 'en' | 'de'
+  onCheck: () => void
+  onDownload: () => void
+  onInstall: () => void
+  onDefer: () => void
+  onAutoDownloadChange: (active: boolean) => void
+}): JSX.Element {
+  const t = useT()
+  const checking = snapshot.stage === 'checking'
+  const available = snapshot.stage === 'available'
+  const downloading = snapshot.stage === 'downloading'
+  const verifying = snapshot.stage === 'verifying'
+  const ready = snapshot.stage === 'ready'
+  const unsupported = snapshot.stage === 'unsupported'
+  const canCheck =
+    !checking &&
+    !available &&
+    !downloading &&
+    !verifying &&
+    !ready &&
+    snapshot.stage !== 'installing' &&
+    !unsupported
+  let statusText: string
+  if (snapshot.installedVersion) {
+    statusText = t('appUpdate.settings.installed', { version: snapshot.installedVersion })
+  } else if (snapshot.stage === 'error') {
+    statusText = t(`appUpdate.error.${snapshot.error ?? 'download-failed'}` as TranslationKey)
+  } else if (ready && snapshot.installScheduled) {
+    statusText = t(
+      snapshot.installCountdownEndsAt
+        ? 'appUpdate.settings.installStarting'
+        : 'appUpdate.settings.installScheduled'
+    )
+  } else if (ready && snapshot.blockedReason === 'game-active') {
+    statusText = t('appUpdate.settings.readyDuringGame')
+  } else if (ready) {
+    statusText = t('appUpdate.settings.ready', { version: snapshot.targetVersion ?? '' })
+  } else if (verifying) {
+    statusText = t('appUpdate.settings.verifying')
+  } else if (downloading && snapshot.downloadPausedReason === 'game-active') {
+    statusText = t('appUpdate.settings.pausedForGame')
+  } else if (downloading && snapshot.downloadPausedReason === 'launcher-download-active') {
+    statusText = t('appUpdate.settings.pausedForLauncher')
+  } else if (downloading) {
+    statusText = t('appUpdate.settings.preparing', {
+      version: snapshot.targetVersion ?? '',
+      percent: Math.round(snapshot.percent ?? 0)
+    })
+  } else if (available) {
+    statusText = t('appUpdate.settings.available', { version: snapshot.targetVersion ?? '' })
+  } else {
+    statusText = t(appUpdateStatusKey(snapshot))
+  }
+
+  return (
+    <SettingsSection index="01" icon={DownloadCloud} title={t('appUpdate.settings.title')}>
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="max-w-3xl">
+          <p className="text-sm leading-relaxed text-muted">{t('appUpdate.settings.body')}</p>
+          <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-[10px] font-bold uppercase tracking-[0.12em] text-white/35">
+            <span>
+              {t('appUpdate.settings.currentVersion', { version: snapshot.currentVersion })}
+            </span>
+            {snapshot.targetVersion && (
+              <span className="text-accent/80">
+                {t('appUpdate.settings.targetVersion', { version: snapshot.targetVersion })}
+              </span>
+            )}
+            <span>
+              {snapshot.checkedAt
+                ? t('appUpdate.settings.lastChecked', {
+                    date: formatUpdateDate(snapshot.checkedAt, language, true)
+                  })
+                : t('appUpdate.settings.neverChecked')}
+            </span>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {snapshot.releasePageUrl && (
+            <FocusableButton
+              variant="ghost"
+              onClick={() => void window.api.app.openExternal(snapshot.releasePageUrl!)}
+              className="shrink-0"
+            >
+              <span className="flex items-center gap-2">
+                <ExternalLink size={14} />
+                {t('appUpdate.action.details')}
+              </span>
+            </FocusableButton>
+          )}
+          <FocusableButton
+            variant="ghost"
+            disabled={!canCheck}
+            onClick={onCheck}
+            className="shrink-0 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <span className="flex items-center gap-2">
+              <RefreshCw size={14} className={checking ? 'animate-spin' : ''} />
+              {t(checking ? 'appUpdate.action.checking' : 'appUpdate.action.check')}
+            </span>
+          </FocusableButton>
+          {ready && snapshot.installScheduled && (
+            <FocusableButton variant="ghost" onClick={onDefer} className="shrink-0">
+              {t('appUpdate.action.cancel')}
+            </FocusableButton>
+          )}
+          {available && (
+            <FocusableButton onClick={onDownload} className="shrink-0">
+              <span className="flex items-center gap-2">
+                <Download size={14} />
+                {t('appUpdate.action.download')}
+              </span>
+            </FocusableButton>
+          )}
+          {ready && !snapshot.installScheduled && (
+            <FocusableButton onClick={onInstall} className="shrink-0">
+              <span className="flex items-center gap-2">
+                <Download size={14} />
+                {t(
+                  snapshot.blockedReason === 'game-active'
+                    ? 'appUpdate.action.afterGame'
+                    : 'appUpdate.action.install'
+                )}
+              </span>
+            </FocusableButton>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-4">
+        <UpdateMessage
+          icon={
+            checking || downloading || verifying
+              ? 'loading'
+              : snapshot.stage === 'error'
+                ? 'error'
+                : snapshot.stage === 'up-to-date' || ready || Boolean(snapshot.installedVersion)
+                  ? 'success'
+                  : 'idle'
+          }
+          text={statusText}
+        />
+      </div>
+
+      {downloading && (
+        <div className="mt-3 rounded-xl border border-white/[0.07] bg-black/20 px-4 py-3">
+          <div className="mb-2 flex items-center justify-between gap-4 text-[10px] font-bold uppercase tracking-wide text-white/42">
+            <span>{t('appUpdate.settings.backgroundDownload')}</span>
+            <span>{Math.round(snapshot.percent ?? 0)}%</span>
+          </div>
+          <div className="h-1.5 overflow-hidden rounded-full bg-white/[0.08]">
+            <motion.div
+              initial={false}
+              animate={{ width: `${Math.max(1, snapshot.percent ?? 0)}%` }}
+              className="h-full rounded-full bg-accent shadow-[0_0_14px_rgb(var(--color-accent)/0.45)]"
+            />
+          </div>
+        </div>
+      )}
+
+      <div className="mt-4 border-t border-white/[0.06] pt-4">
+        <SettingsToggle
+          id="appUpdateAutoDownload"
+          active={snapshot.autoDownloadEnabled}
+          title={t('appUpdate.settings.autoDownloadTitle')}
+          description={t('appUpdate.settings.autoDownloadBody')}
+          defaultActive
+          disabled={unsupported}
+          onChange={onAutoDownloadChange}
+          t={t}
+        />
+      </div>
+
+      <details className="mt-4 rounded-xl border border-white/[0.07] bg-black/15 px-4 py-3 text-xs text-white/45">
+        <summary data-focusable className="cursor-pointer font-semibold text-white/65">
+          {t('appUpdate.settings.technicalDetails')}
+        </summary>
+        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+          <span>{t('appUpdate.settings.source')}</span>
+          <span>
+            {t('appUpdate.settings.channel', {
+              channel: t(`appUpdate.channel.${snapshot.channel}` as TranslationKey)
+            })}
+          </span>
+          <span>
+            {snapshot.automaticChecksEnabled
+              ? t('appUpdate.settings.interval', { hours: snapshot.checkIntervalHours })
+              : t('appUpdate.settings.automaticChecksInactive')}
+          </span>
+          <span>
+            {snapshot.automaticChecksEnabled && snapshot.nextCheckAt
+              ? t('appUpdate.settings.nextCheck', {
+                  date: formatUpdateDate(snapshot.nextCheckAt, language, true)
+                })
+              : snapshot.automaticChecksEnabled
+                ? t('appUpdate.settings.nextCheckPending')
+                : t('appUpdate.settings.releaseOnly')}
+          </span>
+          <span>{t(`appUpdate.verification.${snapshot.verification}` as TranslationKey)}</span>
+          <span>{t(`appUpdate.mode.${snapshot.installMode}` as TranslationKey)}</span>
+        </div>
+        {snapshot.releaseNotes && (
+          <p className="mt-3 whitespace-pre-line border-t border-white/[0.06] pt-3 leading-relaxed">
+            {snapshot.releaseNotes}
+          </p>
+        )}
+      </details>
+
+      <div className="mt-4 flex items-start gap-3 text-xs leading-relaxed text-white/38">
+        <ShieldCheck size={15} className="mt-0.5 shrink-0 text-emerald-300/70" />
+        <span>{t('appUpdate.settings.security')}</span>
+      </div>
+    </SettingsSection>
+  )
+}
+
 function SystemUpdatesPanel({
   snapshot,
   checkState,
@@ -1254,7 +1547,7 @@ function SystemUpdatesPanel({
   )
 
   return (
-    <div className="mt-5 space-y-5">
+    <div className="space-y-5">
       {snapshot?.platform === 'unsupported' && (
         <div className="flex items-center gap-3 rounded-xl border border-amber-300/20 bg-amber-300/[0.07] px-4 py-3 text-sm text-amber-100">
           <CircleAlert size={17} className="shrink-0" />
@@ -1276,7 +1569,7 @@ function SystemUpdatesPanel({
         </div>
       )}
 
-      <SettingsSection index="01" icon={Download} title={t('settings.updates.windowsTitle')}>
+      <SettingsSection index="02" icon={Download} title={t('settings.updates.windowsTitle')}>
         <div className="flex flex-wrap items-start justify-between gap-4">
           <p className="max-w-3xl text-sm leading-relaxed text-muted">
             {t('settings.updates.windowsBody')}
@@ -1359,7 +1652,7 @@ function SystemUpdatesPanel({
         )}
       </SettingsSection>
 
-      <SettingsSection index="02" icon={Monitor} title={t('settings.updates.graphicsTitle')}>
+      <SettingsSection index="03" icon={Monitor} title={t('settings.updates.graphicsTitle')}>
         <p className="max-w-4xl text-sm leading-relaxed text-muted">
           {t('settings.updates.graphicsBody')}
         </p>
