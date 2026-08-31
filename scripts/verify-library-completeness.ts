@@ -6,6 +6,12 @@ import {
   shouldRemoveEpicEntitlement
 } from '../src/shared/libraryProjection.ts'
 import { decideSteamSyncHealth } from '../src/shared/steamSyncPolicy.ts'
+import { projectLibraryVisibility } from '../src/shared/libraryVisibility.ts'
+import {
+  auxiliaryLibraryTitleKind,
+  isAutomaticLibraryTitleAllowed,
+  isConfirmedNonGameSteamAppType
+} from '../src/shared/libraryContentPolicy.ts'
 import { scanXboxAppLibrary } from '../src/main/xbox/xboxAppLibrary.ts'
 import { parseXboxCatalogProducts } from '../src/main/xbox/xboxCatalogParser.ts'
 
@@ -17,7 +23,110 @@ const sameTitleCopies = projectVisibleLibraryRecords([
 assert.deepEqual(
   sameTitleCopies.map((game) => game.id),
   ['steam:10', 'epic:same', 'xbox:EDITION00001'],
-  'display titles must never collapse durable provider records'
+  'same titles from different providers must remain separate licenses'
+)
+
+const playStationCrossGen = projectVisibleLibraryRecords([
+  {
+    id: 'playstation:CUSA00001_00',
+    provider: 'playstation',
+    name: 'Same Cross-Gen Game',
+    owned: true,
+    installed: false,
+    metadata: { features: ['PS4'] }
+  },
+  {
+    id: 'playstation:PPSA00001_00',
+    provider: 'playstation',
+    name: 'Same Cross-Gen Game',
+    owned: true,
+    installed: false,
+    metadata: { features: ['PS5'] }
+  }
+])
+assert.deepEqual(
+  playStationCrossGen.map((game) => game.id),
+  ['playstation:PPSA00001_00'],
+  'provider-local cross-gen duplicates must prefer the PS5 representative'
+)
+
+assert.equal(
+  projectVisibleLibraryRecords([
+    {
+      id: 'playstation:CUSA00002_00',
+      provider: 'playstation',
+      name: 'Localized PS4 Name',
+      owned: true,
+      installed: false,
+      metadata: { features: ['PS4'], storeUrl: 'https://store.playstation.com/concept/12345' }
+    },
+    {
+      id: 'playstation:PPSA00002_00',
+      provider: 'playstation',
+      name: 'Localized PS5 Name',
+      owned: true,
+      installed: false,
+      metadata: { features: ['PS5'], storeUrl: 'https://store.playstation.com/concept/12345' }
+    }
+  ]).length,
+  1,
+  'PlayStation concept IDs must collapse differently labelled platform variants'
+)
+
+const installedSteamRepresentative = projectVisibleLibraryRecords([
+  {
+    id: 'steam:10',
+    provider: 'steam',
+    name: 'Split Launcher Game',
+    owned: true,
+    installed: false
+  },
+  {
+    id: 'steam:20',
+    provider: 'steam',
+    name: 'Split Launcher Game',
+    owned: true,
+    installed: true
+  }
+])
+assert.deepEqual(
+  installedSteamRepresentative.map((game) => game.id),
+  ['steam:20'],
+  'an installed provider-local duplicate must remain the launchable representative'
+)
+
+assert.equal(auxiliaryLibraryTitleKind('steam', 'Example Game Demo'), 'demo')
+assert.equal(auxiliaryLibraryTitleKind('playstation', 'Example Game - PS5 Upgrade'), 'utility')
+assert.equal(auxiliaryLibraryTitleKind('xbox', 'Example Game Dedicated Server'), 'server')
+assert.equal(auxiliaryLibraryTitleKind('epic', 'Example Game Digital Soundtrack'), 'soundtrack')
+assert.equal(isAutomaticLibraryTitleAllowed('xbox', 'Test Drive Unlimited - Solar Crown'), true)
+assert.equal(isAutomaticLibraryTitleAllowed('steam', 'The Trial of the Century'), true)
+assert.equal(isAutomaticLibraryTitleAllowed('steam', 'Wallpaper Engine'), true)
+assert.equal(isAutomaticLibraryTitleAllowed('local', 'My Demo Build'), true)
+assert.equal(isConfirmedNonGameSteamAppType('dlc'), true)
+assert.equal(isConfirmedNonGameSteamAppType('demo'), true)
+assert.equal(isConfirmedNonGameSteamAppType('game'), false)
+assert.equal(isConfirmedNonGameSteamAppType('missing'), false)
+
+assert.equal(
+  projectVisibleLibraryRecords([
+    { id: 'local:one', provider: 'local', name: 'My Game', owned: true, installed: true },
+    { id: 'local:two', provider: 'local', name: 'My Game', owned: true, installed: true }
+  ]).length,
+  2,
+  'user-managed local records must never be collapsed automatically'
+)
+
+const visibility = projectLibraryVisibility(sameTitleCopies, ['epic:same'])
+assert.deepEqual(
+  visibility.visibleGames.map((game) => game.id),
+  ['steam:10', 'xbox:EDITION00001'],
+  'exclusions must match only the exact durable provider identity'
+)
+assert.deepEqual(
+  visibility.excludedGames.map((game) => game.id),
+  ['epic:same'],
+  'excluded records must remain available for restoration'
 )
 
 const seen = new Set(['xbox:CURRENT00001'])

@@ -4,6 +4,13 @@
 @tailwind components;
 @tailwind utilities;
 
+html[data-orbit-media-keyboard='true'],
+html[data-orbit-media-keyboard='true'] body,
+html[data-orbit-media-keyboard='true'] #root {
+  background: transparent !important;
+  background-image: none !important;
+}
+
 @layer base {
   * {
     @apply border-white/5;
@@ -57,9 +64,901 @@
   }
 }
 
+/* ORBIT's controller keyboard occupies the lower half without surrendering
+   focus to Windows. The active surface shifts just enough to keep its real
+   text field above the panel, including inside existing dialogs. */
+.orbit-app-content {
+  transform: translate3d(0, 0, 0);
+  transition: transform 210ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+[data-gamepad-keyboard-open='true'] .orbit-app-content {
+  transform: translate3d(0, calc(-1 * var(--gamepad-keyboard-offset, 0px)), 0);
+}
+
+[data-gamepad-keyboard-active='true'] {
+  border-color: rgb(var(--color-accent) / 0.82) !important;
+  box-shadow:
+    0 0 0 2px rgb(var(--color-accent) / 0.38),
+    var(--focus-shadow) !important;
+}
+
+.gamepad-keyboard-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    rgb(0 0 0 / 0.05) 36%,
+    rgb(0 0 0 / 0.52) 62%,
+    rgb(0 0 0 / 0.76) 100%
+  );
+}
+
+.gamepad-keyboard-panel {
+  width: 100%;
+  height: clamp(22rem, 49vh, 34rem);
+  overflow: hidden;
+  border-top: 1px solid rgb(255 255 255 / 0.16);
+  background:
+    linear-gradient(120deg, rgb(255 255 255 / 0.075), transparent 33%, rgb(var(--color-accent) / 0.07)),
+    rgb(var(--color-surface) / 0.96);
+  box-shadow:
+    0 -1px 0 rgb(var(--color-accent) / 0.16),
+    0 -28px 80px rgb(0 0 0 / 0.58);
+  -webkit-backdrop-filter: blur(calc(var(--glass-blur) + 8px)) saturate(var(--glass-saturation));
+  backdrop-filter: blur(calc(var(--glass-blur) + 8px)) saturate(var(--glass-saturation));
+}
+
+.gamepad-keyboard-inner {
+  display: flex;
+  width: min(100%, 76rem);
+  height: 100%;
+  min-height: 0;
+  margin-inline: auto;
+  flex-direction: column;
+  gap: clamp(0.35rem, 0.8vh, 0.65rem);
+  padding: clamp(0.65rem, 1.3vh, 1rem) clamp(1rem, 3vw, 2.5rem) clamp(0.5rem, 1vh, 0.8rem);
+}
+
+.gamepad-keyboard-header {
+  display: flex;
+  min-height: 3.5rem;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.gamepad-keyboard-icon,
+.gamepad-keyboard-close {
+  display: flex;
+  width: 2.65rem;
+  height: 2.65rem;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgb(255 255 255 / 0.11);
+  border-radius: calc(var(--radius-card) * 0.68);
+  background: rgb(255 255 255 / 0.055);
+  color: rgb(var(--color-accent));
+}
+
+.gamepad-keyboard-close {
+  color: rgb(255 255 255 / 0.58);
+  transition: color 140ms ease, background-color 140ms ease;
+}
+
+.gamepad-keyboard-close:hover {
+  background: rgb(255 255 255 / 0.11);
+  color: white;
+}
+
+.gamepad-keyboard-preview {
+  max-width: 100%;
+  overflow-x: auto;
+  color: white;
+  font-size: clamp(0.9rem, 1.5vw, 1.15rem);
+  font-weight: 600;
+  line-height: 1.55;
+  scrollbar-width: none;
+  user-select: none;
+}
+
+.gamepad-keyboard-preview::-webkit-scrollbar {
+  display: none;
+}
+
+.gamepad-keyboard-preview-empty {
+  color: rgb(255 255 255 / 0.3);
+  font-weight: 500;
+}
+
+.gamepad-keyboard-caret {
+  display: inline-block;
+  width: 2px;
+  height: 1.15em;
+  margin-inline: -1px 1px;
+  vertical-align: -0.16em;
+  background: rgb(var(--color-accent));
+  box-shadow: 0 0 9px rgb(var(--color-accent) / 0.65);
+  animation: orbit-keyboard-caret 1s step-end infinite;
+}
+
+.gamepad-keyboard-selection {
+  border-radius: 0.2rem;
+  background: rgb(var(--color-accent) / 0.5);
+  color: white;
+}
+
+.gamepad-keyboard-rows {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: clamp(0.3rem, 0.7vh, 0.55rem);
+}
+
+.gamepad-keyboard-row {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 0;
+  justify-content: center;
+  gap: clamp(0.3rem, 0.55vw, 0.55rem);
+}
+
+.gamepad-keyboard-row:nth-child(2) {
+  padding-inline: 3.6%;
+}
+
+.gamepad-keyboard-row:nth-child(3) {
+  padding-inline: 1.5%;
+}
+
+.gamepad-keyboard-rows[data-mode='numbers'] .gamepad-keyboard-row {
+  max-width: 32rem;
+  width: 100%;
+  margin-inline: auto;
+  padding-inline: 0;
+}
+
+.gamepad-keyboard-rows[data-mode='numbers'] .gamepad-keyboard-actions {
+  max-width: 48rem;
+}
+
+.gamepad-keyboard-key {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  overflow: hidden;
+  border: 1px solid rgb(255 255 255 / 0.11);
+  border-radius: calc(var(--radius-card) * 0.62);
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 0.09), transparent),
+    rgb(var(--color-surface-2) / 0.82);
+  color: rgb(var(--color-text));
+  font-size: clamp(1rem, 1.65vw, 1.32rem);
+  font-weight: 720;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.1),
+    0 4px 10px rgb(0 0 0 / 0.18);
+  transition:
+    transform 100ms ease,
+    border-color 120ms ease,
+    background-color 120ms ease;
+}
+
+.gamepad-keyboard-key:hover {
+  border-color: rgb(255 255 255 / 0.24);
+  background-color: rgb(var(--color-surface-2));
+}
+
+.gamepad-keyboard-key:active {
+  transform: scale(0.96);
+}
+
+.gamepad-keyboard-key[data-active='true'],
+.gamepad-keyboard-key[data-primary='true'] {
+  border-color: rgb(var(--color-accent) / 0.5);
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 0.16), transparent),
+    rgb(var(--color-accent) / 0.25);
+  color: white;
+}
+
+.gamepad-keyboard-key[data-quiet='true'] {
+  color: rgb(var(--color-muted));
+}
+
+.gamepad-keyboard-key:focus-visible,
+.gamepad-keyboard-key[data-focused='true'],
+.gamepad-keyboard-close:focus-visible,
+.gamepad-keyboard-close[data-focused='true'] {
+  z-index: 1;
+  border-color: rgb(255 255 255 / 0.88);
+  color: white;
+  box-shadow:
+    0 0 0 calc(var(--focus-ring-width) + 1px) rgb(var(--color-accent) / 0.9),
+    0 0 24px rgb(var(--color-accent) / 0.42);
+}
+
+.gamepad-keyboard-hint {
+  display: flex;
+  min-height: 1.1rem;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(0.8rem, 2vw, 1.8rem);
+  color: rgb(255 255 255 / 0.42);
+  font-size: clamp(0.58rem, 0.78vw, 0.7rem);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.gamepad-keyboard-hint b {
+  display: inline-flex;
+  min-width: 1.3rem;
+  height: 1.3rem;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgb(255 255 255 / 0.18);
+  border-radius: 0.4rem;
+  color: rgb(255 255 255 / 0.78);
+  font-size: 0.62rem;
+}
+
+@keyframes orbit-keyboard-caret {
+  0%,
+  48% {
+    opacity: 1;
+  }
+  49%,
+  100% {
+    opacity: 0.24;
+  }
+}
+
+@media (orientation: landscape) and (max-height: 720px) {
+  .gamepad-keyboard-panel {
+    height: 50vh;
+  }
+
+  .gamepad-keyboard-inner {
+    gap: 0.3rem;
+    padding-block: 0.45rem;
+  }
+
+  .gamepad-keyboard-header {
+    min-height: 3rem;
+  }
+
+  .gamepad-keyboard-icon,
+  .gamepad-keyboard-close {
+    width: 2.35rem;
+    height: 2.35rem;
+  }
+
+  .gamepad-keyboard-rows {
+    gap: 0.28rem;
+  }
+
+  .gamepad-keyboard-hint {
+    min-height: 0.85rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .orbit-app-content,
+  .gamepad-keyboard-key {
+    transition-duration: 0ms !important;
+  }
+
+  .gamepad-keyboard-caret {
+    animation: none;
+  }
+}
+
+/* Provider artwork is supplied as a black transparent mark. A lightly
+   theme-tinted smoked glass keeps the white treatment readable while allowing
+   the cover beneath to remain clearly visible. */
+.library-provider-badge {
+  display: inline-flex;
+  width: 2rem;
+  height: 2rem;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border: 1px solid rgb(255 255 255 / 0.3);
+  border-radius: 0.65rem;
+  background:
+    linear-gradient(145deg, rgb(255 255 255 / 0.14), rgb(var(--color-accent) / 0.08)),
+    rgb(var(--color-base) / 0.3);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.34),
+    inset 0 -1px 0 rgb(var(--color-accent) / 0.1),
+    0 4px 14px rgb(0 0 0 / 0.32),
+    0 0 0 1px rgb(0 0 0 / 0.1);
+  -webkit-backdrop-filter: blur(7px) saturate(0.96) brightness(0.8);
+  backdrop-filter: blur(7px) saturate(0.96) brightness(0.8);
+}
+
+.library-provider-badge[data-size='compact'],
+[data-density='compact'] .library-provider-badge {
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 0.56rem;
+}
+
+.library-provider-badge img {
+  width: 72%;
+  height: 72%;
+  object-fit: contain;
+  filter: brightness(0) invert(1) drop-shadow(0 1px 1px rgb(0 0 0 / 0.45));
+  opacity: 0.96;
+}
+
 [data-theme-choice]:focus-visible,
 [data-theme-choice][data-focused='true'] {
   box-shadow: none;
+}
+
+/* The top navigation is ORBIT's dock. Its visual presets deliberately reuse
+   the active global theme colors while keeping the standard preset unchanged. */
+.orbit-dock {
+  isolation: isolate;
+  transition:
+    background-color 180ms ease,
+    border-color 180ms ease,
+    box-shadow 220ms ease,
+    backdrop-filter 220ms ease;
+}
+
+.orbit-dock::before {
+  position: absolute;
+  inset: 1px;
+  z-index: -1;
+  border-radius: inherit;
+  pointer-events: none;
+  content: '';
+  opacity: 0;
+  transition: opacity 180ms ease;
+}
+
+.orbit-dock-event-glow {
+  z-index: -1;
+  background: radial-gradient(
+    ellipse at center,
+    rgb(var(--color-accent) / 0.34),
+    rgb(var(--color-accent-2) / 0.12) 52%,
+    transparent 76%
+  );
+}
+
+.orbit-dock[data-dock-theme='glass'] {
+  border-color: rgb(255 255 255 / 0.2);
+  background:
+    linear-gradient(115deg, rgb(255 255 255 / 0.14), rgb(255 255 255 / 0.035) 38%, rgb(var(--color-accent) / 0.08)),
+    rgb(var(--color-surface) / 0.46);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.16),
+    inset 0 -1px 0 rgb(255 255 255 / 0.035),
+    0 16px 42px rgb(0 0 0 / 0.28);
+  backdrop-filter: blur(28px) saturate(1.35);
+}
+
+.orbit-dock[data-dock-theme='glass']::before {
+  background: linear-gradient(105deg, rgb(255 255 255 / 0.17), transparent 34% 72%, rgb(var(--color-accent) / 0.08));
+  opacity: 1;
+}
+
+.orbit-dock[data-dock-theme='glass'] .orbit-dock-active-surface {
+  border-color: rgb(255 255 255 / 0.2);
+  background: linear-gradient(145deg, rgb(255 255 255 / 0.2), rgb(var(--color-accent) / 0.08));
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.18),
+    0 8px 22px rgb(0 0 0 / 0.24);
+}
+
+.orbit-dock[data-dock-theme='neon'] {
+  border-color: rgb(var(--color-accent) / 0.42);
+  background:
+    linear-gradient(180deg, rgb(var(--color-accent) / 0.075), transparent 58%),
+    rgb(2 4 9 / 0.82);
+  box-shadow:
+    inset 0 0 18px rgb(var(--color-accent) / 0.055),
+    0 0 0 1px rgb(var(--color-accent-2) / 0.1),
+    0 0 30px rgb(var(--color-accent) / 0.17),
+    0 16px 38px rgb(0 0 0 / 0.34);
+  backdrop-filter: blur(20px) saturate(1.18);
+}
+
+.orbit-dock[data-dock-theme='neon']::before {
+  background: linear-gradient(90deg, transparent 8%, rgb(var(--color-accent) / 0.24), rgb(var(--color-accent-2) / 0.18), transparent 92%);
+  opacity: 0.54;
+}
+
+.orbit-dock[data-dock-theme='neon'] .orbit-dock-active-surface {
+  border-color: rgb(var(--color-accent) / 0.58);
+  background: rgb(var(--color-accent) / 0.13);
+  box-shadow:
+    inset 0 0 12px rgb(var(--color-accent) / 0.12),
+    0 0 18px rgb(var(--color-accent) / 0.28);
+}
+
+.orbit-dock[data-dock-theme='neon'] .orbit-dock-indicator {
+  width: 0.75rem;
+  border-radius: 999px;
+  box-shadow: 0 0 12px rgb(var(--color-accent) / 0.92);
+}
+
+.orbit-dock[data-dock-theme='minimal'] {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+.orbit-dock[data-dock-theme='minimal']::before,
+.orbit-dock[data-dock-theme='minimal'] .orbit-dock-separator {
+  opacity: 0;
+}
+
+.orbit-dock[data-dock-theme='minimal'] .orbit-dock-active-surface {
+  border-color: rgb(255 255 255 / 0.08);
+  background: rgb(var(--color-surface) / 0.62);
+  box-shadow:
+    0 0 0 1px rgb(var(--color-accent) / 0.08),
+    0 8px 24px rgb(0 0 0 / 0.26);
+  backdrop-filter: blur(18px);
+}
+
+.orbit-dock[data-dock-motion='lively'] .orbit-dock-indicator {
+  bottom: -0.34rem;
+  height: 0.3rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .orbit-dock,
+  .orbit-dock::before {
+    transition-duration: 0ms;
+  }
+}
+
+/* Application hub: compact console tiles, not dashboard panels. */
+.applications-ambient {
+  background:
+    radial-gradient(circle at 50% -14%, rgb(var(--color-accent) / 0.08), transparent 34%),
+    linear-gradient(180deg, transparent 68%, rgb(var(--color-accent-2) / 0.025));
+}
+
+.applications-title-line {
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgb(var(--color-accent) / 0.38) 22%,
+    rgb(var(--color-accent-2) / 0.38) 78%,
+    transparent
+  );
+  box-shadow: 0 0 22px rgb(var(--color-accent) / 0.13);
+}
+
+.applications-grid {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.application-tile,
+.application-add-tile {
+  isolation: isolate;
+  transition:
+    border-color 160ms ease,
+    box-shadow 180ms ease,
+    background-color 160ms ease;
+}
+
+.application-tile-glow {
+  z-index: -1;
+  background:
+    radial-gradient(circle at 50% 36%, rgb(var(--color-accent) / 0.13), transparent 44%),
+    linear-gradient(145deg, rgb(255 255 255 / 0.035), transparent 62%);
+  opacity: 0.72;
+  transition: opacity 180ms ease;
+}
+
+[data-application-kind*='netflix'] .application-tile-glow {
+  background: radial-gradient(circle at 50% 38%, rgb(229 9 20 / 0.2), transparent 48%);
+}
+
+[data-application-kind*='youtube'] .application-tile-glow {
+  background: radial-gradient(circle at 50% 38%, rgb(255 52 52 / 0.17), transparent 48%);
+}
+
+[data-application-kind*='spotify'] .application-tile-glow {
+  background: radial-gradient(circle at 50% 38%, rgb(29 185 84 / 0.19), transparent 48%);
+}
+
+[data-application-kind*='discord'] .application-tile-glow {
+  background: radial-gradient(circle at 50% 38%, rgb(88 101 242 / 0.21), transparent 48%);
+}
+
+[data-application-kind='launcher:steam'] .application-tile-glow {
+  background: radial-gradient(circle at 50% 38%, rgb(70 156 227 / 0.2), transparent 48%);
+}
+
+[data-application-kind='launcher:epic'] .application-tile-glow,
+[data-application-kind='launcher:gog'] .application-tile-glow {
+  background: radial-gradient(circle at 50% 38%, rgb(255 255 255 / 0.11), transparent 48%);
+}
+
+[data-application-kind='launcher:xbox'] .application-tile-glow {
+  background: radial-gradient(circle at 50% 38%, rgb(16 196 82 / 0.18), transparent 48%);
+}
+
+[data-application-kind='launcher:playstation'] .application-tile-glow {
+  background: radial-gradient(circle at 50% 38%, rgb(43 109 246 / 0.2), transparent 48%);
+}
+
+[data-application-kind='launcher:ea'] .application-tile-glow {
+  background: radial-gradient(circle at 50% 38%, rgb(255 82 62 / 0.17), transparent 48%);
+}
+
+[data-application-kind='launcher:ubisoft'] .application-tile-glow {
+  background: radial-gradient(circle at 50% 38%, rgb(64 174 255 / 0.17), transparent 48%);
+}
+
+.application-tile[data-application-available='false'] {
+  filter: saturate(0.35);
+}
+
+.application-tile[data-application-available='false'] > [data-application-nav-item] {
+  opacity: 0.46;
+}
+
+.application-tile[data-application-available='false']:focus-within {
+  filter: saturate(0.62);
+}
+
+.application-tile[data-application-available='false']:focus-within > [data-application-nav-item] {
+  opacity: 0.72;
+}
+
+.application-tile:hover,
+.application-tile:focus-within,
+.application-add-tile:hover,
+.application-add-tile:focus-visible,
+.application-add-tile[data-focused='true'] {
+  border-color: rgb(var(--color-accent) / 0.58);
+  box-shadow:
+    0 14px 38px rgb(0 0 0 / 0.34),
+    0 0 24px rgb(var(--color-accent) / 0.11);
+}
+
+.application-tile:hover .application-tile-glow,
+.application-tile:focus-within .application-tile-glow {
+  opacity: 1;
+}
+
+[data-application-card] [data-focusable]:focus-visible,
+[data-application-card] [data-focusable][data-focused='true'] {
+  border-radius: var(--radius-card);
+  background-color: rgb(255 255 255 / 0.025);
+}
+
+[data-application-card] [data-focusable]:focus-visible .application-icon,
+[data-application-card] [data-focusable][data-focused='true'] .application-icon {
+  transform: translateY(-2px) scale(1.04);
+  border-color: rgb(var(--color-accent) / 0.48);
+}
+
+.application-icon {
+  transition:
+    transform 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 160ms ease;
+}
+
+@media (max-width: 1500px) {
+  .applications-grid {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1250px) {
+  .applications-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 850px) {
+  .applications-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .application-icon,
+  .application-tile,
+  .application-add-tile,
+  .application-tile-glow {
+    transition: none;
+  }
+}
+
+/* Startup is a single compositor-friendly transition: the renderer prepares
+   the real shell underneath while a shooting star resolves into ORBIT's mark. */
+.orbit-startup {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  overflow: hidden;
+  place-items: center;
+  isolation: isolate;
+  background:
+    radial-gradient(circle at 50% 49%, rgb(var(--color-accent) / 0.1), transparent 17%),
+    radial-gradient(circle at 76% 18%, rgb(var(--color-accent-2) / 0.08), transparent 25%),
+    rgb(var(--color-base));
+  opacity: 1;
+  transform: scale(1);
+  transition:
+    opacity 180ms ease,
+    transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: opacity, transform;
+}
+
+.orbit-startup[data-phase='leaving'] {
+  opacity: 0;
+  transform: scale(1.025);
+  pointer-events: none;
+}
+
+.orbit-startup__custom-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: rgb(var(--color-base));
+}
+
+.orbit-startup__custom-veil {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(180deg, rgb(var(--color-base) / 0.08), transparent 28% 72%, rgb(var(--color-base) / 0.18)),
+    radial-gradient(circle at 50% 50%, transparent 54%, rgb(var(--color-base) / 0.16));
+}
+
+.orbit-startup__stars {
+  position: absolute;
+  inset: 0;
+  background-image:
+    radial-gradient(circle at 12% 28%, rgb(255 255 255 / 0.54) 0 1px, transparent 1.4px),
+    radial-gradient(circle at 82% 72%, rgb(var(--color-accent) / 0.42) 0 1px, transparent 1.6px),
+    radial-gradient(circle at 68% 19%, rgb(255 255 255 / 0.34) 0 1px, transparent 1.4px),
+    radial-gradient(circle at 26% 78%, rgb(var(--color-accent-2) / 0.38) 0 1px, transparent 1.5px),
+    radial-gradient(circle at 91% 36%, rgb(255 255 255 / 0.28) 0 1px, transparent 1.4px);
+  opacity: 0;
+  animation: orbit-startup-stars 780ms ease 120ms both;
+}
+
+.orbit-startup__lockup {
+  display: grid;
+  width: min(34rem, 70vw);
+  place-items: center;
+  transform: translateY(-1.5vh);
+}
+
+.orbit-startup__emblem {
+  display: block;
+  width: 100%;
+  overflow: visible;
+}
+
+.orbit-startup__trajectory,
+.orbit-startup__ring,
+.orbit-startup__axis {
+  fill: none;
+  vector-effect: non-scaling-stroke;
+}
+
+.orbit-startup__trajectory {
+  stroke: url('#startup-orbit-gradient');
+  stroke-width: 1.35;
+  stroke-linecap: round;
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  opacity: 0;
+  animation: orbit-startup-trajectory 1005ms cubic-bezier(0.16, 1, 0.3, 1) 45ms both;
+}
+
+.orbit-startup__ring {
+  stroke: url('#startup-orbit-gradient');
+  stroke-width: 1.4;
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  opacity: 0;
+  animation: orbit-startup-ring 585ms cubic-bezier(0.22, 1, 0.36, 1) 540ms both;
+}
+
+.orbit-startup__ring--inner {
+  stroke: rgb(255 255 255 / 0.25);
+  stroke-width: 1;
+  animation-delay: 630ms;
+}
+
+.orbit-startup__axis {
+  stroke: rgb(var(--color-accent) / 0.24);
+  stroke-width: 1;
+  stroke-dasharray: 3 9;
+  opacity: 0;
+  animation: orbit-startup-detail 390ms ease 705ms both;
+}
+
+.orbit-startup__comet {
+  opacity: 0;
+  animation: orbit-startup-comet 915ms ease 45ms both;
+}
+
+.orbit-startup__comet-halo {
+  fill: rgb(var(--color-accent) / 0.2);
+}
+
+.orbit-startup__comet-head {
+  fill: white;
+}
+
+.orbit-startup__satellite {
+  fill: rgb(var(--color-accent-2));
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: orbit-startup-satellite 450ms cubic-bezier(0.16, 1, 0.3, 1) 840ms both;
+}
+
+.orbit-startup__core-halo {
+  fill: rgb(var(--color-accent) / 0.1);
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: orbit-startup-core 570ms cubic-bezier(0.16, 1, 0.3, 1) 585ms both;
+}
+
+.orbit-startup__core {
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation:
+    orbit-startup-core 510ms cubic-bezier(0.16, 1, 0.3, 1) 615ms both,
+    orbit-startup-pulse 1.8s ease-in-out 1125ms infinite;
+}
+
+.orbit-startup__wordmark {
+  display: grid;
+  width: min(18rem, 50vw);
+  margin-top: clamp(-4.8rem, -8vw, -3rem);
+  place-items: center;
+  color: rgb(var(--color-text));
+  opacity: 0;
+  transform: translateY(9px);
+  animation: orbit-startup-wordmark 450ms cubic-bezier(0.16, 1, 0.3, 1) 750ms both;
+}
+
+.orbit-startup__wordmark span {
+  font-size: clamp(1.35rem, 3vw, 2rem);
+  font-weight: 850;
+  letter-spacing: 0.42em;
+  text-indent: 0.42em;
+}
+
+.orbit-startup__wordmark i {
+  width: 0;
+  height: 1px;
+  margin-top: 0.75rem;
+  background: linear-gradient(90deg, transparent, rgb(var(--color-accent)), transparent);
+  box-shadow: 0 0 12px rgb(var(--color-accent) / 0.6);
+  animation: orbit-startup-horizon 420ms cubic-bezier(0.16, 1, 0.3, 1) 855ms both;
+}
+
+@keyframes orbit-startup-stars {
+  to { opacity: 1; }
+}
+
+@keyframes orbit-startup-trajectory {
+  0% { stroke-dashoffset: 1; opacity: 0; }
+  14% { opacity: 1; }
+  72% { opacity: 0.78; }
+  100% { stroke-dashoffset: 0; opacity: 0.08; }
+}
+
+@keyframes orbit-startup-ring {
+  from { stroke-dashoffset: 1; opacity: 0; }
+  to { stroke-dashoffset: 0; opacity: 1; }
+}
+
+@keyframes orbit-startup-detail {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes orbit-startup-comet {
+  0%, 6% { opacity: 0; }
+  16%, 78% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+@keyframes orbit-startup-satellite {
+  from { opacity: 0; transform: scale(2.4); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes orbit-startup-core {
+  from { opacity: 0; transform: scale(0.25); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes orbit-startup-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.16); }
+}
+
+@keyframes orbit-startup-wordmark {
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes orbit-startup-horizon {
+  to { width: 100%; }
+}
+
+@media (orientation: landscape) and (max-height: 720px) {
+  .orbit-startup__lockup {
+    width: min(28rem, 64vw);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .orbit-startup {
+    transition-duration: 100ms;
+  }
+
+  .orbit-startup__stars,
+  .orbit-startup__trajectory,
+  .orbit-startup__ring,
+  .orbit-startup__axis,
+  .orbit-startup__comet,
+  .orbit-startup__satellite,
+  .orbit-startup__core-halo,
+  .orbit-startup__core,
+  .orbit-startup__wordmark,
+  .orbit-startup__wordmark i {
+    animation: none !important;
+  }
+
+  .orbit-startup__stars,
+  .orbit-startup__ring,
+  .orbit-startup__axis,
+  .orbit-startup__satellite,
+  .orbit-startup__core-halo,
+  .orbit-startup__core,
+  .orbit-startup__wordmark {
+    opacity: 1;
+  }
+
+  .orbit-startup__ring {
+    stroke-dashoffset: 0;
+  }
+
+  .orbit-startup__wordmark {
+    transform: none;
+  }
+
+  .orbit-startup__wordmark i {
+    width: 100%;
+  }
 }
 
 [data-theme-choice]:focus-visible .theme-swatch-orb,
@@ -437,6 +1336,10 @@
   right: 2vw;
   bottom: 3vh;
   width: 84vw;
+  contain: paint;
+  isolation: isolate;
+  backface-visibility: hidden;
+  will-change: transform;
 }
 
 .game-detail-layout {
@@ -788,6 +1691,122 @@
 .coresense-store-card {
   width: 100%;
   min-width: 0;
+}
+
+/* XMODE keeps the Xbox-inspired hierarchy while remaining an ORBIT surface:
+   one deliberate search entry, exactly six launch slots, a complete-library
+   bridge and two equally important discovery cards. */
+.xmode-home .home-backdrop-art {
+  opacity: var(--xmode-backdrop-opacity, 0.48);
+  filter: blur(32px) saturate(var(--xmode-backdrop-saturation, 0.72))
+    brightness(var(--xmode-backdrop-brightness, 0.76));
+  transform: scale(1.11);
+}
+
+[data-backdrop-intensity='subtle'] .xmode-home {
+  --xmode-backdrop-opacity: 0.3;
+  --xmode-backdrop-brightness: 0.64;
+  --xmode-backdrop-saturation: 0.58;
+}
+
+[data-backdrop-intensity='balanced'] .xmode-home {
+  --xmode-backdrop-opacity: 0.48;
+  --xmode-backdrop-brightness: 0.76;
+  --xmode-backdrop-saturation: 0.72;
+}
+
+[data-backdrop-intensity='vivid'] .xmode-home {
+  --xmode-backdrop-opacity: 0.64;
+  --xmode-backdrop-brightness: 0.88;
+  --xmode-backdrop-saturation: 0.92;
+}
+
+.xmode-backdrop-veil {
+  background:
+    linear-gradient(180deg, rgb(var(--color-base) / 0.5) 0%, rgb(var(--color-base) / 0.82) 74%, rgb(var(--color-base) / 0.96) 100%),
+    radial-gradient(ellipse at 50% 8%, rgb(255 255 255 / 0.08), transparent 44%);
+}
+
+.xmode-launcher-grid {
+  gap: clamp(0.55rem, 1vw, 1rem);
+}
+
+.xmode-library-tile {
+  height: 100%;
+}
+
+.xmode-search:focus-visible,
+.xmode-search[data-focused='true'] {
+  border-color: rgb(255 255 255 / 0.72);
+  background-color: rgb(0 0 0 / 0.62);
+}
+
+.xmode-game-card:focus-visible,
+.xmode-game-card[data-focused='true'],
+.xmode-library-tile:focus-visible,
+.xmode-library-tile[data-focused='true'] {
+  border-color: rgb(255 255 255 / 0.88);
+}
+
+.xmode-feature-grid {
+  flex: 0 0 auto;
+  grid-auto-rows: clamp(34rem, 50vh, 44rem);
+  min-height: 0;
+}
+
+.xmode-feature-grid > * {
+  height: 100%;
+  min-height: 0;
+}
+
+.xmode-wishlist-offer:focus-visible,
+.xmode-wishlist-offer[data-focused='true'],
+.xmode-recommendation-offer:focus-visible,
+.xmode-recommendation-offer[data-focused='true'],
+.xmode-recently-added-tile:focus-visible,
+.xmode-recently-added-tile[data-focused='true'] {
+  z-index: 1;
+  box-shadow:
+    inset 0 0 0 calc(var(--focus-ring-width) + 1px) rgb(var(--color-accent) / 0.95),
+    inset 0 0 28px rgb(var(--color-accent) / 0.15);
+}
+
+[data-density='compact'] .xmode-launcher-grid {
+  gap: clamp(0.45rem, 0.8vw, 0.8rem);
+}
+
+@media (orientation: landscape) and (max-width: 1700px) and (max-height: 900px) {
+  .xmode-feature-grid {
+    grid-auto-rows: clamp(25rem, 52vh, 31rem);
+  }
+}
+
+@media (orientation: landscape) and (max-height: 720px) {
+  .xmode-home .home-backdrop-art {
+    filter: blur(24px) saturate(var(--xmode-backdrop-saturation, 0.72))
+      brightness(var(--xmode-backdrop-brightness, 0.76));
+  }
+
+  .xmode-feature-grid {
+    grid-auto-rows: 25rem;
+  }
+
+  .xmode-wishlist-stack [data-home-wishlist-offer] > .xmode-deal-info {
+    padding: 0.7rem 0.8rem;
+  }
+
+  .xmode-deal-price {
+    margin-top: 0.35rem;
+  }
+
+  .xmode-recommendation-description {
+    display: none;
+  }
+
+  .xmode-recommendation-info,
+  .xmode-recently-added-info {
+    padding: 0.75rem 0.85rem;
+  }
 }
 
 [data-card-size='compact'] .coresense-home {

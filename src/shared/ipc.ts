@@ -13,7 +13,16 @@ export type ThemeId =
   | 'lime'
   | 'monochrome'
 export type UiDensity = 'standard' | 'compact'
-export type HomeLayoutId = 'orbit' | 'float' | 'coresense'
+export const DOCK_THEME_IDS = ['standard', 'glass', 'neon', 'minimal'] as const
+export type DockThemeId = (typeof DOCK_THEME_IDS)[number]
+export const DOCK_SIZES = ['compact', 'standard', 'large'] as const
+export type DockSize = (typeof DOCK_SIZES)[number]
+export const DOCK_MOTIONS = ['calm', 'standard', 'lively'] as const
+export type DockMotion = (typeof DOCK_MOTIONS)[number]
+export const STARTUP_ANIMATION_MODES = ['orbit', 'custom', 'off'] as const
+export type StartupAnimationMode = (typeof STARTUP_ANIMATION_MODES)[number]
+export const CUSTOM_STARTUP_VIDEO_URL = 'orbit-media://startup.mp4'
+export type HomeLayoutId = 'orbit' | 'float' | 'coresense' | 'xmode'
 export type GameCardSize = 'compact' | 'standard' | 'large'
 export const LIBRARY_GRID_COLUMN_OPTIONS = [4, 5, 6, 7, 8] as const
 export type LibraryGridColumns = (typeof LIBRARY_GRID_COLUMN_OPTIONS)[number]
@@ -46,8 +55,106 @@ export type AudioPreset =
 export type StoreRegionId = 'eu' | 'us' | 'gb' | 'ca' | 'au'
 export type SystemPowerAction = 'sleep' | 'restart' | 'shutdown'
 export type SystemSettingsTarget = 'power' | 'wifi' | 'ethernet' | 'bluetooth'
+export type OrbitWallpaperApplyState = 'applied' | 'failed' | 'unsupported'
+
+/** Sanitized result of applying ORBIT's bundled Windows personalization asset. */
+export interface OrbitWallpaperApplyResult {
+  platform: 'windows' | 'unsupported'
+  desktop: OrbitWallpaperApplyState
+  lockScreen: OrbitWallpaperApplyState
+  appliedAt: number
+}
+
 export type AppControlAction = 'relaunch' | 'quit'
 export type GraphicsAdapterVendor = 'nvidia' | 'amd' | 'intel' | 'other'
+
+export type OrbitApplicationCategory = 'media' | 'launcher' | 'standard' | 'custom'
+export type OrbitApplicationTarget = 'native' | 'web' | 'orbit-media'
+
+export interface OrbitApplication {
+  id: string
+  name: string
+  category: OrbitApplicationCategory
+  target: OrbitApplicationTarget
+  available: boolean
+  issue?: 'executable-missing' | 'unsupported-platform'
+  /** Custom executable paths are shown for transparent editing. Built-in discovery paths stay private. */
+  executablePath?: string
+  launchArguments?: string
+  iconDataUrl?: string
+  controllerOptimized?: boolean
+}
+
+export interface OrbitApplicationSnapshot {
+  applications: OrbitApplication[]
+  scannedAt: number
+  platform: 'windows' | 'unsupported'
+}
+
+export type MediaKeyboardShortcut =
+  | 'backspace'
+  | 'space'
+  | 'cursor-left'
+  | 'cursor-right'
+  | 'shift'
+  | 'layout'
+  | 'done'
+
+export interface MediaKeyboardOpenPayload {
+  requestId: string
+  value: string
+  selectionStart: number
+  selectionEnd: number
+  inputType: 'email' | 'number' | 'password' | 'search' | 'tel' | 'text' | 'url'
+  label?: string
+  maxLength?: number
+}
+
+export interface MediaKeyboardUpdatePayload {
+  requestId: string
+  value: string
+  selectionStart: number
+  selectionEnd: number
+}
+
+export interface MediaOverlayHintPayload {
+  id: string
+  title: string
+  message: string
+}
+
+export interface CustomApplicationDraft {
+  draftId: string
+  suggestedName: string
+  executablePath: string
+  iconDataUrl?: string
+}
+
+export interface CustomApplicationCommitInput {
+  draftId: string
+  name: string
+  launchArguments?: string
+}
+
+export interface CustomApplicationUpdateInput {
+  applicationId: string
+  name: string
+  launchArguments?: string
+}
+
+export interface ApplicationLaunchResult {
+  applicationId: string
+  applicationName: string
+  controllerBridge: 'active' | 'unavailable' | 'not-needed'
+}
+export const PLAYSTATION_REMOTE_PLAY_PREFERENCES = [
+  'auto',
+  'chiaki',
+  'ps-remote-play'
+] as const
+export type PlayStationRemotePlayPreference =
+  (typeof PLAYSTATION_REMOTE_PLAY_PREFERENCES)[number]
+export type PlayStationRemotePlayAppId = Exclude<PlayStationRemotePlayPreference, 'auto'>
 
 export type SystemStatusState = 'loading' | 'ready' | 'partial' | 'error' | 'unsupported'
 export type SystemNetworkType = 'wifi' | 'ethernet' | 'offline' | 'unknown'
@@ -238,8 +345,14 @@ export interface OrbitSettings {
   libraryGridColumns: LibraryGridColumns
   favoriteGameIds: string[]
   customLibraries: GameCollection[]
+  /** Games hidden from launcher surfaces by durable `<provider>:<providerGameId>` identity. */
+  excludedGameIds: string[]
   backdropIntensity: BackdropIntensity
   homeCardBubbleEffect: boolean
+  startupAnimationMode: StartupAnimationMode
+  dockTheme: DockThemeId
+  dockSize: DockSize
+  dockMotion: DockMotion
   uiDensity: UiDensity
   language: Language
   audioPreset: AudioPreset
@@ -248,6 +361,7 @@ export interface OrbitSettings {
   steamWebApiKey?: string
   storeRegion: StoreRegionId
   showStoreTab: boolean
+  showFriendsHub: boolean
   showHomeBanners: boolean
   showAchievements: boolean
   closeLaunchersAfterGame: boolean
@@ -255,6 +369,11 @@ export interface OrbitSettings {
   notificationPosition: NotificationPosition
   notificationMotion: NotificationMotion
   appUpdateAutoDownload: boolean
+  retroRomDirectories: string[]
+  /** Explicit emulator choice per ROM system. Missing entries use automatic detection. */
+  retroSystemEmulators: Partial<Record<RetroSystemId, string>>
+  retroAchievementsUsername?: string
+  playstationRemotePlayPreference: PlayStationRemotePlayPreference
   hardwareControlEnabled: boolean
   hardwareControlButton: HardwareControlButton
   hardwareControlHoldSeconds: HardwareControlHoldSeconds
@@ -283,6 +402,37 @@ export type EpicLoginStatus =
 export interface EpicAccount {
   accountId: string
   displayName: string
+}
+
+export interface RetroAchievementsCredentialStatus {
+  /** True only when the main process can decrypt a stored Web API key. */
+  configured: boolean
+}
+
+export type PlayStationLoginStatus =
+  | { state: 'idle' }
+  | { state: 'waiting-for-browser' }
+  | { state: 'success'; account: PlayStationAccount }
+  | { state: 'error'; message: string }
+
+export interface PlayStationAccount {
+  accountId: string
+  onlineId: string
+  avatarUrl?: string
+}
+
+/** Path-free local Remote Play discovery state. Executable paths never cross
+ * the Electron process boundary. */
+export interface PlayStationRemotePlayStatus {
+  platform: 'windows' | 'unsupported'
+  apps: Array<{
+    id: PlayStationRemotePlayAppId
+    name: string
+    installed: boolean
+  }>
+  preference: PlayStationRemotePlayPreference
+  selectedApp?: PlayStationRemotePlayAppId
+  checkedAt: number
 }
 
 export const FRIENDS_PROVIDERS = ['steam', 'discord', 'epic'] as const
@@ -335,7 +485,61 @@ export interface FriendsSnapshot {
   isRefreshing: boolean
 }
 
-export type GameProvider = 'steam' | 'epic' | 'gog' | 'xbox' | 'ea' | 'ubisoft' | 'local'
+export type DiscordChatIssue =
+  | 'not-connected'
+  | 'history-unavailable'
+  | 'send-failed'
+  | 'provider-unavailable'
+
+export interface DiscordChatMessage {
+  id: string
+  userId: string
+  content: string
+  sentAt: number
+  editedAt?: number
+  direction: 'incoming' | 'outgoing'
+  unsupportedContent: boolean
+}
+
+export interface DiscordChatHistory {
+  state: 'ready' | 'unavailable'
+  userId: string
+  messages: DiscordChatMessage[]
+  issue?: DiscordChatIssue
+}
+
+export interface DiscordChatConversation {
+  userId: string
+  lastMessageId: string
+  lastMessage?: DiscordChatMessage
+}
+
+export interface DiscordChatInbox {
+  state: 'ready' | 'unavailable'
+  conversations: DiscordChatConversation[]
+  issue?: DiscordChatIssue
+}
+
+export interface DiscordChatSendResult {
+  ok: boolean
+  message?: DiscordChatMessage
+  issue?: DiscordChatIssue
+}
+
+export type DiscordChatEvent =
+  | { kind: 'created' | 'updated'; message: DiscordChatMessage }
+  | { kind: 'deleted'; messageId: string }
+
+export type GameProvider =
+  | 'steam'
+  | 'epic'
+  | 'gog'
+  | 'xbox'
+  | 'playstation'
+  | 'retro'
+  | 'ea'
+  | 'ubisoft'
+  | 'local'
 
 export type LauncherDownloadProvider = Extract<GameProvider, 'steam' | 'epic' | 'xbox'>
 export type LauncherDownloadPhase =
@@ -421,7 +625,8 @@ export interface GameAchievementsSnapshot {
   unlocked: number
   total: number
   fetchedAt: number
-  reason?: 'private' | 'unsupported' | 'unavailable'
+  reason?: 'private' | 'unsupported' | 'unavailable' | 'not-connected'
+  source?: 'steam-community' | 'steam-web-api' | 'retroachievements'
 }
 
 /** Rich, provider-neutral metadata persisted with each library record. */
@@ -442,8 +647,10 @@ export interface GameMetadata {
   storeUrl?: string
   /** Validated provider launch target, such as a Windows AppsFolder AUMID. */
   launchUri?: string
-  /** Provider manifest executable hint used only to identify the launched process. */
+  /** Validated provider executable used for direct launch and process identification. */
   launchExecutable?: string
+  /** Provider-supplied argv parsed and validated in the main process. */
+  launchArguments?: string[]
   languages?: string[]
   controllerSupport?: string
   platforms?: GamePlatform[]
@@ -466,6 +673,151 @@ export interface LocalGameConfig {
   backupEnabled: boolean
   lastBackupAt?: number
   lastBackupState?: LocalGameBackupState
+}
+
+export type RetroSystemId =
+  | 'nes'
+  | 'fds'
+  | 'snes'
+  | 'gb'
+  | 'gbc'
+  | 'gba'
+  | 'n64'
+  | 'nds'
+  | 'gamecube'
+  | 'wii'
+  | 'wiiu'
+  | 'megadrive'
+  | 'mastersystem'
+  | 'gamegear'
+  | 'sega32x'
+  | 'segacd'
+  | 'saturn'
+  | 'dreamcast'
+  | 'ps1'
+  | 'ps2'
+  | 'psp'
+  | 'atari2600'
+  | 'atari7800'
+  | 'atarilynx'
+  | 'pce'
+  | 'wonderswan'
+  | 'wonderswancolor'
+  | 'ngp'
+  | 'ngpc'
+  | 'virtualboy'
+  | 'colecovision'
+  | 'arcade'
+
+export type RetroAchievementMatch =
+  | 'matched'
+  | 'unmatched'
+  | 'unavailable'
+  | 'not-configured'
+  | 'unsupported'
+
+export interface RetroGameConfig {
+  romPath: string
+  sourceDirectory: string
+  systemId: RetroSystemId
+  systemName: string
+  emulatorId?: string
+  emulatorName?: string
+  emulatorPath?: string
+  corePath?: string
+  /** Complete per-game argv override. ORBIT still enforces the emulator's fullscreen contract. */
+  launchArguments?: string[]
+  retroAchievementsHash?: string
+  retroAchievementsGameId?: number
+  retroAchievementsMatch: RetroAchievementMatch
+}
+
+export interface DetectedRetroEmulator {
+  id: string
+  name: string
+  kind: 'retroarch' | 'standalone'
+  supportedSystems: RetroSystemId[]
+  readySystems: RetroSystemId[]
+  achievementsSupported: boolean
+  coreCount?: number
+}
+
+export interface RetroRomDirectoryStatus {
+  path: string
+  state: 'ready' | 'missing' | 'error'
+  gameCount: number
+  issue?: 'scan-failed' | 'scan-limit-reached'
+}
+
+export interface RetroLibraryStatus {
+  state: 'idle' | 'scanning' | 'ready' | 'partial' | 'error'
+  emulators: DetectedRetroEmulator[]
+  directories: RetroRomDirectoryStatus[]
+  gameCount: number
+  matchedAchievementsCount: number
+  scannedAt?: number
+}
+
+export interface RetroLibraryResult {
+  snapshot: LibrarySnapshot
+  status: RetroLibraryStatus
+}
+
+export interface RetroEmulatorDownloadInput {
+  systemId: RetroSystemId
+  /** Omit to open ORBIT's recommended emulator page for the system. */
+  emulatorId?: string
+}
+
+export interface RetroEmulatorDownloadResult {
+  systemId: RetroSystemId
+  emulatorId: string
+  emulatorName: string
+  directoryPath: string
+  emulatorDirectoryPath: string
+  firmwareMayBeRequired: boolean
+}
+
+export interface RetroEmulatorInstallInput {
+  systemId: RetroSystemId
+  /** Omit to install ORBIT's recommended emulator for the system. */
+  emulatorId?: string
+}
+
+export type RetroEmulatorInstallPhase =
+  | 'checking'
+  | 'resolving'
+  | 'downloading'
+  | 'extracting'
+  | 'installing-core'
+  | 'verifying'
+  | 'complete'
+
+export interface RetroEmulatorInstallProgress {
+  systemId: RetroSystemId
+  emulatorId: string
+  emulatorName: string
+  phase: RetroEmulatorInstallPhase
+  receivedBytes?: number
+  totalBytes?: number
+}
+
+export interface RetroEmulatorInstallResult extends RetroLibraryResult {
+  systemId: RetroSystemId
+  emulatorId: string
+  emulatorName: string
+  directoryPath: string
+  emulatorDirectoryPath: string
+  alreadyInstalled: boolean
+  emulatorInstalled: boolean
+  coreInstalled: boolean
+  firmwareMayBeRequired: boolean
+}
+
+export interface RetroSystemDirectoryResult {
+  systemId: RetroSystemId
+  directoryPath: string
+  created: boolean
 }
 
 export type CustomGameImportSource = 'executable' | 'folder'
@@ -527,11 +879,20 @@ export interface LibraryGame {
   /** Locally detected provider update that has not finished downloading yet. */
   updateAvailable?: boolean
   local?: LocalGameConfig
+  retro?: RetroGameConfig
   addedAt: number
   updatedAt: number
 }
 
-export type LibraryStatusProvider = 'steam' | 'epic' | 'xbox'
+export type LibraryStatusProvider =
+  | 'steam'
+  | 'epic'
+  | 'gog'
+  | 'xbox'
+  | 'playstation'
+  | 'retro'
+  | 'ea'
+  | 'ubisoft'
 export type LibraryProviderState =
   | 'idle'
   | 'scanning'
@@ -549,12 +910,24 @@ export type LibraryDetectionMethod =
   | 'xbox-app-cache'
   | 'xbox-display-catalog'
   | 'windows-packages'
+  | 'psn-purchased-library'
+  | 'psn-play-history'
+  | 'remote-play-apps'
+  | 'windows-registry'
+  | 'launcher-cache'
+  | 'rom-folders'
+  | 'emulator-installations'
+  | 'retroachievements-hash'
   | 'cached-data'
 export type LibraryProviderIssue =
   | 'not-connected'
   | 'online-library-unavailable'
   | 'metadata-pending'
   | 'source-unavailable'
+  | 'authentication-failed'
+  | 'remote-play-app-unavailable'
+  | 'emulator-missing'
+  | 'rom-source-unavailable'
   | 'no-games-found'
 
 export interface LibraryProviderStatus {
@@ -594,10 +967,12 @@ export interface LibraryActivitySummary {
 }
 
 export interface LibrarySnapshot {
-  /** Lossless provider-identity records used by Home and the combined library. */
+  /** User-facing game projection after provider-local cleanup and visibility policy. */
   games: LibraryGame[]
-  /** Compatibility projection used by provider-specific tabs. */
+  /** Provider-filterable projection; durable identities remain in the main-process database. */
   providerGames: LibraryGame[]
+  /** Excluded records remain available only to Settings so the choice is reversible. */
+  excludedGames: LibraryGame[]
   recentGameIds: string[]
   loadedAt: number
   isLoadingMetadata: boolean
@@ -619,6 +994,7 @@ export interface LibraryStats {
 
 export type GameLaunchPhase = 'idle' | 'launching' | 'running' | 'returning' | 'error'
 export const GAME_LAUNCH_CANCEL_WINDOW_MS = 3_000
+export const GAME_TRACKING_STOP_HOLD_MS = 3_000
 
 export type GameLaunchFailureReason =
   | 'launch-rejected'
@@ -638,7 +1014,7 @@ export interface GameLaunchStatus {
   endedAt?: number
   sessionDurationSeconds?: number
   totalPlaytimeSeconds?: number
-  returnTask?: 'backing-up' | 'backup-complete' | 'backup-failed'
+  returnTask?: 'backing-up' | 'backup-complete' | 'backup-failed' | 'tracking-stopped'
   failureReason?: GameLaunchFailureReason
   message?: string
 }
@@ -772,9 +1148,28 @@ export interface SteamGridDbArtworkOption {
   authorName?: string
 }
 
-export interface SteamGridDbArtworkOptions {
-  state: 'ready' | 'missing' | 'unavailable' | 'not-configured'
-  options: SteamGridDbArtworkOption[]
+export type ArtworkSearchSource = 'steam-store' | 'steamgriddb'
+
+export interface ArtworkSearchOption {
+  /** Opaque, server-validated candidate identity. Never a renderer-supplied URL. */
+  id: string
+  previewUrl: string
+  source: ArtworkSearchSource
+  sourceTitle?: string
+  width?: number
+  height?: number
+  authorName?: string
+}
+
+export interface RetroGameLaunchArgumentsInput {
+  gameId: string
+  /** User-facing Windows argument string; parsed and validated in the main process. */
+  launchArguments?: string
+}
+
+export interface ArtworkSearchOptions {
+  state: 'ready' | 'missing' | 'unavailable'
+  options: ArtworkSearchOption[]
 }
 
 export type SyncPipelineId = 'library' | 'metadata' | 'artwork' | 'achievements' | 'store'
@@ -807,16 +1202,30 @@ export const IPC = {
   epicLoginStatus: 'epic:login:status',
   epicLogout: 'epic:logout',
   epicGetAccount: 'epic:get-account',
+  playstationLoginStart: 'playstation:login:start',
+  playstationLoginCancel: 'playstation:login:cancel',
+  playstationLoginStatus: 'playstation:login:status',
+  playstationLogout: 'playstation:logout',
+  playstationGetAccount: 'playstation:get-account',
+  playstationRemotePlayGet: 'playstation:remote-play:get',
+  playstationRemotePlayRefresh: 'playstation:remote-play:refresh',
   friendsGet: 'friends:get',
   friendsRefresh: 'friends:refresh',
   friendsConnect: 'friends:provider:connect',
   friendsDisconnect: 'friends:provider:disconnect',
   friendsUpdated: 'friends:updated',
   friendsOpenProvider: 'friends:provider:open',
+  discordChatInbox: 'friends:discord-chat:inbox',
+  discordChatHistory: 'friends:discord-chat:history',
+  discordChatSend: 'friends:discord-chat:send',
+  discordChatSetVisible: 'friends:discord-chat:set-visible',
+  discordChatMessage: 'friends:discord-chat:message',
   libraryGet: 'library:get',
   libraryStatsGet: 'library:stats:get',
   libraryRefresh: 'library:refresh',
   libraryUpdated: 'library:updated',
+  libraryGameExclude: 'library:game:exclude',
+  libraryGameRestore: 'library:game:restore',
   launcherDownloadsGet: 'launcher-downloads:get',
   launcherDownloadsUpdated: 'launcher-downloads:updated',
   customGameBeginImport: 'library:custom:import:begin',
@@ -829,17 +1238,50 @@ export const IPC = {
   customGameRemove: 'library:custom:remove',
   customGameBackup: 'library:custom:backup',
   customGameOpenBackups: 'library:custom:backups:open',
+  retroLibraryStatusGet: 'library:retro:status:get',
+  retroLibraryRefresh: 'library:retro:refresh',
+  retroLibraryDirectoryAdd: 'library:retro:directory:add',
+  retroLibraryDirectoryRemove: 'library:retro:directory:remove',
+  retroSystemDirectoryEnsure: 'library:retro:system-directory:ensure',
+  retroSystemDirectoryOpen: 'library:retro:system-directory:open',
+  retroEmulatorDownloadOpen: 'library:retro:emulator-download:open',
+  retroEmulatorInstall: 'library:retro:emulator:install',
+  retroEmulatorInstallCancel: 'library:retro:emulator:install:cancel',
+  retroEmulatorInstallProgress: 'library:retro:emulator:install-progress',
+  retroGameSetLaunchArguments: 'library:retro:launch-arguments:set',
   gameLaunch: 'game:launch',
   gameLaunchCancel: 'game:launch:cancel',
+  gameTrackingStop: 'game:tracking:stop',
   gameLaunchGet: 'game:launch:get',
   gameLaunchRevealLauncher: 'game:launch:reveal-launcher',
   gameLaunchStatus: 'game:launch:status',
   gameCompletionTimesResolve: 'game:completion-times:resolve',
   gameAchievementsResolve: 'game:achievements:resolve',
+  gameAchievementsSync: 'game:achievements:sync',
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
+  retroAchievementsCredentialGet: 'retro-achievements:credential:get',
+  retroAchievementsCredentialSet: 'retro-achievements:credential:set',
+  retroAchievementsCredentialClear: 'retro-achievements:credential:clear',
   profileAvatarGetCustom: 'profile-avatar:custom:get',
   profileAvatarSelectCustom: 'profile-avatar:custom:select',
+  startupVideoGet: 'startup-video:get',
+  startupVideoSelect: 'startup-video:select',
+  applicationsGet: 'applications:get',
+  applicationsRefresh: 'applications:refresh',
+  applicationsLaunch: 'applications:launch',
+  mediaKeyboardOpen: 'media-keyboard:open',
+  mediaKeyboardShortcut: 'media-keyboard:shortcut',
+  mediaKeyboardUpdate: 'media-keyboard:update',
+  mediaKeyboardComplete: 'media-keyboard:complete',
+  mediaKeyboardClose: 'media-keyboard:close',
+  mediaOverlayHintOpen: 'media-overlay:hint-open',
+  mediaOverlayHintDismiss: 'media-overlay:hint-dismiss',
+  customApplicationSelect: 'applications:custom:select',
+  customApplicationCommit: 'applications:custom:commit',
+  customApplicationUpdate: 'applications:custom:update',
+  customApplicationRemove: 'applications:custom:remove',
+  customApplicationCancel: 'applications:custom:cancel',
   appVersion: 'app:version',
   appUpdateGet: 'app:update:get',
   appUpdateCheck: 'app:update:check',
@@ -853,8 +1295,8 @@ export const IPC = {
   hardwareControlGetStatus: 'hardware-control:status:get',
   hardwareControlStatus: 'hardware-control:status',
   imageResolve: 'image:resolve',
-  imageSteamGridDbList: 'image:steamgriddb:list',
-  imageSteamGridDbApply: 'image:steamgriddb:apply',
+  imageArtworkSearchList: 'image:artwork-search:list',
+  imageArtworkSearchApply: 'image:artwork-search:apply',
   imageSelectCustom: 'image:custom:select',
   imagePasteCustom: 'image:custom:paste',
   imageResetCustom: 'image:custom:reset',
@@ -876,8 +1318,10 @@ export const IPC = {
   systemOpenUpdateSettings: 'system:updates:open-settings',
   systemStatusGet: 'system:status:get',
   systemStatusRefresh: 'system:status:refresh',
+  systemKeyboardShow: 'system:keyboard:show',
   systemStatusUpdated: 'system:status:updated',
   systemOpenSettings: 'system:settings:open',
+  systemWallpaperApply: 'system:wallpaper:apply',
   systemPower: 'system:power',
   appControl: 'app:control',
   openExternal: 'shell:open-external'

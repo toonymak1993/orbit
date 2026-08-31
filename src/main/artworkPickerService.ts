@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto'
 import type {
+  ArtworkSearchOption,
+  ArtworkSearchOptions,
   ImageOrientation,
   LibraryGame,
-  ResolvedImage,
-  SteamGridDbArtworkOptions
+  ResolvedImage
 } from '@shared/ipc'
 import { getBuiltinSteamGridDbKey } from './builtinKeys'
 import { customArtworkService } from './customArtwork'
@@ -12,20 +13,26 @@ import {
   fetchSteamGridDbArtworkCandidates,
   type SteamGridDbArtworkCandidate
 } from './steamGridDb'
+import { searchPublicSteamArtwork } from './publicArtworkSearch'
+import type { PublicSteamArtworkCandidate } from './publicArtworkSearchPolicy'
 
 interface PickerCacheEntry {
   expiresAt: number
-  candidates: SteamGridDbArtworkCandidate[]
+  candidates: ArtworkPickerCandidate[]
 }
 
 type ArtworkPickerOrientation = Exclude<ImageOrientation, 'icon'>
+type ArtworkPickerCandidate =
+  | PublicSteamArtworkCandidate
+  | (ArtworkSearchOption & { source: 'steamgriddb'; downloadUrl: string })
 type CandidateLoadResult =
-  | { state: 'ready'; candidates: SteamGridDbArtworkCandidate[] }
-  | { state: 'missing' | 'unavailable' | 'not-configured'; candidates: [] }
+  | { state: 'ready'; candidates: ArtworkPickerCandidate[] }
+  | { state: 'missing' | 'unavailable'; candidates: [] }
 
 const CACHE_TTL_MS = 10 * 60 * 1000
 const MAX_CACHE_ENTRIES = 250
 const MAX_QUERY_LENGTH = 120
+const MAX_PICKER_OPTIONS = 30
 const pickerCache = new Map<string, PickerCacheEntry>()
 const pickerInFlight = new Map<string, Promise<CandidateLoadResult>>()
 
@@ -53,7 +60,9 @@ function cacheKey(
   orientation: ArtworkPickerOrientation,
   normalizedQuery: string
 ): string {
-  const keyTag = createHash('sha256').update(key).digest('hex').slice(0, 10)
+  const keyTag = key
+    ? createHash('sha256').update(key).digest('hex').slice(0, 10)
+    : 'public-only'
   return JSON.stringify([
     game.id,
     game.metadataRevision,
@@ -81,9 +90,8 @@ async function loadCandidates(
   CandidateLoadResult
 > {
   const key = apiKey()
-  if (!key) return { state: 'not-configured', candidates: [] }
-
   const normalizedQuery = normalizeQuery(query)
+  const effectiveQuery = normalizedQuery || game.name
   const id = cacheKey(game, key, orientation, normalizedQuery)
   const cached = pickerCache.get(id)
   if (cached && cached.expiresAt > Date.now()) {
@@ -100,18 +108,34 @@ async function loadCandidates(
   const current = pickerInFlight.get(id)
   if (current) return current
 
-  const request = fetchSteamGridDbArtworkCandidates(
-    steamAppId,
-    key,
-    normalizedQuery || game.name,
-    orientation
-  ).then((result): CandidateLoadResult => {
-    if (result.state !== 'success') return { state: result.state, candidates: [] }
+  const request = Promise.all([
+    searchPublicSteamArtwork(effectiveQuery, orientation),
+    key
+      ? fetchSteamGridDbArtworkCandidates(steamAppId, key, effectiveQuery, orientation)
+      : Promise.resolve({ state: 'missing' as const })
+  ]).then(([publicResult, communityResult]): CandidateLoadResult => {
+    const publicCandidates = publicResult.state === 'success' ? publicResult.value : []
+    const communityCandidates =
+      communityResult.state === 'success'
+        ? communityResult.value.map(
+            (candidate: SteamGridDbArtworkCandidate): ArtworkPickerCandidate => ({
+              ...candidate,
+              id: `steamgriddb:${candidate.id}`,
+              source: 'steamgriddb'
+            })
+          )
+        : []
+    const candidates = [...publicCandidates, ...communityCandidates].slice(0, MAX_PICKER_OPTIONS)
+    if (candidates.length === 0) {
+      return publicResult.state === 'unavailable' || communityResult.state === 'unavailable'
+        ? { state: 'unavailable', candidates: [] }
+        : { state: 'missing', candidates: [] }
+    }
     cacheCandidates(id, {
       expiresAt: Date.now() + CACHE_TTL_MS,
-      candidates: result.value
+      candidates
     })
-    return { state: 'ready', candidates: result.value }
+    return { state: 'ready', candidates }
   })
   pickerInFlight.set(id, request)
   const clearRequest = (): void => {
@@ -126,7 +150,7 @@ class ArtworkPickerService {
     game: LibraryGame,
     orientation: ArtworkPickerOrientation = 'vertical',
     query?: string
-  ): Promise<SteamGridDbArtworkOptions> {
+  ): Promise<ArtworkSearchOptions> {
     const result = await loadCandidates(game, orientation, query)
     if (result.state !== 'ready') return { state: result.state, options: [] }
     return {
@@ -137,17 +161,19 @@ class ArtworkPickerService {
 
   async apply(
     game: LibraryGame,
-    artworkId: number,
+    artworkId: string,
     orientation: ArtworkPickerOrientation = 'vertical',
     query?: string
   ): Promise<ResolvedImage> {
     const result = await loadCandidates(game, orientation, query)
     if (result.state !== 'ready') {
-      throw new Error(`SteamGridDB artwork is ${result.state}`)
+      throw new Error(`Artwork search is ${result.state}`)
     }
     const candidate = result.candidates.find((item) => item.id === artworkId)
-    if (!candidate) throw new Error('SteamGridDB artwork is no longer available')
-    return customArtworkService.applySteamGridDb(game.id, candidate.downloadUrl, orientation)
+    if (!candidate) throw new Error('Artwork is no longer available')
+    return candidate.source === 'steam-store'
+      ? customArtworkService.applyPublicSteam(game.id, candidate.downloadUrl, orientation)
+      : customArtworkService.applySteamGridDb(game.id, candidate.downloadUrl, orientation)
   }
 }
 

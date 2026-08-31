@@ -1,8 +1,9 @@
 import { motion, useReducedMotion } from 'framer-motion'
 import { Download } from 'lucide-react'
-import type { LibraryGame } from '@shared/ipc'
+import type { GameProvider, LibraryGame } from '@shared/ipc'
 import { GameImage } from './GameImage'
 import { useT } from '@renderer/i18n/useT'
+import type { TranslationKey } from '@renderer/i18n/translations'
 import { formatPlaytime } from '@renderer/lib/playtime'
 import { useLaunchGame } from '@renderer/hooks/useLaunchGame'
 import {
@@ -10,6 +11,19 @@ import {
   type HomeCardReflectionState
 } from './HomeCardReflection'
 import { GameCardMenuHint } from './GameCardMenuHint'
+import { LibraryProviderBadge } from './LibraryProviderBadge'
+
+const PROVIDER_LABEL_KEYS = {
+  steam: 'library.source.steam',
+  epic: 'library.source.epic',
+  gog: 'library.source.gog',
+  xbox: 'library.source.xbox',
+  playstation: 'library.source.playstation',
+  retro: 'library.source.retro',
+  ea: 'library.source.ea',
+  ubisoft: 'library.source.ubisoft',
+  local: 'library.source.local'
+} satisfies Record<GameProvider, TranslationKey>
 
 interface Props {
   game: LibraryGame
@@ -29,6 +43,7 @@ export function GameCard({
   const t = useT()
   const reduceMotion = useReducedMotion()
   const playtime = formatPlaytime(game, t)
+  const providerLabel = t(PROVIDER_LABEL_KEYS[game.provider])
   const launchGame = useLaunchGame()
   const isHomeCard = variant === 'home' || variant === 'float'
   const activeMotion = reduceMotion ? { scale: 1, y: 0 } : { scale: 1.025, y: -1 }
@@ -45,11 +60,13 @@ export function GameCard({
       data-game-id={game.id}
       data-grid-index={navigationIndex}
       data-home-game-card={isHomeCard ? 'true' : undefined}
-      aria-label={
-        game.updateAvailable
-          ? `${game.name}. ${t('library.updateAvailable')}`
-          : game.name
-      }
+      aria-label={[
+        game.name,
+        providerLabel,
+        game.updateAvailable ? t('library.updateAvailable') : undefined
+      ]
+        .filter(Boolean)
+        .join('. ')}
       onClick={() => launchGame(game.id)}
       onMouseEnter={() => onActiveChange?.(true, 'pointer')}
       onMouseMove={() => onActiveChange?.(true, 'pointer')}
@@ -78,11 +95,22 @@ export function GameCard({
         variant === 'home' ? 'aspect-[1/1.08]' : 'aspect-[2/3]'
       }`}
     >
+      {/* Home shelves are still cover slots. Horizontal artwork is reserved for
+          hero/backdrop surfaces; here it crops sparse backgrounds into blank tiles. */}
       <GameImage
         gameId={game.id}
         name={game.name}
         orientation="vertical"
         className={`h-full w-full object-cover ${isHomeCard ? 'object-top' : ''}`}
+      />
+      <LibraryProviderBadge
+        provider={game.provider}
+        size={isHomeCard ? 'compact' : 'default'}
+        className={`absolute left-2 top-2 z-30 ${
+          isHomeCard
+            ? 'opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 group-data-[focused=true]:opacity-100 motion-reduce:transition-none'
+            : ''
+        }`}
       />
       {isHomeCard && homeReflection && (
         <HomeCardReflection reflection={homeReflection} />

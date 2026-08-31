@@ -13,7 +13,14 @@ let listening = false
 let initialized = false
 
 export const useLibraryStore = create<LibraryState>((set, get) => ({
-  snapshot: { games: [], providerGames: [], recentGameIds: [], loadedAt: 0, isLoadingMetadata: false },
+  snapshot: {
+    games: [],
+    providerGames: [],
+    excludedGames: [],
+    recentGameIds: [],
+    loadedAt: 0,
+    isLoadingMetadata: false
+  },
   isRefreshing: false,
   applySnapshot: (snapshot) => set({ snapshot }),
 

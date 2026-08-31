@@ -1,14 +1,29 @@
 import { create } from 'zustand'
 
-export type MainView = 'home' | 'friends' | 'library' | 'store' | 'settings'
+export type MainView = 'home' | 'applications' | 'friends' | 'library' | 'store' | 'settings'
 
 export const MAIN_VIEW_ORDER: MainView[] = [
   'home',
+  'applications',
   'friends',
   'library',
   'store',
   'settings'
 ]
+
+export function getVisibleMainViews({
+  showFriendsHub,
+  showStoreTab
+}: {
+  showFriendsHub: boolean
+  showStoreTab: boolean
+}): MainView[] {
+  return MAIN_VIEW_ORDER.filter(
+    (view) =>
+      (view !== 'friends' || showFriendsHub) && (view !== 'store' || showStoreTab)
+  )
+}
+
 export type OnboardingStep = 'welcome' | 'steam-login' | 'epic-login' | 'success'
 export type AppPhase = 'onboarding' | 'main'
 

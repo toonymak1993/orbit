@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { motion } from 'framer-motion'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { AnimatePresence, motion } from 'framer-motion'
 import {
   ChevronDown,
   CircleAlert,
   ExternalLink,
   Globe2,
+  Inbox,
   Loader2,
   LogOut,
   MessageCircle,
@@ -25,6 +26,11 @@ import type {
   FriendsProviderStatus,
   OrbitFriend
 } from '@shared/ipc'
+import { DiscordChatPanel } from './DiscordChatPanel'
+import {
+  totalDiscordUnread,
+  useDiscordChatStore
+} from '@renderer/state/discordChatStore'
 
 const FILTERS: FriendsFilter[] = ['all', 'steam', 'discord', 'epic']
 
@@ -92,6 +98,13 @@ export function FriendsView(): JSX.Element {
   const disconnect = useFriendsStore((state) => state.disconnect)
   const openProvider = useFriendsStore((state) => state.openProvider)
   const [handoffError, setHandoffError] = useState<FriendsProvider | null>(null)
+  const [chatFriend, setChatFriend] = useState<OrbitFriend | null>(null)
+  const [chatOpen, setChatOpen] = useState(false)
+  const requestedUserId = useDiscordChatStore((state) => state.requestedUserId)
+  const consumeOpenRequest = useDiscordChatStore((state) => state.consumeOpenRequest)
+  const unreadByUser = useDiscordChatStore((state) => state.unreadByUser)
+  const unreadCount = totalDiscordUnread(unreadByUser)
+  const contentRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     void init()
@@ -101,18 +114,45 @@ export function FriendsView(): JSX.Element {
     if (initialized) void refresh()
   }, [account?.steamId, epicAccount?.accountId, initialized, refresh])
 
+  useEffect(() => {
+    const content = contentRef.current
+    if (!content) return
+    if (chatOpen) content.setAttribute('inert', '')
+    else content.removeAttribute('inert')
+  }, [chatOpen])
+
+  useEffect(() => {
+    if (!requestedUserId) return
+    const requestedFriend =
+      snapshot.friends.find(
+        (friend) =>
+          friend.provider === 'discord' && friend.providerUserId === requestedUserId
+      ) ?? {
+        id: `discord:${requestedUserId}`,
+        provider: 'discord' as const,
+        providerUserId: requestedUserId,
+        displayName: `Discord · ${requestedUserId.slice(-6)}`,
+        presence: 'unknown' as const
+      }
+    setChatFriend(requestedFriend)
+    setChatOpen(true)
+    consumeOpenRequest()
+  }, [consumeOpenRequest, requestedUserId, snapshot.friends])
+
   const visibleProviders = useMemo<FriendsProvider[]>(
     () => (filter === 'all' ? ['steam', 'discord', 'epic'] : [filter]),
     [filter]
   )
   const onlineCount = snapshot.friends.filter((friend) => onlinePresence(friend.presence)).length
 
-  const openProviderSafely = async (provider: FriendsProvider): Promise<void> => {
+  const openProviderSafely = async (provider: FriendsProvider): Promise<boolean> => {
     setHandoffError(null)
     try {
       await openProvider(provider)
+      return true
     } catch {
       setHandoffError(provider)
+      return false
     }
   }
 
@@ -127,112 +167,141 @@ export function FriendsView(): JSX.Element {
   }
 
   return (
-    <div className="friends-view scrollbar-none h-full overflow-y-auto px-5 pb-12 pt-24 xl:px-8">
-      <div className="mx-auto max-w-[112rem]">
-        <header className="flex flex-wrap items-end justify-between gap-5">
-          <div>
-            <p className="flex items-center gap-2 text-[10px] font-black uppercase tracking-[0.22em] text-accent">
-              <UsersRound size={14} />
-              {t('friends.eyebrow')}
-            </p>
-            <h1 className="mt-2 text-[clamp(2rem,4vw,4rem)] font-black leading-none tracking-[-0.045em]">
-              {t('friends.title')}
-            </h1>
-            <p className="mt-3 max-w-3xl text-sm leading-relaxed text-muted">
-              {t('friends.subtitle')}
-            </p>
-          </div>
-
-          <div className="flex items-center gap-3">
-            <div className="rounded-full border border-white/10 bg-white/[0.045] px-4 py-2 text-xs font-bold text-muted">
-              <span className="text-emerald-300">{onlineCount}</span>
-              <span className="px-1.5 text-white/25">/</span>
-              {t('friends.summary', { count: snapshot.friends.length })}
+    <>
+      <div
+        ref={contentRef}
+        aria-hidden={chatOpen ? true : undefined}
+        className="friends-view scrollbar-none h-full overflow-y-auto px-5 pb-12 pt-24 xl:px-8"
+      >
+        <div className="mx-auto max-w-[112rem]">
+          <header className="flex min-h-14 flex-wrap items-center justify-between gap-4 px-1">
+            <div className="min-w-0">
+              <h1 className="text-[clamp(1.65rem,2.5vw,2.25rem)] font-bold leading-tight tracking-[-0.025em]">
+                {t('friends.title')}
+              </h1>
+              <p className="mt-1 max-w-xl text-xs leading-relaxed text-muted">
+                {t('friends.subtitle')}
+              </p>
             </div>
-            <button
-              data-focusable
-              data-disabled={snapshot.isRefreshing ? 'true' : undefined}
-              disabled={snapshot.isRefreshing}
-              onClick={() => void refresh()}
-              aria-label={t('friends.refresh')}
-              className="flex h-11 w-11 items-center justify-center rounded-full border border-white/10 bg-white/[0.055] text-muted transition hover:bg-white/10 hover:text-white disabled:opacity-50"
-            >
-              <RefreshCw size={17} className={snapshot.isRefreshing ? 'animate-spin' : ''} />
-            </button>
-          </div>
-        </header>
 
-        <nav
-          aria-label={t('friends.filters.label')}
-          className="mt-7 flex flex-wrap items-center gap-2 rounded-[var(--radius-card)] border border-white/[0.08] bg-black/15 p-2"
-        >
-          {FILTERS.map((item) => {
-            const provider = item === 'all' ? null : item
-            const Icon = provider ? providerIcon[provider] : Globe2
-            const active = filter === item
-            return (
+            <div className="flex items-center gap-3">
+              <p className="text-xs font-medium tabular-nums text-muted">
+                {t('friends.summary', {
+                  online: onlineCount,
+                  count: snapshot.friends.length
+                })}
+              </p>
               <button
-                key={item}
                 data-focusable
-                data-view-entry={item === 'all' ? 'true' : undefined}
-                data-friends-filter={item}
-                aria-current={active ? 'page' : undefined}
-                onClick={() => setFilter(item)}
-                className={`relative flex min-h-11 items-center gap-2 rounded-[calc(var(--radius-card)*0.72)] px-4 py-2.5 text-sm font-bold transition ${
-                  active ? 'text-text' : 'text-muted hover:bg-white/[0.055] hover:text-text'
-                }`}
+                data-disabled={snapshot.isRefreshing ? 'true' : undefined}
+                disabled={snapshot.isRefreshing}
+                onClick={() => void refresh()}
+                aria-label={t('friends.refresh')}
+                className="flex h-11 w-11 items-center justify-center rounded-full border border-white/10 bg-white/[0.055] text-muted transition hover:bg-white/10 hover:text-white disabled:opacity-50"
               >
-                {active && (
-                  <motion.span
-                    layoutId="friends-filter-active"
-                    className="absolute inset-0 rounded-[inherit] border border-white/10 bg-white/10 shadow-card"
-                    transition={{ type: 'spring', stiffness: 420, damping: 34 }}
-                  />
-                )}
-                <Icon size={16} className="relative z-10" />
-                <span className="relative z-10">{t(`friends.filter.${item}`)}</span>
+                <RefreshCw size={17} className={snapshot.isRefreshing ? 'animate-spin' : ''} />
               </button>
-            )
-          })}
-          <span className="ml-auto hidden items-center gap-2 px-3 text-[10px] font-bold uppercase tracking-[0.16em] text-muted xl:flex">
-            {snapshot.isRefreshing && <Loader2 size={13} className="animate-spin text-accent" />}
-            {snapshot.isRefreshing ? t('friends.loading') : t('friends.filterHint')}
-          </span>
-        </nav>
+            </div>
+          </header>
 
-        <div className="mt-6 space-y-7">
-          {visibleProviders.map((provider) => {
-            const status = snapshot.providers[provider]
-            const friends = snapshot.friends.filter((friend) => friend.provider === provider)
-            return (
-              <ProviderSection
-                key={provider}
-                provider={provider}
-                status={status}
-                friends={friends}
-                initialized={initialized}
-                loginPending={
-                  provider === 'steam'
-                    ? steamLoginStatus.state === 'waiting-for-browser'
-                    : provider === 'epic'
-                      ? epicLoginStatus.state === 'waiting-for-browser'
-                      : false
-                }
-                handoffError={handoffError === provider}
-                onConnectSteam={() => void startSteamLogin()}
-                onConnectEpic={() => void startEpicLogin()}
-                onConnectDiscord={() => void runDiscordAction('connect')}
-                onDisconnectDiscord={() => void runDiscordAction('disconnect')}
-                onOpenProvider={() => void openProviderSafely(provider)}
-                onRetry={() => void refresh()}
-                t={t}
-                language={language}
-              />
-            )
-          })}
+          <nav
+            aria-label={t('friends.filters.label')}
+            className="mt-4 flex flex-wrap items-center gap-2 rounded-[var(--radius-card)] border border-white/[0.08] bg-black/15 p-2"
+          >
+            {FILTERS.map((item) => {
+              const provider = item === 'all' ? null : item
+              const Icon = provider ? providerIcon[provider] : Globe2
+              const active = filter === item
+              return (
+                <button
+                  key={item}
+                  data-focusable
+                  data-view-entry={item === 'all' ? 'true' : undefined}
+                  data-friends-filter={item}
+                  aria-current={active ? 'page' : undefined}
+                  onClick={() => setFilter(item)}
+                  className={`relative flex min-h-11 items-center gap-2 rounded-[calc(var(--radius-card)*0.72)] px-4 py-2.5 text-sm font-bold transition ${
+                    active ? 'text-text' : 'text-muted hover:bg-white/[0.055] hover:text-text'
+                  }`}
+                >
+                  {active && (
+                    <motion.span
+                      layoutId="friends-filter-active"
+                      className="absolute inset-0 rounded-[inherit] border border-white/10 bg-white/10 shadow-card"
+                      transition={{ type: 'spring', stiffness: 420, damping: 34 }}
+                    />
+                  )}
+                  <Icon size={16} className="relative z-10" />
+                  <span className="relative z-10">{t(`friends.filter.${item}`)}</span>
+                </button>
+              )
+            })}
+            <span className="ml-auto hidden items-center gap-2 px-3 text-[10px] font-bold uppercase tracking-[0.16em] text-muted xl:flex">
+              {snapshot.isRefreshing && (
+                <Loader2 size={13} className="animate-spin text-accent" />
+              )}
+              {snapshot.isRefreshing ? t('friends.loading') : t('friends.filterHint')}
+            </span>
+          </nav>
+
+          <div className="mt-6 space-y-7">
+            {visibleProviders.map((provider) => {
+              const status = snapshot.providers[provider]
+              const friends = snapshot.friends.filter((friend) => friend.provider === provider)
+              return (
+                <ProviderSection
+                  key={provider}
+                  provider={provider}
+                  status={status}
+                  friends={friends}
+                  initialized={initialized}
+                  loginPending={
+                    provider === 'steam'
+                      ? steamLoginStatus.state === 'waiting-for-browser'
+                      : provider === 'epic'
+                        ? epicLoginStatus.state === 'waiting-for-browser'
+                        : false
+                  }
+                  handoffError={handoffError === provider}
+                  onConnectSteam={() => void startSteamLogin()}
+                  onConnectEpic={() => void startEpicLogin()}
+                  onConnectDiscord={() => void runDiscordAction('connect')}
+                  onDisconnectDiscord={() => void runDiscordAction('disconnect')}
+                  onOpenProvider={() => void openProviderSafely(provider)}
+                  onRetry={() => void refresh()}
+                  onMessageFriend={(friend) => {
+                    setChatFriend(friend)
+                    setChatOpen(true)
+                  }}
+                  onOpenInbox={() => {
+                    setChatFriend(null)
+                    setChatOpen(true)
+                  }}
+                  unreadByUser={unreadByUser}
+                  unreadCount={unreadCount}
+                  t={t}
+                  language={language}
+                />
+              )
+            })}
+          </div>
         </div>
       </div>
-    </div>
+      <AnimatePresence>
+        {chatOpen && (
+          <DiscordChatPanel
+            key="discord-inbox"
+            friend={chatFriend ?? undefined}
+            language={language}
+            onClose={() => {
+              setChatOpen(false)
+              setChatFriend(null)
+            }}
+            onOpenDiscord={() => openProviderSafely('discord')}
+          />
+        )}
+      </AnimatePresence>
+    </>
   )
 }
 
@@ -249,6 +318,10 @@ function ProviderSection({
   onDisconnectDiscord,
   onOpenProvider,
   onRetry,
+  onMessageFriend,
+  onOpenInbox,
+  unreadByUser,
+  unreadCount,
   t,
   language
 }: {
@@ -264,6 +337,10 @@ function ProviderSection({
   onDisconnectDiscord: () => void
   onOpenProvider: () => void
   onRetry: () => void
+  onMessageFriend: (friend: OrbitFriend) => void
+  onOpenInbox: () => void
+  unreadByUser: Record<string, number>
+  unreadCount: number
   t: TFunction
   language: 'en' | 'de'
 }): JSX.Element {
@@ -290,15 +367,31 @@ function ProviderSection({
         {status.state === 'ready' && (
           <div className="ml-auto flex items-center gap-2">
             {provider === 'discord' && (
-              <button
-                data-focusable
-                type="button"
-                onClick={onDisconnectDiscord}
-                className="flex min-h-9 items-center gap-2 rounded-full border border-white/10 bg-white/[0.045] px-3 text-[10px] font-black uppercase tracking-[0.12em] text-muted transition hover:bg-white/10 hover:text-white"
-              >
-                <LogOut size={13} />
-                {t('friends.discord.disconnect')}
-              </button>
+              <>
+                <button
+                  data-focusable
+                  type="button"
+                  onClick={onOpenInbox}
+                  className="relative flex min-h-9 items-center gap-2 rounded-full border border-[#7d86ff]/25 bg-[#5865f2]/12 px-3 text-[10px] font-black uppercase tracking-[0.12em] text-[#b8bdff] transition hover:bg-[#5865f2]/20 hover:text-white"
+                >
+                  <Inbox size={13} />
+                  {t('friends.chat.inbox')}
+                  {unreadCount > 0 && (
+                    <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-[#5865f2] px-1 text-[9px] text-white">
+                      {unreadCount > 9 ? '9+' : unreadCount}
+                    </span>
+                  )}
+                </button>
+                <button
+                  data-focusable
+                  type="button"
+                  onClick={onDisconnectDiscord}
+                  className="flex min-h-9 items-center gap-2 rounded-full border border-white/10 bg-white/[0.045] px-3 text-[10px] font-black uppercase tracking-[0.12em] text-muted transition hover:bg-white/10 hover:text-white"
+                >
+                  <LogOut size={13} />
+                  {t('friends.discord.disconnect')}
+                </button>
+              </>
             )}
             <span className="rounded-full border border-emerald-300/20 bg-emerald-300/10 px-3 py-1 text-[10px] font-black uppercase tracking-[0.14em] text-emerald-200">
               {t('friends.provider.live')}
@@ -310,7 +403,14 @@ function ProviderSection({
       {onlineFriends.length > 0 && (
         <div className="friends-grid grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
           {onlineFriends.map((friend) => (
-            <FriendCard key={friend.id} friend={friend} t={t} language={language} />
+            <FriendCard
+              key={friend.id}
+              friend={friend}
+              t={t}
+              language={language}
+              onMessage={onMessageFriend}
+              unread={friend.provider === 'discord' ? unreadByUser[friend.providerUserId] ?? 0 : 0}
+            />
           ))}
         </div>
       )}
@@ -339,7 +439,14 @@ function ProviderSection({
           {offlineExpanded && (
             <div className="friends-grid mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
               {offlineFriends.map((friend) => (
-                <FriendCard key={friend.id} friend={friend} t={t} language={language} />
+                <FriendCard
+                  key={friend.id}
+                  friend={friend}
+                  t={t}
+                  language={language}
+                  onMessage={onMessageFriend}
+                  unread={friend.provider === 'discord' ? unreadByUser[friend.providerUserId] ?? 0 : 0}
+                />
               ))}
             </div>
           )}
@@ -507,11 +614,15 @@ function ProviderStateCard({
 function FriendCard({
   friend,
   t,
-  language
+  language,
+  onMessage,
+  unread
 }: {
   friend: OrbitFriend
   t: TFunction
   language: 'en' | 'de'
+  onMessage: (friend: OrbitFriend) => void
+  unread: number
 }): JSX.Element {
   const ProviderIcon = providerIcon[friend.provider]
   const [avatarFailed, setAvatarFailed] = useState(false)
@@ -525,18 +636,32 @@ function FriendCard({
           }).format(new Date(friend.lastSeenAt))
         })
       : t(`friends.presence.${friend.presence}`)
+  const canOpen = friend.provider === 'discord' || Boolean(friend.profileUrl)
 
   return (
     <motion.button
       data-focusable
-      data-disabled={!friend.profileUrl ? 'true' : undefined}
-      disabled={!friend.profileUrl}
-      onClick={() => friend.profileUrl && void window.api.app.openExternal(friend.profileUrl)}
+      data-disabled={!canOpen ? 'true' : undefined}
+      disabled={!canOpen}
+      onClick={() => {
+        if (friend.provider === 'discord') onMessage(friend)
+        else if (friend.profileUrl) void window.api.app.openExternal(friend.profileUrl)
+      }}
+      aria-label={
+        friend.provider === 'discord'
+          ? t('friends.chat.open', { name: friend.displayName })
+          : undefined
+      }
       whileHover={{ y: -2 }}
       whileTap={{ scale: 0.985 }}
       transition={{ duration: 0.14 }}
       className="friend-card group relative flex min-h-24 items-center gap-4 overflow-hidden rounded-[var(--radius-card)] border border-white/[0.09] bg-surface/80 p-4 text-left shadow-card disabled:cursor-default"
     >
+      {unread > 0 && (
+        <span className="absolute right-3 top-3 z-20 flex h-5 min-w-5 items-center justify-center rounded-full bg-[#5865f2] px-1 text-[9px] font-black text-white shadow-lg">
+          {unread > 9 ? '9+' : unread}
+        </span>
+      )}
       <span className="relative flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-2xl bg-white/10 text-base font-black text-white/70">
         {friend.avatarUrl && !avatarFailed ? (
           <img
@@ -562,12 +687,18 @@ function FriendCard({
           <ProviderIcon size={11} /> {t(`friends.filter.${friend.provider}`)}
         </span>
       </span>
-      {friend.profileUrl && (
-        <ExternalLink
-          size={15}
-          className="shrink-0 text-white/20 transition group-hover:text-accent group-data-[focused=true]:text-accent"
-        />
-      )}
+      {canOpen &&
+        (friend.provider === 'discord' ? (
+          <MessageCircle
+            size={16}
+            className="shrink-0 text-white/25 transition group-hover:text-[#9fa6ff] group-data-[focused=true]:text-[#9fa6ff]"
+          />
+        ) : (
+          <ExternalLink
+            size={15}
+            className="shrink-0 text-white/20 transition group-hover:text-accent group-data-[focused=true]:text-accent"
+          />
+        ))}
     </motion.button>
   )
 }

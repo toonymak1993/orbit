@@ -35,9 +35,11 @@ import type {
 } from '@shared/ipc'
 import { latestLibraryActivity } from '@shared/libraryTime'
 import { FocusableButton } from '@renderer/components/FocusableButton'
+import { DiscordMark } from '@renderer/components/DiscordMark'
 import { GameImage } from '@renderer/components/GameImage'
 import { HardwareControlPanel } from '@renderer/components/HardwareControlPanel'
 import { OrbitBackgroundServicePanel } from '@renderer/components/OrbitBackgroundServicePanel'
+import { OrbitWallpaperPanel } from '@renderer/components/OrbitWallpaperPanel'
 import { ProfileAvatarPicker } from '@renderer/components/ProfileAvatar'
 import { useAutoFocus } from '@renderer/hooks/useAutoFocus'
 import { useBackHandler } from '@renderer/hooks/useBackHandler'
@@ -47,6 +49,7 @@ import { focusElement } from '@renderer/lib/spatialNavigation'
 import { useAuthStore } from '@renderer/state/authStore'
 import { useEpicAuthStore } from '@renderer/state/epicAuthStore'
 import { useLibraryStore } from '@renderer/state/libraryStore'
+import { usePlayStationStore } from '@renderer/state/playstationStore'
 import {
   LANGUAGE_OPTIONS,
   BACKDROP_INTENSITY_OPTIONS,
@@ -89,7 +92,8 @@ const THEME_SWATCH: Record<ThemeId, string> = {
 const HOME_LAYOUT_SHORT_KEYS: Record<HomeLayoutId, TranslationKey> = {
   orbit: 'settings.homeLayout.orbitShort',
   float: 'settings.homeLayout.floatShort',
-  coresense: 'settings.homeLayout.coresenseShort'
+  coresense: 'settings.homeLayout.coresenseShort',
+  xmode: 'settings.homeLayout.xmodeShort'
 }
 
 const AUDIO_OPTIONS: Array<{ id: AudioPreset; labelKey: TranslationKey }> = [
@@ -183,6 +187,9 @@ export function OnboardingSuccess({
   const epicAccount = useEpicAuthStore((state) => state.account)
   const epicStatus = useEpicAuthStore((state) => state.status)
   const startEpicLogin = useEpicAuthStore((state) => state.startLogin)
+  const playStationAccount = usePlayStationStore((state) => state.account)
+  const playStationStatus = usePlayStationStore((state) => state.status)
+  const startPlayStationLogin = usePlayStationStore((state) => state.startLogin)
   const snapshot = useLibraryStore((state) => state.snapshot)
   const refreshLibrary = useLibraryStore((state) => state.refresh)
   const syncStatus = useSyncStore((state) => state.status)
@@ -207,7 +214,7 @@ export function OnboardingSuccess({
     setAudioPreset
   } = usePreferencesStore()
 
-  const accountSignature = `${account?.steamId ?? ''}:${epicAccount?.accountId ?? ''}`
+  const accountSignature = `${account?.steamId ?? ''}:${epicAccount?.accountId ?? ''}:${playStationAccount?.accountId ?? ''}`
   const previousAccountSignature = useRef(accountSignature)
   const pageIndex = PAGE_ORDER.indexOf(page)
   const xboxGames = snapshot.providerGames.filter((game) => game.provider === 'xbox')
@@ -216,6 +223,10 @@ export function OnboardingSuccess({
   const steamInstalled = steamGames.filter((game) => game.installed).length
   const epicGames = snapshot.providerGames.filter((game) => game.provider === 'epic')
   const epicInstalled = epicGames.filter((game) => game.installed).length
+  const playStationGames = snapshot.providerGames.filter(
+    (game) => game.provider === 'playstation'
+  )
+  const playStationInstalled = playStationGames.filter((game) => game.installed).length
 
   const backgroundGames = useMemo(
     () =>
@@ -362,7 +373,8 @@ export function OnboardingSuccess({
   })
 
   const activeBackground = backgroundGames[backgroundIndex]
-  const displayName = account?.accountName ?? epicAccount?.displayName
+  const displayName =
+    account?.accountName ?? epicAccount?.displayName ?? playStationAccount?.onlineId
 
   return (
     <div ref={containerRef} className="onboarding-setup relative h-full overflow-hidden bg-base">
@@ -469,6 +481,10 @@ export function OnboardingSuccess({
                   epicState={epicStatus.state}
                   epicGameCount={epicGames.length}
                   epicInstalledCount={epicInstalled}
+                  playStationConnectedName={playStationAccount?.onlineId}
+                  playStationState={playStationStatus.state}
+                  playStationGameCount={playStationGames.length}
+                  playStationInstalledCount={playStationInstalled}
                   xboxGameCount={xboxGames.length}
                   xboxInstalledCount={xboxInstalled}
                   syncStatus={syncStatus.pipelines}
@@ -478,6 +494,7 @@ export function OnboardingSuccess({
                   achievementsUnlocked={stats.achievementsUnlocked}
                   onConnectSteam={() => void startSteamLogin()}
                   onConnectEpic={() => void startEpicLogin()}
+                  onConnectPlayStation={() => void startPlayStationLogin()}
                 />
               )}
 
@@ -588,6 +605,14 @@ interface LibrariesPageProps {
   epicState: 'idle' | 'waiting-for-browser' | 'success' | 'error'
   epicGameCount: number
   epicInstalledCount: number
+  playStationConnectedName?: string
+  playStationState:
+    | 'idle'
+    | 'waiting-for-browser'
+    | 'success'
+    | 'error'
+  playStationGameCount: number
+  playStationInstalledCount: number
   xboxGameCount: number
   xboxInstalledCount: number
   syncStatus: Record<string, SyncPipelineProgress>
@@ -597,6 +622,7 @@ interface LibrariesPageProps {
   achievementsUnlocked: number
   onConnectSteam: () => void
   onConnectEpic: () => void
+  onConnectPlayStation: () => void
 }
 
 function LibrariesPage({
@@ -608,6 +634,10 @@ function LibrariesPage({
   epicState,
   epicGameCount,
   epicInstalledCount,
+  playStationConnectedName,
+  playStationState,
+  playStationGameCount,
+  playStationInstalledCount,
   xboxGameCount,
   xboxInstalledCount,
   syncStatus,
@@ -616,7 +646,8 @@ function LibrariesPage({
   installedCount,
   achievementsUnlocked,
   onConnectSteam,
-  onConnectEpic
+  onConnectEpic,
+  onConnectPlayStation
 }: LibrariesPageProps): JSX.Element {
   const t = useT()
   return (
@@ -633,7 +664,7 @@ function LibrariesPage({
         </p>
       </div>
 
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
         <ProviderCard
           mark="S"
           name="Steam"
@@ -664,6 +695,21 @@ function LibrariesPage({
               : undefined
           }
           onConnect={onConnectEpic}
+        />
+        <ProviderCard
+          mark="P"
+          name="PlayStation"
+          connectedName={playStationConnectedName}
+          state={playStationState}
+          detail={
+            playStationGameCount > 0
+              ? t('onboarding.setup.providerGames', {
+                  count: playStationGameCount,
+                  installed: playStationInstalledCount
+                })
+              : undefined
+          }
+          onConnect={onConnectPlayStation}
         />
         <ProviderCard
           mark="X"
@@ -745,7 +791,11 @@ function ProviderCard({
   mark: string
   name: string
   connectedName?: string
-  state: 'idle' | 'waiting-for-browser' | 'success' | 'error'
+  state:
+    | 'idle'
+    | 'waiting-for-browser'
+    | 'success'
+    | 'error'
   detail?: string
   onConnect?: () => void
   primary?: boolean
@@ -876,7 +926,7 @@ function PersonalizePage({
           </SetupPanel>
 
           <SetupPanel icon={<LayoutTemplate size={16} />} title={t('settings.homeLayout.title')}>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
               {HOME_LAYOUT_OPTIONS.map((option) => {
                 const active = homeLayout === option.id
                 return (
@@ -1035,6 +1085,13 @@ function PersonalizePage({
             />
           </SetupPanel>
 
+          <SetupPanel
+            icon={<ImageIcon size={16} />}
+            title={t('onboarding.setup.wallpaperTitle')}
+          >
+            <OrbitWallpaperPanel compact />
+          </SetupPanel>
+
           <SetupPanel icon={<Volume2 size={16} />} title={t('settings.audio.title')}>
             <p className="mb-3 text-xs text-white/40">
               {t('onboarding.setup.audioPreviewBody')}
@@ -1113,7 +1170,43 @@ function HomePreview({
           <span>Store</span>
           <span>Settings</span>
         </div>
-        {homeLayout === 'coresense' ? (
+        {homeLayout === 'xmode' ? (
+          <div className="mt-[3.5%] flex h-[74%] flex-col gap-[5%]">
+            <div className="mx-auto h-[12%] w-[58%] rounded-full border border-white/10 bg-black/35" />
+            <div
+              className={`grid items-start ${uiDensity === 'compact' ? 'gap-1' : 'gap-1.5'}`}
+              style={{ gridTemplateColumns: `repeat(${cardCount}, minmax(0, 1fr)) minmax(0, 1.3fr)` }}
+            >
+              {Array.from({ length: cardCount }, (_, index) => {
+                const game = cards[index]
+                return (
+                  <div
+                    key={game?.id ?? index}
+                    className={`aspect-square overflow-hidden rounded-[calc(var(--radius-card)*0.45)] border ${
+                      index === 0 ? 'border-accent shadow-glow' : 'border-white/10'
+                    } bg-surface-2`}
+                  >
+                    {game && (
+                      <GameImage
+                        gameId={game.id}
+                        name={game.name}
+                        orientation="vertical"
+                        previewUrl={game.metadata.artwork?.vertical?.[0]}
+                        fit="cover"
+                        className="h-full w-full object-cover"
+                      />
+                    )}
+                  </div>
+                )
+              })}
+              <div className="h-full rounded-[calc(var(--radius-card)*0.45)] border border-white/10 bg-white/[0.08]" />
+            </div>
+            <div className="grid min-h-0 flex-1 grid-cols-2 gap-2">
+              <div className="rounded-[calc(var(--radius-card)*0.55)] border border-white/10 bg-gradient-to-r from-accent/25 to-black/25" />
+              <div className="rounded-[calc(var(--radius-card)*0.55)] border border-white/10 bg-gradient-to-r from-black/25 to-accent-2/20" />
+            </div>
+          </div>
+        ) : homeLayout === 'coresense' ? (
           <div className="mt-[4%] flex h-[72%] flex-col justify-between">
             <div
               className={`grid items-start ${uiDensity === 'compact' ? 'gap-1.5' : 'gap-2'}`}
@@ -1373,21 +1466,6 @@ function ReadyPage({
           </p>
       </section>
     </div>
-  )
-}
-
-function DiscordMark({ size }: { size: number }): JSX.Element {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="currentColor"
-      focusable="false"
-      aria-hidden="true"
-    >
-      <path d="M19.54 5.34A16.3 16.3 0 0 0 15.44 4l-.5 1.02a15.2 15.2 0 0 0-5.87 0L8.56 4a16.4 16.4 0 0 0-4.1 1.35C1.87 9.2 1.17 12.96 1.52 16.67a16.5 16.5 0 0 0 5.03 2.54l1.24-1.7a12.4 12.4 0 0 1-1.94-.96l.48-.37c3.74 1.74 7.8 1.74 11.5 0l.49.37c-.62.4-1.27.72-1.95.97l1.24 1.7a16.5 16.5 0 0 0 5.03-2.54c.41-4.3-.7-8.03-3.1-11.33ZM8.5 14.5c-1.12 0-2.04-1.03-2.04-2.3 0-1.27.9-2.3 2.04-2.3 1.15 0 2.06 1.04 2.04 2.3 0 1.27-.9 2.3-2.04 2.3Zm7 0c-1.12 0-2.04-1.03-2.04-2.3 0-1.27.9-2.3 2.04-2.3 1.15 0 2.06 1.04 2.04 2.3 0 1.27-.89 2.3-2.04 2.3Z" />
-    </svg>
   )
 }
 

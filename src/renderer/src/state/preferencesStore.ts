@@ -3,6 +3,9 @@ import {
   LIBRARY_GRID_COLUMN_OPTIONS,
   type AudioPreset,
   type BackdropIntensity,
+  type DockMotion,
+  type DockSize,
+  type DockThemeId,
   type GameCardSize,
   type HomeLayoutId,
   type HardwareControlButton,
@@ -11,11 +14,18 @@ import {
   type NotificationMotion,
   type NotificationPosition,
   type ProfileAvatarId,
+  type StartupAnimationMode,
   type ThemeId,
   type UiDensity,
   type Language
 } from '@shared/ipc'
 import { setUiAudioPreset } from '@renderer/lib/uiAudio'
+import {
+  cacheStartupAnimationMode,
+  cacheStartupVideoUrl,
+  hasCustomStartupVideoFailed,
+  readCachedStartupAnimationMode
+} from '@renderer/lib/startupAnimationPreference'
 
 interface PreferencesState {
   theme: ThemeId
@@ -26,10 +36,16 @@ interface PreferencesState {
   libraryGridColumns: LibraryGridColumns
   backdropIntensity: BackdropIntensity
   homeCardBubbleEffect: boolean
+  startupAnimationMode: StartupAnimationMode
+  customStartupVideoUrl?: string
+  dockTheme: DockThemeId
+  dockSize: DockSize
+  dockMotion: DockMotion
   uiDensity: UiDensity
   language: Language
   audioPreset: AudioPreset
   showStoreTab: boolean
+  showFriendsHub: boolean
   showHomeBanners: boolean
   showAchievements: boolean
   closeLaunchersAfterGame: boolean
@@ -49,10 +65,16 @@ interface PreferencesState {
   setLibraryGridColumns: (libraryGridColumns: LibraryGridColumns) => Promise<void>
   setBackdropIntensity: (backdropIntensity: BackdropIntensity) => Promise<void>
   setHomeCardBubbleEffect: (enabled: boolean) => Promise<void>
+  setStartupAnimationMode: (mode: StartupAnimationMode) => Promise<boolean>
+  selectCustomStartupVideo: () => Promise<boolean>
+  setDockTheme: (dockTheme: DockThemeId) => Promise<void>
+  setDockSize: (dockSize: DockSize) => Promise<void>
+  setDockMotion: (dockMotion: DockMotion) => Promise<void>
   setDensity: (density: UiDensity) => Promise<void>
   setLanguage: (language: Language) => Promise<void>
   setAudioPreset: (audioPreset: AudioPreset) => Promise<void>
   setShowStoreTab: (visible: boolean) => Promise<void>
+  setShowFriendsHub: (visible: boolean) => Promise<void>
   setShowHomeBanners: (visible: boolean) => Promise<void>
   setShowAchievements: (visible: boolean) => Promise<void>
   setCloseLaunchersAfterGame: (enabled: boolean) => Promise<void>
@@ -83,7 +105,8 @@ export const THEME_OPTIONS: { id: ThemeId; label: string }[] = [
 export const HOME_LAYOUT_OPTIONS: { id: HomeLayoutId; label: string }[] = [
   { id: 'orbit', label: 'ORBIT' },
   { id: 'float', label: 'FLOAT' },
-  { id: 'coresense', label: 'CoreSense' }
+  { id: 'coresense', label: 'CoreSense' },
+  { id: 'xmode', label: 'XMODE' }
 ]
 
 export const GAME_CARD_SIZE_OPTIONS: GameCardSize[] = ['compact', 'standard', 'large']
@@ -127,10 +150,16 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
   libraryGridColumns: 6,
   backdropIntensity: 'balanced',
   homeCardBubbleEffect: true,
+  startupAnimationMode: readCachedStartupAnimationMode(),
+  customStartupVideoUrl: undefined,
+  dockTheme: 'standard',
+  dockSize: 'standard',
+  dockMotion: 'standard',
   uiDensity: 'standard',
   language: 'en',
   audioPreset: 'orbit',
   showStoreTab: true,
+  showFriendsHub: true,
   showHomeBanners: true,
   showAchievements: true,
   closeLaunchersAfterGame: false,
@@ -143,9 +172,10 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
   hydrated: false,
 
   hydrate: async () => {
-    const [settings, customAvatarUrl] = await Promise.all([
+    const [settings, customAvatarUrl, customStartupVideoUrl] = await Promise.all([
       window.api.settings.get(),
-      window.api.profileAvatar.getCustom()
+      window.api.profileAvatar.getCustom(),
+      window.api.startupVideo.get()
     ])
     const homeLayout = settings.homeLayout ?? 'orbit'
     const gameCardSize = settings.gameCardSize ?? 'standard'
@@ -154,6 +184,17 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
       : 6
     const backdropIntensity = settings.backdropIntensity ?? 'balanced'
     const homeCardBubbleEffect = settings.homeCardBubbleEffect ?? true
+    const requestedStartupAnimationMode = settings.startupAnimationMode ?? 'orbit'
+    const startupAnimationMode =
+      requestedStartupAnimationMode === 'custom' &&
+      (!customStartupVideoUrl || hasCustomStartupVideoFailed())
+        ? 'orbit'
+        : requestedStartupAnimationMode
+    cacheStartupAnimationMode(startupAnimationMode)
+    cacheStartupVideoUrl(customStartupVideoUrl ?? undefined)
+    if (startupAnimationMode !== requestedStartupAnimationMode) {
+      void window.api.settings.set({ startupAnimationMode })
+    }
     document.documentElement.lang = settings.language
     applyDomAttributes(
       settings.theme,
@@ -176,10 +217,16 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
       libraryGridColumns,
       backdropIntensity,
       homeCardBubbleEffect,
+      startupAnimationMode,
+      customStartupVideoUrl: customStartupVideoUrl ?? undefined,
+      dockTheme: settings.dockTheme ?? 'standard',
+      dockSize: settings.dockSize ?? 'standard',
+      dockMotion: settings.dockMotion ?? 'standard',
       uiDensity: settings.uiDensity,
       language: settings.language,
       audioPreset: settings.audioPreset,
       showStoreTab: settings.showStoreTab,
+      showFriendsHub: settings.showFriendsHub ?? true,
       showHomeBanners: homeLayout === 'orbit' ? settings.showHomeBanners : false,
       showAchievements: settings.showAchievements,
       closeLaunchersAfterGame: settings.closeLaunchersAfterGame ?? false,
@@ -267,6 +314,41 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
     await window.api.settings.set({ homeCardBubbleEffect })
   },
 
+  setStartupAnimationMode: async (startupAnimationMode) => {
+    if (startupAnimationMode === 'custom' && !get().customStartupVideoUrl) {
+      return get().selectCustomStartupVideo()
+    }
+    cacheStartupAnimationMode(startupAnimationMode)
+    set({ startupAnimationMode })
+    await window.api.settings.set({ startupAnimationMode })
+    return true
+  },
+
+  selectCustomStartupVideo: async () => {
+    const customStartupVideoUrl = await window.api.startupVideo.select()
+    if (!customStartupVideoUrl) return false
+    cacheStartupVideoUrl(customStartupVideoUrl)
+    cacheStartupAnimationMode('custom')
+    set({ customStartupVideoUrl, startupAnimationMode: 'custom' })
+    await window.api.settings.set({ startupAnimationMode: 'custom' })
+    return true
+  },
+
+  setDockTheme: async (dockTheme) => {
+    set({ dockTheme })
+    await window.api.settings.set({ dockTheme })
+  },
+
+  setDockSize: async (dockSize) => {
+    set({ dockSize })
+    await window.api.settings.set({ dockSize })
+  },
+
+  setDockMotion: async (dockMotion) => {
+    set({ dockMotion })
+    await window.api.settings.set({ dockMotion })
+  },
+
   setDensity: async (uiDensity) => {
     applyDomAttributes(
       get().theme,
@@ -294,6 +376,11 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
   setShowStoreTab: async (showStoreTab) => {
     set({ showStoreTab })
     await window.api.settings.set({ showStoreTab })
+  },
+
+  setShowFriendsHub: async (showFriendsHub) => {
+    set({ showFriendsHub })
+    await window.api.settings.set({ showFriendsHub })
   },
 
   setShowHomeBanners: async (showHomeBanners) => {

@@ -134,18 +134,69 @@ export function GameImage({
   if (displayed === null) {
     return (
       <div
-        className={`flex items-center justify-center bg-gradient-to-br text-lg font-bold text-black/70 ${gradientFor(name)} ${className}`}
+        className={`relative isolate flex items-end overflow-hidden bg-[#090d13] p-[10%] text-white ${className}`}
       >
-        {name.charAt(0).toUpperCase()}
+        {orientation === 'horizontal' ? (
+          <span
+            aria-hidden="true"
+            className="absolute inset-0 bg-[radial-gradient(circle_at_70%_28%,rgba(255,255,255,0.09),transparent_42%)]"
+          />
+        ) : (
+          <span
+            aria-hidden="true"
+            className={`absolute inset-0 bg-gradient-to-br opacity-35 ${gradientFor(name)}`}
+          />
+        )}
+        <span
+          aria-hidden="true"
+          className="absolute -right-[22%] -top-[8%] h-[72%] w-[72%] rounded-full border border-white/20 shadow-[0_0_80px_rgba(255,255,255,0.08)]"
+        />
+        <span
+          aria-hidden="true"
+          className="absolute -right-[5%] top-[18%] h-px w-[75%] -rotate-[28deg] bg-white/30"
+        />
+        <span className="relative z-10 line-clamp-3 text-[clamp(0.7rem,1.15vw,1rem)] font-bold leading-tight drop-shadow-lg">
+          {name}
+        </span>
       </div>
     )
   }
 
   if (displayed.contain && fit !== 'cover') {
+    if (orientation === 'icon') {
+      return (
+        <div
+          className={`flex items-center justify-center bg-gradient-to-br p-2 ${gradientFor(name)} ${className}`}
+        >
+          <img
+            key={displayed.revision}
+            src={displayed.url}
+            alt=""
+            draggable={false}
+            loading="lazy"
+            decoding="async"
+            onError={reportResolvedFailure}
+            className="max-h-[88%] max-w-[88%] object-contain drop-shadow-lg"
+          />
+        </div>
+      )
+    }
+
     return (
-      <div
-        className={`flex items-center justify-center bg-gradient-to-br ${orientation === 'icon' ? 'p-2' : 'p-6'} ${gradientFor(name)} ${className}`}
-      >
+      <div className={`relative isolate overflow-hidden bg-[#080b10] ${className}`}>
+        <img
+          src={displayed.url}
+          alt=""
+          aria-hidden="true"
+          draggable={false}
+          loading="lazy"
+          decoding="async"
+          className="absolute inset-0 h-full w-full scale-110 object-cover opacity-35 blur-lg saturate-75"
+        />
+        <span
+          aria-hidden="true"
+          className="absolute inset-0 bg-[linear-gradient(180deg,rgba(3,6,11,0.2),rgba(3,6,11,0.58))]"
+        />
         <img
           key={displayed.revision}
           src={displayed.url}
@@ -154,7 +205,7 @@ export function GameImage({
           loading={orientation === 'horizontal' ? 'eager' : 'lazy'}
           decoding="async"
           onError={reportResolvedFailure}
-          className={`${orientation === 'icon' ? 'max-h-[88%] max-w-[88%]' : 'max-h-[45%] max-w-[70%]'} object-contain drop-shadow-lg`}
+          className="relative z-10 h-full w-full object-contain p-[4%] drop-shadow-[0_12px_24px_rgba(0,0,0,0.5)]"
         />
       </div>
     )

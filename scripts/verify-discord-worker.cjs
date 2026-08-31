@@ -28,6 +28,8 @@ app.whenReady().then(() => {
   let ready = false
   let probed = false
   let refreshed = false
+  let chatContract = false
+  let inboxContract = false
 
   child.stderr?.on('data', (chunk) => fail(`Discord utility worker stderr: ${chunk}`))
   child.on('message', (message) => {
@@ -44,6 +46,20 @@ app.whenReady().then(() => {
         command: 'refresh',
         applicationId: '1526906410359848990'
       })
+      child.postMessage({
+        type: 'request',
+        id: 4,
+        command: 'chat-history',
+        applicationId: '1526906410359848990',
+        recipientId: '1526906410359848991',
+        limit: 50
+      })
+      child.postMessage({
+        type: 'request',
+        id: 5,
+        command: 'chat-inbox',
+        applicationId: '1526906410359848990'
+      })
       return
     }
     if (message?.type !== 'response') return
@@ -53,7 +69,21 @@ app.whenReady().then(() => {
     if (message.id === 2) {
       refreshed = message.ok === true && message.snapshot?.state === 'not-connected'
     }
-    if (ready && probed && refreshed) {
+    if (message.id === 4) {
+      chatContract =
+        message.ok === true &&
+        message.chatHistory?.state === 'unavailable' &&
+        message.chatHistory?.messages?.length === 0 &&
+        message.clearTokens === true
+    }
+    if (message.id === 5) {
+      inboxContract =
+        message.ok === true &&
+        message.chatInbox?.state === 'unavailable' &&
+        message.chatInbox?.conversations?.length === 0 &&
+        message.clearTokens === true
+    }
+    if (ready && probed && refreshed && chatContract && inboxContract) {
       child.postMessage({ type: 'request', id: 3, command: 'dispose' })
     }
     if (message.id === 3 && message.ok === true) {

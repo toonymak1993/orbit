@@ -1,5 +1,6 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { EventEmitter } from 'node:events'
+import { win32 as path } from 'node:path'
 import { createInterface, type Interface as ReadlineInterface } from 'node:readline'
 import type { BrowserWindow } from 'electron'
 import {
@@ -15,7 +16,9 @@ import {
   GAME_PROCESS_CANDIDATE_STABILITY_MS,
   LaunchStartupTracker,
   ancestryIncludesTrackedPid,
-  hasEligibleGameProcessIdentity
+  hasEligibleGameProcessIdentity,
+  provisionalHandoffGraceMs,
+  windowsPackageIdentityMatches
 } from './gameLaunchDetectionPolicy'
 import { settingsStore } from './settingsStore'
 
@@ -25,6 +28,7 @@ interface WindowsProcess {
   Name?: string
   ExecutablePath?: string
   CommandLine?: string
+  StartedAt?: number
   MainWindowHandle?: number
   MainWindowTitle?: string
 }
@@ -81,7 +85,7 @@ const SNAPSHOT_TIMEOUT_MS = 2_000
 const PROCESS_STALL_TIMEOUT_MS = 6_000
 const BASELINE_TIMEOUT_MS = 3_000
 const GAME_CONFIRMATION_MS = 4_000
-const EARLY_SESSION_WINDOW_MS = 20_000
+const EARLY_SESSION_WINDOW_MS = 45_000
 const EARLY_HANDOFF_GRACE_MS = 6_000
 const PROCESS_EXIT_GRACE_MS = 1_200
 const LAUNCH_SHIELD_TIMEOUT_MS = 10_000
@@ -109,6 +113,8 @@ const EXPECTED_LAUNCHER_FAMILIES: Record<GameProvider, ReadonlySet<LauncherFamil
   epic: new Set(['epic', 'ea', 'ubisoft', 'rockstar', '2k']),
   gog: new Set(['gog']),
   xbox: new Set(['xbox', 'ea', 'ubisoft']),
+  playstation: new Set<LauncherFamily>(),
+  retro: new Set<LauncherFamily>(),
   ea: new Set(['ea']),
   ubisoft: new Set(['ubisoft'])
 }
@@ -210,16 +216,29 @@ const PROCESS_SNAPSHOT_SCRIPT = `
 $ErrorActionPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $metadata = @{}
-  $windowState = @{}
+$windowState = @{}
+
+function New-FallbackMetadata($entry) {
+  $fallbackName = if ([string]$entry.ProcessName -match '\.exe$') { [string]$entry.ProcessName } else { "$($entry.ProcessName).exe" }
+  [pscustomobject]@{
+    ParentProcessId = 0
+    Name = $fallbackName
+    ExecutablePath = if ($entry.Path) { [string]$entry.Path } else { '' }
+    CommandLine = ''
+  }
+}
 
 function New-ProcessRow($entry, $details) {
   $fallbackName = if ([string]$entry.ProcessName -match '\.exe$') { [string]$entry.ProcessName } else { "$($entry.ProcessName).exe" }
+  $startedAt = 0
+  try { $startedAt = [DateTimeOffset]::new([datetime]$entry.StartTime).ToUnixTimeMilliseconds() } catch {}
   [pscustomobject]@{
     ProcessId = [int]$entry.Id
     ParentProcessId = if ($null -ne $details) { [int]$details.ParentProcessId } else { 0 }
     Name = if ($null -ne $details -and $details.Name) { [string]$details.Name } else { $fallbackName }
     ExecutablePath = if ($entry.Path) { [string]$entry.Path } elseif ($null -ne $details) { [string]$details.ExecutablePath } else { '' }
     CommandLine = if ($null -ne $details) { [string]$details.CommandLine } else { '' }
+    StartedAt = [int64]$startedAt
     MainWindowHandle = [int64]$entry.MainWindowHandle
     MainWindowTitle = [string]$entry.MainWindowTitle
   }
@@ -232,6 +251,11 @@ foreach ($cim in @(Get-CimInstance Win32_Process)) {
     Name = [string]$cim.Name
     ExecutablePath = [string]$cim.ExecutablePath
     CommandLine = [string]$cim.CommandLine
+  }
+}
+foreach ($entry in $live) {
+  if (-not $metadata.ContainsKey([int]$entry.Id)) {
+    $metadata[[int]$entry.Id] = New-FallbackMetadata $entry
   }
 }
 $initialRows = @($live | ForEach-Object {
@@ -261,13 +285,18 @@ while ($true) {
   if ($newIds.Count -gt 0) {
     $filter = ($newIds | ForEach-Object { "ProcessId = $_" }) -join ' OR '
     foreach ($cim in @(Get-CimInstance Win32_Process -Filter $filter)) {
-    $metadata[[int]$cim.ProcessId] = [pscustomobject]@{
-      ParentProcessId = [int]$cim.ParentProcessId
-      Name = [string]$cim.Name
-      ExecutablePath = [string]$cim.ExecutablePath
-      CommandLine = [string]$cim.CommandLine
+      $metadata[[int]$cim.ProcessId] = [pscustomobject]@{
+        ParentProcessId = [int]$cim.ParentProcessId
+        Name = [string]$cim.Name
+        ExecutablePath = [string]$cim.ExecutablePath
+        CommandLine = [string]$cim.CommandLine
+      }
     }
-  }
+    foreach ($entry in $newEntries) {
+      if (-not $metadata.ContainsKey([int]$entry.Id)) {
+        $metadata[[int]$entry.Id] = New-FallbackMetadata $entry
+      }
+    }
   }
 
   $newLookup = @{}
@@ -279,10 +308,18 @@ while ($true) {
 
   $updated = @($live | Where-Object { -not $newLookup.ContainsKey([int]$_.Id) } | ForEach-Object {
     $windowIdentity = "$( [int64]$_.MainWindowHandle ):$([string]$_.MainWindowTitle)"
-    if ($windowState[[int]$_.Id] -ne $windowIdentity) {
+    $details = $metadata[[int]$_.Id]
+    $metadataChanged = $false
+    if ($null -ne $details -and -not $details.ExecutablePath -and $_.Path) {
+      $details.ExecutablePath = [string]$_.Path
+      $metadataChanged = $true
+    }
+    if ($windowState[[int]$_.Id] -ne $windowIdentity -or $metadataChanged) {
       $windowState[[int]$_.Id] = $windowIdentity
       [pscustomobject]@{
         ProcessId = [int]$_.Id
+        Name = if ($null -ne $details) { [string]$details.Name } else { '' }
+        ExecutablePath = if ($null -ne $details) { [string]$details.ExecutablePath } else { '' }
         MainWindowHandle = [int64]$_.MainWindowHandle
         MainWindowTitle = [string]$_.MainWindowTitle
       }
@@ -327,6 +364,18 @@ function executableHintName(value?: string): string {
   return name.length <= 260 && /^[a-z0-9_.+() -]+\.exe$/i.test(name) ? name : ''
 }
 
+function expectedExecutablePath(game: LibraryGame): string {
+  const importedExecutable = game.local?.executablePath ?? game.retro?.emulatorPath
+  if (importedExecutable) return normalizedPath(importedExecutable)
+
+  const providerExecutable = game.metadata.launchExecutable?.trim()
+  if (!providerExecutable) return ''
+  if (path.isAbsolute(providerExecutable)) return normalizedPath(providerExecutable)
+  return game.installDir
+    ? normalizedPath(path.resolve(game.installDir, providerExecutable))
+    : ''
+}
+
 function hasVisibleWindow(candidate: WindowsProcess): boolean {
   return Boolean(candidate.MainWindowHandle)
 }
@@ -359,7 +408,15 @@ function baselineInstance(
 ): boolean {
   const baseline = baselineByPid.get(processId(candidate))
   if (!baseline) return false
-  return processName(baseline) === processName(candidate) && processKey(baseline) === processKey(candidate)
+  const baselineStartedAt = baseline.StartedAt ?? 0
+  const candidateStartedAt = candidate.StartedAt ?? 0
+  const sameInstance =
+    baselineStartedAt <= 0 || candidateStartedAt <= 0 || baselineStartedAt === candidateStartedAt
+  return (
+    sameInstance &&
+    processName(baseline) === processName(candidate) &&
+    processKey(baseline) === processKey(candidate)
+  )
 }
 
 function ancestorMatches(
@@ -406,8 +463,10 @@ function hasExpectedLauncherAncestor(
 
 function gameNameTokens(game: LibraryGame): string[] {
   return game.name
+    .normalize('NFKD')
+    .replace(/\p{M}/gu, '')
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .split(/\s+/)
     .filter((token) => token.length >= 3 && !GAME_NAME_STOP_WORDS.has(token))
 }
@@ -423,28 +482,44 @@ function scoreGameProcess(
   const pid = processId(candidate)
   const name = processName(candidate)
   const executable = normalizedPath(candidate.ExecutablePath)
-  const expectedLocalExecutable = normalizedPath(game.local?.executablePath)
-  const expectedLocalProcessName = executableHintName(game.local?.executablePath)
-  const directlySpawnedGame =
-    directlySpawnedGamePids.has(pid) &&
-    (executable === expectedLocalExecutable || name === expectedLocalProcessName)
-  const exactLocalExecutable =
-    game.provider === 'local' &&
-    Boolean(executable && executable === normalizedPath(game.local?.executablePath))
+  const importedExecutable = game.local?.executablePath ?? game.retro?.emulatorPath
+  const expectedExecutable = expectedExecutablePath(game)
+  const visible = hasVisibleWindow(candidate)
+  const providerExecutableHint = executableHintName(game.metadata.launchExecutable)
+  const importedExecutableHint = executableHintName(importedExecutable)
+  const executableHintMatches =
+    (Boolean(providerExecutableHint) && name === providerExecutableHint) ||
+    (Boolean(importedExecutableHint) && name === importedExecutableHint)
+  const directlySpawnedGame = directlySpawnedGamePids.has(pid)
+  const exactExecutable = Boolean(executable && expectedExecutable && executable === expectedExecutable)
+  const insideInstallDir = isInsideInstallDir(candidate, game.installDir)
+  const commandLine = (candidate.CommandLine ?? '').toLowerCase()
+  const packageFamilyMatches = windowsPackageIdentityMatches(
+    game.metadata.launchUri,
+    executable,
+    commandLine
+  )
+  const reusableRemotePlayProcess =
+    game.provider === 'playstation' && executableHintMatches && visible
+  const reusableBaselineProcess =
+    exactExecutable ||
+    packageFamilyMatches ||
+    (executableHintMatches && insideInstallDir) ||
+    reusableRemotePlayProcess
   if (
     pid <= 0 ||
     !name.endsWith('.exe') ||
-    baselineInstance(candidate, baselineByPid) ||
+    (baselineInstance(candidate, baselineByPid) && !reusableBaselineProcess) ||
     launcherFamily(candidate) ||
     SYSTEM_PROCESSES.has(name) ||
-    (NON_GAME_PROCESS.test(name) && !exactLocalExecutable && !directlySpawnedGame)
+    (NON_GAME_PROCESS.test(name) &&
+      !directlySpawnedGame &&
+      !exactExecutable &&
+      !executableHintMatches)
   ) {
     return null
   }
 
-  const commandLine = (candidate.CommandLine ?? '').toLowerCase()
-  const visible = hasVisibleWindow(candidate)
-  const insideInstallDir = isInsideInstallDir(candidate, game.installDir)
   const fromLauncher = hasExpectedLauncherAncestor(candidate, game.provider, processesByPid)
   const fromTrackedGame = ancestorPidMatches(candidate, processesByPid, trackedPids)
   const nameMatches = gameNameTokens(game).some((token) => name.includes(token))
@@ -454,9 +529,6 @@ function scoreGameProcess(
   const idMatches = providerIds.some(
     (value) => commandLine.includes(value) || executable.includes(value)
   )
-  const providerExecutableHint = executableHintName(game.metadata.launchExecutable)
-  const executableHintMatches =
-    Boolean(providerExecutableHint) && name === providerExecutableHint
   const windowsAppsProcess = executable.includes('\\windowsapps\\')
 
   // Visibility is presentation state, not identity. In particular, accepting
@@ -464,8 +536,9 @@ function scoreGameProcess(
   if (
     !hasEligibleGameProcessIdentity({
       directlySpawnedGame,
-      exactLocalExecutable,
+      exactExecutable,
       insideInstallDir,
+      packageFamilyMatches,
       idMatches,
       executableHintMatches,
       fromTrackedGame,
@@ -480,8 +553,9 @@ function scoreGameProcess(
 
   let score = 0
   if (directlySpawnedGame) score += 400
-  if (exactLocalExecutable) score += 320
+  if (exactExecutable) score += 320
   if (insideInstallDir) score += 140
+  if (packageFamilyMatches) score += 260
   if (visible) score += 85
   if (fromLauncher) score += 70
   if (fromTrackedGame) score += 130
@@ -668,13 +742,51 @@ foreach ($id in $ids) {
   })
 }
 
-function focusExternalProcess(pid: number): void {
+function focusExternalProcess(pid: number, ensureFullscreenWithHotkey = false): void {
   if (process.platform !== 'win32' || pid <= 0) return
+  const fullscreenFallback = ensureFullscreenWithHotkey
+    ? `
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class OrbitExternalFullscreen {
+  [StructLayout(LayoutKind.Sequential)] public struct RECT {
+    public int Left; public int Top; public int Right; public int Bottom;
+  }
+  [StructLayout(LayoutKind.Sequential)] public struct MONITORINFO {
+    public int Size; public RECT Monitor; public RECT Work; public int Flags;
+  }
+  [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr window, out RECT rect);
+  [DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr window, int flags);
+  [DllImport("user32.dll")] static extern bool GetMonitorInfo(IntPtr monitor, ref MONITORINFO info);
+
+  public static bool IsFullscreen(IntPtr window) {
+    RECT rect;
+    if (window == IntPtr.Zero || !GetWindowRect(window, out rect)) return false;
+    IntPtr monitor = MonitorFromWindow(window, 2);
+    MONITORINFO info = new MONITORINFO();
+    info.Size = Marshal.SizeOf(info);
+    if (monitor == IntPtr.Zero || !GetMonitorInfo(monitor, ref info)) return false;
+    return Math.Abs(rect.Left - info.Monitor.Left) <= 2 &&
+      Math.Abs(rect.Top - info.Monitor.Top) <= 2 &&
+      Math.Abs(rect.Right - info.Monitor.Right) <= 2 &&
+      Math.Abs(rect.Bottom - info.Monitor.Bottom) <= 2;
+  }
+}
+'@
+Start-Sleep -Milliseconds 250
+$target.Refresh()
+if ($target.MainWindowHandle -ne 0 -and -not [OrbitExternalFullscreen]::IsFullscreen($target.MainWindowHandle)) {
+  $shell.SendKeys('%{ENTER}')
+}`
+    : ''
   const script = `
 $target = Get-Process -Id ${pid} -ErrorAction SilentlyContinue
 if ($null -ne $target) {
   $shell = New-Object -ComObject WScript.Shell
   $null = $shell.AppActivate($target.Id)
+  ${fullscreenFallback}
 }`
   execFile(
     'powershell.exe',
@@ -769,6 +881,7 @@ export class GameSessionManager extends EventEmitter {
   private sampler: WindowsProcessSampler | null = null
   private launchTargetRevealed = false
   private pendingLaunchDelay: PendingLaunchDelay | null = null
+  private activeGame: LibraryGame | null = null
 
   constructor(
     private readonly mainWindow: BrowserWindow,
@@ -815,10 +928,69 @@ export class GameSessionManager extends EventEmitter {
     return true
   }
 
+  async stopTracking(): Promise<boolean> {
+    const status = this.getStatus()
+    const game = this.activeGame
+    if (
+      status.phase !== 'running' ||
+      !game ||
+      !status.startedAt ||
+      !status.detectedAt
+    ) {
+      return false
+    }
+
+    // Invalidate the monitor before its next process snapshot. This stops only
+    // ORBIT's bookkeeping; the game and its launcher remain untouched.
+    const token = ++this.activeToken
+    this.sampler?.stop()
+    this.sampler = null
+    this.releaseLaunchShield(false)
+
+    const endedAt = Date.now()
+    const completedSession = {
+      detectedAt: status.detectedAt,
+      endedAt,
+      durationSeconds: Math.max(1, Math.round((endedAt - status.detectedAt) / 1_000))
+    }
+    this.update({
+      phase: 'returning',
+      gameId: game.id,
+      gameName: game.name,
+      provider: game.provider,
+      startedAt: status.startedAt,
+      detectedAt: status.detectedAt,
+      endedAt,
+      sessionDurationSeconds: completedSession.durationSeconds,
+      returnTask: 'tracking-stopped'
+    })
+    await this.focusOrbit(token)
+    try {
+      const result = await this.callbacks.onSessionCompleted?.(game, completedSession)
+      if (token === this.activeToken) {
+        this.update({
+          ...this.status,
+          sessionDurationSeconds: completedSession.durationSeconds,
+          totalPlaytimeSeconds: result?.totalPlaytimeSeconds
+        })
+      }
+    } catch {
+      // The manual escape hatch must still release the UI if persistence fails.
+    }
+
+    await wait(RETURN_SPLASH_MS)
+    if (token === this.activeToken) {
+      this.update({ phase: 'idle' })
+      void this.finishReturnFocus(token)
+    }
+    return true
+  }
+
   async start(game: LibraryGame): Promise<void> {
     if (this.status.phase !== 'idle') throw new Error('A game session is already active')
 
     const token = ++this.activeToken
+    this.activeGame = game
     const requestedAt = Date.now()
     const cancelableUntil = requestedAt + GAME_LAUNCH_CANCEL_WINDOW_MS
     this.launchTargetRevealed = false
@@ -874,10 +1046,12 @@ export class GameSessionManager extends EventEmitter {
     })
 
     const directlySpawnedGamePids = new Set<number>()
+    let ensureFullscreenWithHotkey = false
     try {
       if (token !== this.activeToken) return
       const receipt = await launchGame(game)
       if (receipt.spawnedGamePid) directlySpawnedGamePids.add(receipt.spawnedGamePid)
+      ensureFullscreenWithHotkey = receipt.ensureFullscreenWithHotkey === true
     } catch (error) {
       sampler.stop()
       if (this.sampler === sampler) this.sampler = null
@@ -892,7 +1066,15 @@ export class GameSessionManager extends EventEmitter {
     // The provider-neutral launch shield keeps this in-app splash in front while
     // Steam/Epic/Xbox/EA/Ubisoft hand off. The monitor releases it only for the
     // detected game's own visible process (or the explicit timeout/Y fallback).
-    void this.monitor(token, game, startedAt, sampler, baseline, directlySpawnedGamePids)
+    void this.monitor(
+      token,
+      game,
+      startedAt,
+      sampler,
+      baseline,
+      directlySpawnedGamePids,
+      ensureFullscreenWithHotkey
+    )
   }
 
   private async monitor(
@@ -901,7 +1083,8 @@ export class GameSessionManager extends EventEmitter {
     startedAt: number,
     sampler: WindowsProcessSampler,
     baseline: ProcessSnapshot,
-    directlySpawnedGamePids: Set<number>
+    directlySpawnedGamePids: Set<number>,
+    ensureFullscreenWithHotkey: boolean
   ): Promise<void> {
     const baselineByPid = new Map(
       baseline.processes.map((candidate) => [processId(candidate), candidate] as const)
@@ -1006,7 +1189,7 @@ export class GameSessionManager extends EventEmitter {
               primaryProcessKeys.add(best.key)
               missingSince = undefined
               if (best.visible) {
-                this.handoffToGame(token, best.pid)
+                this.handoffToGame(token, best.pid, ensureFullscreenWithHotkey)
                 gameFocusHandedOff = true
               }
               continue
@@ -1110,7 +1293,7 @@ export class GameSessionManager extends EventEmitter {
           if (!gameFocusHandedOff) {
             const visibleGame = activePrimary.find((candidate) => candidate.visible)
             if (visibleGame) {
-              this.handoffToGame(token, visibleGame.pid)
+              this.handoffToGame(token, visibleGame.pid, ensureFullscreenWithHotkey)
               gameFocusHandedOff = true
             }
           }
@@ -1131,16 +1314,6 @@ export class GameSessionManager extends EventEmitter {
               await this.callbacks.onGameConfirmed?.(game, detectedAt)
             } catch {
               // Recency persistence must never break session monitoring.
-            }
-          } else if (!sessionConfirmed) {
-            const failureReason = startupTracker.absoluteFailureReason(now)
-            if (failureReason) {
-              await this.fail(
-                token,
-                'Game process did not remain stable during startup',
-                failureReason
-              )
-              return
             }
           }
           missingSince = undefined
@@ -1175,7 +1348,7 @@ export class GameSessionManager extends EventEmitter {
           missingSince ??= now
           const exitGrace =
             now - detectedAt < EARLY_SESSION_WINDOW_MS
-              ? EARLY_HANDOFF_GRACE_MS
+              ? Math.max(EARLY_HANDOFF_GRACE_MS, provisionalHandoffGraceMs(game.provider))
               : PROCESS_EXIT_GRACE_MS
           if (now - missingSince >= exitGrace) {
             await this.returnToOrbit(
@@ -1224,6 +1397,7 @@ export class GameSessionManager extends EventEmitter {
     this.sampler?.stop()
     this.sampler = null
     this.releaseLaunchShield(false)
+    this.activeGame = null
     this.status = { phase: 'idle' }
     this.removeAllListeners()
     return completed
@@ -1308,7 +1482,13 @@ export class GameSessionManager extends EventEmitter {
       message,
       endedAt: Date.now()
     })
-    await this.focusOrbit(token)
+    // A rejected dispatch is definitive. Process-based negative evidence is
+    // not: protected or unusually structured games may still be running. Do
+    // not steal focus back from a game after ORBIT already handed it off.
+    const shouldRestoreOrbit =
+      failureReason === 'launch-rejected' || !this.mainWindow.isMinimized()
+    this.releaseLaunchShield(false)
+    if (shouldRestoreOrbit) await this.focusOrbit(token)
     await wait(ERROR_SPLASH_MS)
     if (token === this.activeToken) {
       this.releaseLaunchShield(false)
@@ -1381,10 +1561,10 @@ export class GameSessionManager extends EventEmitter {
     this.mainWindow.focus()
   }
 
-  private handoffToGame(token: number, pid: number): void {
+  private handoffToGame(token: number, pid: number, ensureFullscreenWithHotkey = false): void {
     if (token !== this.activeToken) return
     this.releaseLaunchShield(true)
-    focusExternalProcess(pid)
+    focusExternalProcess(pid, ensureFullscreenWithHotkey)
   }
 
   private releaseLaunchShield(minimize: boolean): void {
@@ -1394,6 +1574,7 @@ export class GameSessionManager extends EventEmitter {
   }
 
   private update(status: GameLaunchStatus): void {
+    if (status.phase === 'idle') this.activeGame = null
     this.status = status
     this.emit('updated', this.getStatus())
   }

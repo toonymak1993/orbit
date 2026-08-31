@@ -16,7 +16,11 @@ if (isBackgroundAgent) {
   app.commandLine.appendSwitch('disable-software-rasterizer')
 } else {
   protocol.registerSchemesAsPrivileged([
-    { scheme: 'orbit-image', privileges: { supportFetchAPI: true, bypassCSP: true, corsEnabled: true } }
+    { scheme: 'orbit-image', privileges: { supportFetchAPI: true, bypassCSP: true, corsEnabled: true } },
+    {
+      scheme: 'orbit-media',
+      privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true }
+    }
   ])
 }
 
@@ -69,12 +73,19 @@ function createWindow(registerIpcHandlers: (window: BrowserWindow) => void): Bro
 }
 
 async function startOrbitUi(): Promise<void> {
-  const [{ registerIpcHandlers }, { getCacheDir }, { startOrbitAppCommandServer }, { revealOrbitWindow }] =
+  const [
+    { registerIpcHandlers },
+    { getCacheDir },
+    { startOrbitAppCommandServer },
+    { revealOrbitWindow },
+    { startupVideoService }
+  ] =
     await Promise.all([
       import('./ipcHandlers'),
       import('./imageCache'),
       import('./orbitAppCommands'),
-      import('./orbitWindow')
+      import('./orbitWindow'),
+      import('./startupVideoService')
     ])
 
   // The AppX package already supplies the shell identity used by Xbox Mode.
@@ -89,6 +100,12 @@ async function startOrbitUi(): Promise<void> {
       return new Response(null, { status: 400 })
     }
     return net.fetch(pathToFileURL(join(getCacheDir(), fileName)).toString())
+  })
+
+  protocol.handle('orbit-media', (request) => {
+    const filePath = startupVideoService.resolveRequestPath(request.url)
+    if (!filePath) return new Response(null, { status: 404 })
+    return net.fetch(pathToFileURL(filePath).toString(), { headers: request.headers })
   })
 
   app.on('browser-window-created', (_, window) => {

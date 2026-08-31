@@ -85,6 +85,8 @@ public static class OrbitDualSenseRawInput
     private static bool available;
     private static int holdMilliseconds;
 
+    public static int LastErrorCode { get; private set; }
+
     public static bool Start(int requestedHoldMilliseconds)
     {
         lock (StartLock)
@@ -203,6 +205,8 @@ public static class OrbitDualSenseRawInput
                 (uint)Marshal.SizeOf(typeof(RAWINPUTDEVICE)));
             if (registered)
                 holdTimer.Start();
+            else
+                LastErrorCode = Marshal.GetLastWin32Error();
             return registered;
         }
 
@@ -441,6 +445,7 @@ export function createDualSenseMonitorScript(holdMilliseconds: number): string {
     '',
     `[bool]$started = [OrbitDualSenseRawInput]::Start(${safeHoldMilliseconds})`,
     'if (-not $started) {',
+    '  [Console]::Error.WriteLine("raw-input-registration-failed:" + [OrbitDualSenseRawInput]::LastErrorCode)',
     '  [Console]::WriteLine("unavailable")',
     '  [Console]::Out.Flush()',
     '  exit 2',

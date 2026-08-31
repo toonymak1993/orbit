@@ -1,6 +1,11 @@
 import { app, ipcMain, shell, type BrowserWindow } from 'electron'
 import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import {
+  DOCK_MOTIONS,
+  DOCK_SIZES,
+  DOCK_THEME_IDS,
   HARDWARE_CONTROL_BUTTONS,
   HARDWARE_CONTROL_HOLD_SECONDS,
   FRIENDS_PROVIDERS,
@@ -8,12 +13,17 @@ import {
   LIBRARY_GRID_COLUMN_OPTIONS,
   NOTIFICATION_MOTIONS,
   NOTIFICATION_POSITIONS,
+  PLAYSTATION_REMOTE_PLAY_PREFERENCES,
   PROFILE_AVATAR_IDS,
+  STARTUP_ANIMATION_MODES,
   type AppControlAction,
+  type CustomApplicationCommitInput,
+  type CustomApplicationUpdateInput,
   type CustomGameCommitInput,
   type CustomGameImportSource,
   type CustomGameLaunchArgumentsInput,
   type CustomGameSaveSource,
+  type DiscordChatEvent,
   type EpicLoginStatus,
   type FriendsProvider,
   type ImageOrientation,
@@ -21,7 +31,12 @@ import {
   type LibraryGame,
   type OrbitBackgroundServiceAction,
   type OrbitSettings,
+  type PlayStationLoginStatus,
   type ResolvedImage,
+  type RetroEmulatorDownloadInput,
+  type RetroEmulatorInstallInput,
+  type RetroGameLaunchArgumentsInput,
+  type RetroSystemId,
   type StoreRegionId,
   type SteamAccount,
   type SteamLoginStatus,
@@ -29,9 +44,11 @@ import {
   type SystemSettingsTarget,
   type SystemStatusSnapshot
 } from '@shared/ipc'
-import { settingsStore } from './settingsStore'
+import { publicSettingsSnapshot, settingsStore } from './settingsStore'
 import { steamAuthManager } from './steam/steamAuth'
 import { epicAuthManager } from './epic/epicAuth'
+import { playStationAuthManager } from './playstation/playstationAuth'
+import { playStationRemotePlayService } from './playstation/remotePlay'
 import { libraryService } from './library/libraryService'
 import { GameSessionManager } from './gameSessionManager'
 import { launchGame } from './gameLauncher'
@@ -44,6 +61,7 @@ import { OrbitBackgroundServiceManager } from './orbitBackgroundServiceManager'
 import { customArtworkService } from './customArtwork'
 import { artworkPickerService } from './artworkPickerService'
 import { profileAvatarService } from './profileAvatarService'
+import { startupVideoService } from './startupVideoService'
 import { systemUpdateService } from './systemUpdateService'
 import { SystemStatusService } from './systemStatusService'
 import { launcherDownloadMonitor } from './downloads/launcherDownloadMonitor'
@@ -53,6 +71,11 @@ import {
   normalizeCustomLaunchArguments,
   parseCustomLaunchArguments
 } from './customLaunchArguments'
+import { RETRO_SYSTEMS } from '@shared/retroSystems'
+import { applicationService } from './applicationService'
+import { netflixMediaService } from './netflixMediaService'
+import { retroAchievementsCredentials } from './retro/retroAchievementsCredentials'
+import { applyOrbitWallpaper } from './orbitWallpaperService'
 
 const SYSTEM_POWER_ACTIONS: readonly SystemPowerAction[] = ['sleep', 'restart', 'shutdown']
 const SYSTEM_SETTINGS_TARGETS: Record<SystemSettingsTarget, string> = {
@@ -71,6 +94,7 @@ const BACKGROUND_SERVICE_ACTIONS: readonly OrbitBackgroundServiceAction[] = [
 const CUSTOM_GAME_IMPORT_SOURCES: readonly CustomGameImportSource[] = ['executable', 'folder']
 const CUSTOM_GAME_SAVE_SOURCES: readonly CustomGameSaveSource[] = ['file', 'folder']
 const IMAGE_ORIENTATIONS: readonly ImageOrientation[] = ['vertical', 'horizontal', 'icon']
+const RETRO_SYSTEM_IDS = new Set(RETRO_SYSTEMS.map((system) => system.id))
 
 function validatedShortString(value: unknown, label: string, maxLength = 512): string {
   if (typeof value !== 'string' || !value.trim() || value.length > maxLength) {
@@ -102,6 +126,97 @@ function validateCustomGameLaunchArguments(value: unknown): CustomGameLaunchArgu
   }
 }
 
+async function showWindowsSystemKeyboard(): Promise<boolean> {
+  if (process.platform !== 'win32') return false
+  const commonProgramDirectories = [
+    process.env.CommonProgramW6432,
+    process.env.CommonProgramFiles,
+    'C:\\Program Files\\Common Files'
+  ].filter((value): value is string => Boolean(value))
+  const keyboardPath = commonProgramDirectories
+    .map((directory) => join(directory, 'microsoft shared', 'ink', 'TabTip.exe'))
+    .find((candidate) => existsSync(candidate))
+  if (!keyboardPath) return false
+
+  return new Promise<boolean>((resolve) => {
+    let settled = false
+    const settle = (result: boolean): void => {
+      if (settled) return
+      settled = true
+      resolve(result)
+    }
+    try {
+      const child = spawn(keyboardPath, [], { detached: true, stdio: 'ignore' })
+      child.once('error', () => settle(false))
+      child.once('spawn', () => {
+        child.unref()
+        settle(true)
+      })
+    } catch {
+      settle(false)
+    }
+  })
+}
+
+function validateCustomApplicationCommit(value: unknown): CustomApplicationCommitInput {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('Invalid custom application payload')
+  }
+  const input = value as Record<string, unknown>
+  return {
+    draftId: validatedShortString(input.draftId, 'custom application draft', 160),
+    name: validatedShortString(input.name, 'custom application name', 120),
+    launchArguments: normalizeCustomLaunchArguments(input.launchArguments)
+  }
+}
+
+function validateCustomApplicationUpdate(value: unknown): CustomApplicationUpdateInput {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('Invalid custom application update payload')
+  }
+  const input = value as Record<string, unknown>
+  return {
+    applicationId: validatedShortString(input.applicationId, 'custom application ID', 160),
+    name: validatedShortString(input.name, 'custom application name', 120),
+    launchArguments: normalizeCustomLaunchArguments(input.launchArguments)
+  }
+}
+
+function validateRetroGameLaunchArguments(value: unknown): RetroGameLaunchArgumentsInput {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('Invalid retro game launch arguments payload')
+  }
+  const input = value as Record<string, unknown>
+  return {
+    gameId: validatedShortString(input.gameId, 'retro game ID'),
+    launchArguments: normalizeCustomLaunchArguments(input.launchArguments)
+  }
+}
+
+function validateRetroSystemId(value: unknown): RetroSystemId {
+  const systemId = validatedShortString(value, 'retro system ID', 64) as RetroSystemId
+  if (!RETRO_SYSTEM_IDS.has(systemId)) throw new Error('Unknown retro system')
+  return systemId
+}
+
+function validateRetroEmulatorDownload(value: unknown): RetroEmulatorDownloadInput {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('Invalid retro system setup payload')
+  }
+  const input = value as Record<string, unknown>
+  return {
+    systemId: validateRetroSystemId(input.systemId),
+    emulatorId:
+      input.emulatorId === undefined
+        ? undefined
+        : validatedShortString(input.emulatorId, 'retro emulator ID', 64)
+  }
+}
+
+function validateRetroEmulatorInstall(value: unknown): RetroEmulatorInstallInput {
+  return validateRetroEmulatorDownload(value)
+}
+
 function validateSettingsPartial(value: unknown): asserts value is Partial<OrbitSettings> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error('Invalid settings payload')
@@ -114,6 +229,49 @@ function validateSettingsPartial(value: unknown): asserts value is Partial<Orbit
       !/^[a-f\d]{32}$/i.test(partial.steamWebApiKey.trim()))
   ) {
     throw new Error('Invalid Steam Web API key')
+  }
+  if (
+    'retroAchievementsUsername' in partial &&
+    partial.retroAchievementsUsername !== undefined &&
+    (typeof partial.retroAchievementsUsername !== 'string' ||
+      !partial.retroAchievementsUsername.trim() ||
+      partial.retroAchievementsUsername.trim().length > 80 ||
+      /[\u0000-\u001f\u007f]/u.test(partial.retroAchievementsUsername))
+  ) {
+    throw new Error('Invalid RetroAchievements username')
+  }
+  if ('retroAchievementsWebApiKey' in partial) {
+    throw new Error('RetroAchievements credentials require the dedicated credential API')
+  }
+  if ('retroRomDirectories' in partial) {
+    if (
+      !Array.isArray(partial.retroRomDirectories) ||
+      partial.retroRomDirectories.length > 20 ||
+      partial.retroRomDirectories.some(
+        (directory) =>
+          typeof directory !== 'string' ||
+          !directory.trim() ||
+          directory.length > 32_768 ||
+          /[\u0000-\u001f\u007f]/u.test(directory)
+      )
+    ) {
+      throw new Error('Invalid ROM directories')
+    }
+  }
+  if ('retroSystemEmulators' in partial) {
+    if (
+      typeof partial.retroSystemEmulators !== 'object' ||
+      partial.retroSystemEmulators === null ||
+      Array.isArray(partial.retroSystemEmulators) ||
+      Object.entries(partial.retroSystemEmulators).some(
+        ([systemId, emulatorId]) =>
+          !RETRO_SYSTEM_IDS.has(systemId as (typeof RETRO_SYSTEMS)[number]['id']) ||
+          typeof emulatorId !== 'string' ||
+          !/^[a-z\d][a-z\d-]{0,63}$/i.test(emulatorId)
+      )
+    ) {
+      throw new Error('Invalid retro emulator selections')
+    }
   }
   if (
     'libraryGridColumns' in partial &&
@@ -132,6 +290,17 @@ function validateSettingsPartial(value: unknown): asserts value is Partial<Orbit
       )
     ) {
       throw new Error('Invalid favorite game IDs')
+    }
+  }
+  if ('excludedGameIds' in partial) {
+    if (
+      !Array.isArray(partial.excludedGameIds) ||
+      partial.excludedGameIds.length > 10_000 ||
+      partial.excludedGameIds.some(
+        (gameId) => typeof gameId !== 'string' || !gameId.trim() || gameId.length > 512
+      )
+    ) {
+      throw new Error('Invalid excluded game IDs')
     }
   }
   if ('customLibraries' in partial) {
@@ -167,11 +336,48 @@ function validateSettingsPartial(value: unknown): asserts value is Partial<Orbit
   ) {
     throw new Error('Invalid profile avatar')
   }
+  if (
+    'startupAnimationMode' in partial &&
+    !STARTUP_ANIMATION_MODES.includes(
+      partial.startupAnimationMode as (typeof STARTUP_ANIMATION_MODES)[number]
+    )
+  ) {
+    throw new Error('Invalid startup animation mode')
+  }
+  if (
+    'dockTheme' in partial &&
+    !DOCK_THEME_IDS.includes(partial.dockTheme as (typeof DOCK_THEME_IDS)[number])
+  ) {
+    throw new Error('Invalid dock theme')
+  }
+  if (
+    'dockSize' in partial &&
+    !DOCK_SIZES.includes(partial.dockSize as (typeof DOCK_SIZES)[number])
+  ) {
+    throw new Error('Invalid dock size')
+  }
+  if (
+    'dockMotion' in partial &&
+    !DOCK_MOTIONS.includes(partial.dockMotion as (typeof DOCK_MOTIONS)[number])
+  ) {
+    throw new Error('Invalid dock motion')
+  }
   if ('notificationsEnabled' in partial && typeof partial.notificationsEnabled !== 'boolean') {
     throw new Error('Invalid notification state')
   }
+  if ('showFriendsHub' in partial && typeof partial.showFriendsHub !== 'boolean') {
+    throw new Error('Invalid Friends Hub visibility state')
+  }
   if ('appUpdateAutoDownload' in partial && typeof partial.appUpdateAutoDownload !== 'boolean') {
     throw new Error('Invalid app update download preference')
+  }
+  if (
+    'playstationRemotePlayPreference' in partial &&
+    !PLAYSTATION_REMOTE_PLAY_PREFERENCES.includes(
+      partial.playstationRemotePlayPreference as (typeof PLAYSTATION_REMOTE_PLAY_PREFERENCES)[number]
+    )
+  ) {
+    throw new Error('Invalid PlayStation Remote Play preference')
   }
   if (
     'homeCardBubbleEffect' in partial &&
@@ -226,18 +432,18 @@ function validatedImageOrientation(value: unknown): ImageOrientation {
   return value as ImageOrientation
 }
 
-function validatedSteamGridDbOrientation(value: unknown): Exclude<ImageOrientation, 'icon'> {
+function validatedArtworkSearchOrientation(value: unknown): Exclude<ImageOrientation, 'icon'> {
   const orientation = validatedImageOrientation(value)
-  if (orientation === 'icon') throw new Error('Invalid SteamGridDB artwork orientation')
+  if (orientation === 'icon') throw new Error('Invalid artwork search orientation')
   return orientation
 }
 
 function validatedArtworkQuery(value: unknown): string | undefined {
   if (value === undefined || value === null || value === '') return undefined
-  if (typeof value !== 'string') throw new Error('Invalid SteamGridDB artwork query')
+  if (typeof value !== 'string') throw new Error('Invalid artwork search query')
   const query = value.normalize('NFKC').trim()
   if (!query || query.length > 120 || /[\u0000-\u001f\u007f]/.test(query)) {
-    throw new Error('Invalid SteamGridDB artwork query')
+    throw new Error('Invalid artwork search query')
   }
   return query
 }
@@ -320,6 +526,7 @@ function runSystemPowerAction(action: SystemPowerAction): Promise<void> {
 }
 
 export function registerIpcHandlers(mainWindow: BrowserWindow): void {
+  app.once('before-quit', () => applicationService.dispose())
   const sendSteamAccountUpdate = (account: SteamAccount): void => {
     if (mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return
     mainWindow.webContents.send(IPC.steamAccountUpdated, account)
@@ -332,6 +539,14 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
   }
   friendsService.on('updated', sendFriendsUpdate)
   mainWindow.once('closed', () => friendsService.off('updated', sendFriendsUpdate))
+  const sendDiscordChatMessage = (event: DiscordChatEvent): void => {
+    if (mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return
+    mainWindow.webContents.send(IPC.discordChatMessage, event)
+  }
+  friendsService.on('discord-chat-message', sendDiscordChatMessage)
+  mainWindow.once('closed', () =>
+    friendsService.off('discord-chat-message', sendDiscordChatMessage)
+  )
   app.once('before-quit', () => friendsService.dispose())
   // Warm the provider-neutral cache while the renderer is loading so opening
   // the Friends Hub never becomes the trigger for its first network request.
@@ -440,14 +655,16 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
   })
 
   ipcMain.handle(IPC.launcherDownloadsGet, () => launcherDownloadMonitor.getSnapshot())
-  ipcMain.handle(IPC.settingsGet, (): OrbitSettings => settingsStore.store)
+  ipcMain.handle(IPC.settingsGet, (): OrbitSettings => publicSettingsSnapshot())
 
   ipcMain.handle(IPC.profileAvatarGetCustom, () => profileAvatarService.resolve())
   ipcMain.handle(IPC.profileAvatarSelectCustom, () => profileAvatarService.select(mainWindow))
+  ipcMain.handle(IPC.startupVideoGet, () => startupVideoService.resolveUrl())
+  ipcMain.handle(IPC.startupVideoSelect, () => startupVideoService.select(mainWindow))
 
   ipcMain.handle(IPC.settingsSet, (_e, partial: unknown) => {
     validateSettingsPartial(partial)
-    const next = { ...settingsStore.store, ...partial }
+    const next = { ...publicSettingsSnapshot(), ...partial }
     settingsStore.set(next)
     if (
       'hardwareControlEnabled' in partial ||
@@ -458,12 +675,31 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     }
     if ('steamWebApiKey' in partial) {
       void friendsService.refresh()
+      if (next.showAchievements) void libraryService.syncAchievements(true)
+    }
+    if ('showAchievements' in partial && partial.showAchievements === true) {
+      void libraryService.syncAchievements(true)
     }
     if ('appUpdateAutoDownload' in partial) {
       appUpdateService.refreshPreferences()
     }
-    return next
+    if ('playstationRemotePlayPreference' in partial) {
+      void playStationRemotePlayService.refresh(true).then(() => libraryService.refresh())
+    }
+    return publicSettingsSnapshot()
   })
+
+  ipcMain.handle(IPC.retroAchievementsCredentialGet, () =>
+    retroAchievementsCredentials.getStatus()
+  )
+  ipcMain.handle(IPC.retroAchievementsCredentialSet, (_e, apiKey: unknown) => {
+    const status = retroAchievementsCredentials.setApiKey(apiKey)
+    if (settingsStore.store.showAchievements) void libraryService.syncAchievements(true)
+    return status
+  })
+  ipcMain.handle(IPC.retroAchievementsCredentialClear, () =>
+    retroAchievementsCredentials.clear()
+  )
 
   ipcMain.handle(IPC.appVersion, () => getDisplayVersion())
   ipcMain.handle(IPC.appUpdateGet, () => appUpdateService.getSnapshot())
@@ -482,6 +718,42 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     const status = await backgroundServiceManager.getStatus()
     return status.hardwareControl
   })
+  ipcMain.handle(IPC.applicationsGet, () => applicationService.getSnapshot())
+  ipcMain.handle(IPC.applicationsRefresh, () => applicationService.getSnapshot(true))
+  ipcMain.handle(IPC.applicationsLaunch, (_e, applicationId: unknown) =>
+    applicationService.launch(
+      validatedShortString(applicationId, 'application ID', 160),
+      mainWindow
+    )
+  )
+  ipcMain.on(IPC.mediaKeyboardUpdate, (event, value: unknown) =>
+    netflixMediaService.handleKeyboardUpdate(event.sender, value)
+  )
+  ipcMain.on(IPC.mediaKeyboardComplete, (event, value: unknown) =>
+    netflixMediaService.handleKeyboardComplete(event.sender, value)
+  )
+  ipcMain.on(IPC.mediaKeyboardClose, (event, requestId: unknown) =>
+    netflixMediaService.handleKeyboardClose(event.sender, requestId)
+  )
+  ipcMain.handle(IPC.customApplicationSelect, () =>
+    applicationService.selectCustomApplication(mainWindow)
+  )
+  ipcMain.handle(IPC.customApplicationCommit, (_e, value: unknown) =>
+    applicationService.commitCustomApplication(validateCustomApplicationCommit(value))
+  )
+  ipcMain.handle(IPC.customApplicationUpdate, (_e, value: unknown) =>
+    applicationService.updateCustomApplication(validateCustomApplicationUpdate(value))
+  )
+  ipcMain.handle(IPC.customApplicationRemove, (_e, applicationId: unknown) =>
+    applicationService.removeCustomApplication(
+      validatedShortString(applicationId, 'custom application ID', 160)
+    )
+  )
+  ipcMain.handle(IPC.customApplicationCancel, (_e, draftId: unknown) =>
+    applicationService.cancelCustomApplication(
+      validatedShortString(draftId, 'custom application draft', 160)
+    )
+  )
   ipcMain.handle(IPC.appControl, (_e, action: unknown) => {
     if (!APP_CONTROL_ACTIONS.includes(action as AppControlAction)) {
       throw new Error('Invalid app control action')
@@ -502,6 +774,8 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
   ipcMain.handle(IPC.systemOpenUpdateSettings, () => shell.openExternal('ms-settings:windowsupdate'))
   ipcMain.handle(IPC.systemStatusGet, () => systemStatusService.getSnapshot())
   ipcMain.handle(IPC.systemStatusRefresh, () => systemStatusService.refresh())
+  ipcMain.handle(IPC.systemKeyboardShow, () => showWindowsSystemKeyboard())
+  ipcMain.handle(IPC.systemWallpaperApply, () => applyOrbitWallpaper())
   ipcMain.handle(IPC.systemOpenSettings, (_e, target: unknown) => {
     if (typeof target !== 'string' || !Object.hasOwn(SYSTEM_SETTINGS_TARGETS, target)) {
       throw new Error('Invalid system settings target')
@@ -603,6 +877,16 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     }
     return friendsService.openProvider(provider as FriendsProvider)
   })
+  ipcMain.handle(IPC.discordChatInbox, () => friendsService.getDiscordChatInbox())
+  ipcMain.handle(IPC.discordChatHistory, (_e, userId: unknown, limit: unknown) =>
+    friendsService.getDiscordChatHistory(userId, limit)
+  )
+  ipcMain.handle(IPC.discordChatSend, (_e, userId: unknown, content: unknown) =>
+    friendsService.sendDiscordChatMessage(userId, content)
+  )
+  ipcMain.handle(IPC.discordChatSetVisible, (_e, showing: unknown) =>
+    friendsService.setDiscordChatVisible(showing)
+  )
 
   ipcMain.handle(IPC.libraryGet, () => {
     const account = steamAuthManager.getAccount()
@@ -614,6 +898,42 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
 
   ipcMain.handle(IPC.libraryRefresh, async () => {
     return libraryService.refresh()
+  })
+
+  ipcMain.handle(IPC.playstationGetAccount, () => playStationAuthManager.restoreSession())
+
+  ipcMain.handle(IPC.playstationLoginStart, async () => {
+    const sendStatus = (status: PlayStationLoginStatus): void => {
+      mainWindow.webContents.send(IPC.playstationLoginStatus, status)
+      if (status.state === 'success') void libraryService.refresh()
+    }
+    await playStationAuthManager.startLogin(sendStatus, mainWindow)
+  })
+
+  ipcMain.handle(IPC.playstationLoginCancel, () => playStationAuthManager.cancelLogin())
+
+  ipcMain.handle(IPC.playstationLogout, async () => {
+    await playStationAuthManager.logout()
+    void libraryService.refresh()
+  })
+
+  ipcMain.handle(IPC.playstationRemotePlayGet, () => playStationRemotePlayService.refresh())
+  ipcMain.handle(IPC.playstationRemotePlayRefresh, () =>
+    playStationRemotePlayService.refresh(true)
+  )
+
+  ipcMain.handle(IPC.libraryGameExclude, (_e, gameIdValue: unknown) => {
+    return libraryService.setGameExcluded(
+      validatedShortString(gameIdValue, 'library game ID'),
+      true
+    )
+  })
+
+  ipcMain.handle(IPC.libraryGameRestore, (_e, gameIdValue: unknown) => {
+    return libraryService.setGameExcluded(
+      validatedShortString(gameIdValue, 'library game ID'),
+      false
+    )
   })
 
   ipcMain.handle(IPC.customGameBeginImport, (_e, source: unknown) => {
@@ -682,6 +1002,39 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     libraryService.openCustomGameBackups(validatedShortString(gameId, 'custom game ID'))
   )
 
+  ipcMain.handle(IPC.retroLibraryStatusGet, () => libraryService.getRetroLibraryStatus())
+  ipcMain.handle(IPC.retroLibraryRefresh, () => libraryService.refreshRetroLibrary())
+  ipcMain.handle(IPC.retroLibraryDirectoryAdd, () =>
+    libraryService.addRetroLibraryDirectory(mainWindow)
+  )
+  ipcMain.handle(IPC.retroLibraryDirectoryRemove, (_e, directory: unknown) =>
+    libraryService.removeRetroLibraryDirectory(
+      validatedShortString(directory, 'ROM directory', 32_768)
+    )
+  )
+  ipcMain.handle(IPC.retroSystemDirectoryEnsure, (_e, systemId: unknown) =>
+    libraryService.ensureRetroSystemDirectory(validateRetroSystemId(systemId))
+  )
+  ipcMain.handle(IPC.retroSystemDirectoryOpen, (_e, systemId: unknown) =>
+    libraryService.openRetroSystemDirectory(mainWindow, validateRetroSystemId(systemId))
+  )
+  ipcMain.handle(IPC.retroEmulatorDownloadOpen, (_e, value: unknown) =>
+    libraryService.openRetroEmulatorDownload(validateRetroEmulatorDownload(value))
+  )
+  ipcMain.handle(IPC.retroEmulatorInstall, (_e, value: unknown) =>
+    libraryService.installRetroEmulator(mainWindow, validateRetroEmulatorInstall(value))
+  )
+  ipcMain.handle(IPC.retroEmulatorInstallCancel, () =>
+    libraryService.cancelRetroEmulatorInstall()
+  )
+  ipcMain.handle(IPC.retroGameSetLaunchArguments, (_e, value: unknown) => {
+    const input = validateRetroGameLaunchArguments(value)
+    return libraryService.updateRetroGameLaunchArguments(
+      input.gameId,
+      parseCustomLaunchArguments(input.launchArguments)
+    )
+  })
+
   ipcMain.handle(IPC.gameLaunch, async (_e, gameId: string) => {
     const game = libraryService.getGame(gameId)
     if (!game) throw new Error('Game is not available')
@@ -693,6 +1046,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
   })
 
   ipcMain.handle(IPC.gameLaunchCancel, () => gameSessionManager.cancelPendingLaunch())
+  ipcMain.handle(IPC.gameTrackingStop, () => gameSessionManager.stopTracking())
   ipcMain.handle(IPC.gameLaunchGet, () => gameSessionManager.getStatus())
   ipcMain.handle(IPC.gameLaunchRevealLauncher, () => gameSessionManager.revealLauncher())
 
@@ -700,9 +1054,10 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     return libraryService.resolveCompletionTimes(gameId)
   })
 
-  ipcMain.handle(IPC.gameAchievementsResolve, async (_e, gameId: string) => {
-    return libraryService.resolveAchievements(gameId)
+  ipcMain.handle(IPC.gameAchievementsResolve, async (_e, gameId: string, force?: unknown) => {
+    return libraryService.resolveAchievements(gameId, force === true)
   })
+  ipcMain.handle(IPC.gameAchievementsSync, () => libraryService.syncAchievements(true))
 
   ipcMain.handle(
     IPC.imageResolve,
@@ -714,14 +1069,14 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     }
   )
 
-  ipcMain.handle(IPC.imageSteamGridDbList, (
+  ipcMain.handle(IPC.imageArtworkSearchList, (
     _e,
     gameIdValue: unknown,
     orientationValue: unknown,
     queryValue: unknown
   ) => {
-    const gameId = validatedShortString(gameIdValue, 'SteamGridDB artwork game ID')
-    const orientation = validatedSteamGridDbOrientation(orientationValue)
+    const gameId = validatedShortString(gameIdValue, 'artwork search game ID')
+    const orientation = validatedArtworkSearchOrientation(orientationValue)
     const query = validatedArtworkQuery(queryValue)
     const game = libraryService.getGame(gameId)
     if (!game) throw new Error('Game is not available')
@@ -729,7 +1084,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
   })
 
   ipcMain.handle(
-    IPC.imageSteamGridDbApply,
+    IPC.imageArtworkSearchApply,
     async (
       _e,
       gameIdValue: unknown,
@@ -737,19 +1092,13 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
       orientationValue: unknown,
       queryValue: unknown
     ): Promise<boolean> => {
-      const gameId = validatedShortString(gameIdValue, 'SteamGridDB artwork game ID')
-      const orientation = validatedSteamGridDbOrientation(orientationValue)
+      const gameId = validatedShortString(gameIdValue, 'artwork search game ID')
+      const artworkId = validatedShortString(artworkIdValue, 'artwork search candidate ID', 160)
+      const orientation = validatedArtworkSearchOrientation(orientationValue)
       const query = validatedArtworkQuery(queryValue)
-      if (
-        typeof artworkIdValue !== 'number' ||
-        !Number.isSafeInteger(artworkIdValue) ||
-        artworkIdValue <= 0
-      ) {
-        throw new Error('Invalid SteamGridDB artwork ID')
-      }
       const game = libraryService.getGame(gameId)
       if (!game) throw new Error('Game is not available')
-      const image = await artworkPickerService.apply(game, artworkIdValue, orientation, query)
+      const image = await artworkPickerService.apply(game, artworkId, orientation, query)
       mainWindow.webContents.send(IPC.imageUpdated, {
         gameId,
         orientation,

@@ -1,7 +1,7 @@
 appId: com.orbit.launcher
 productName: ORBIT
-buildVersion: 0.1.1.0
-artifactName: ORBIT-Setup-0.1.1-${arch}.${ext}
+buildVersion: 0.1.2.0
+artifactName: ORBIT-Beta-Setup-0.1.2-beta.1-${arch}.${ext}
 copyright: Copyright © 2026 Luis Garcia
 forceCodeSigning: true
 
@@ -21,11 +21,20 @@ files:
 extraResources:
   - from: resources/release-manifest.json
     to: release-manifest.json
+  - from: LICENSE
+    to: LICENSE
+  - from: LICENSE_EXCEPTION.md
+    to: LICENSE_EXCEPTION.md
+  - from: THIRD_PARTY_NOTICES.md
+    to: THIRD_PARTY_NOTICES.md
   - from: resources/discord-social-sdk
     to: discord-social-sdk
+  - from: resources/wallpapers
+    to: wallpapers
 
 asar: true
 asarUnpack:
+  - node_modules/7zip-bin/**/*
   - node_modules/koffi/**/*
   - node_modules/@koromix/koffi-win32-x64/**/*
 compression: normal
@@ -59,7 +68,7 @@ nsis:
   runAfterFinish: true
   packElevateHelper: false
   differentialPackage: true
-  uninstallDisplayName: ORBIT 0.1.1
+  uninstallDisplayName: ORBIT Beta 0.1.2-beta.1
   installerIcon: build/installerIcon.ico
   uninstallerIcon: build/uninstallerIcon.ico
   installerHeader: build/installerHeader.bmp

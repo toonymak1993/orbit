@@ -10,6 +10,11 @@ interface Props {
   getKeyLabel: string
   getKeyUrl: string
   onSave: (value: string) => Promise<void>
+  configured?: boolean
+  configuredLabel?: string
+  notConfiguredLabel?: string
+  clearLabel?: string
+  onClear?: () => Promise<void>
 }
 
 export function ApiKeyField({
@@ -18,7 +23,12 @@ export function ApiKeyField({
   placeholder,
   getKeyLabel,
   getKeyUrl,
-  onSave
+  onSave,
+  configured,
+  configuredLabel,
+  notConfiguredLabel,
+  clearLabel,
+  onClear
 }: Props): JSX.Element {
   const t = useT()
   const [draft, setDraft] = useState(value)
@@ -43,6 +53,25 @@ export function ApiKeyField({
     setSaveState('saving')
     try {
       await onSave(normalizedDraft)
+      if (configured !== undefined) {
+        setDraft('')
+        setRevealed(false)
+      }
+      setSaveState('saved')
+      resetTimer.current = setTimeout(() => setSaveState('idle'), 1800)
+    } catch {
+      setSaveState('error')
+    }
+  }
+
+  async function handleClear(): Promise<void> {
+    if (!onClear || saveState === 'saving') return
+    if (resetTimer.current) clearTimeout(resetTimer.current)
+    setSaveState('saving')
+    try {
+      await onClear()
+      setDraft('')
+      setRevealed(false)
       setSaveState('saved')
       resetTimer.current = setTimeout(() => setSaveState('idle'), 1800)
     } catch {
@@ -101,6 +130,24 @@ export function ApiKeyField({
           <CircleAlert size={13} />
           {t('settings.images.saveError')}
         </p>
+      )}
+      {configured !== undefined && (
+        <div className="mt-3 flex flex-wrap items-center gap-3 text-xs">
+          <span className={configured ? 'text-emerald-200/80' : 'text-white/45'}>
+            {configured ? configuredLabel : notConfiguredLabel}
+          </span>
+          {configured && onClear && clearLabel && (
+            <FocusableButton
+              variant="ghost"
+              disabled={saveState === 'saving'}
+              data-disabled={saveState === 'saving' ? 'true' : undefined}
+              onClick={() => void handleClear()}
+              className="px-3 py-1.5 text-[11px] disabled:opacity-45"
+            >
+              {clearLabel}
+            </FocusableButton>
+          )}
+        </div>
       )}
       <button
         data-focusable

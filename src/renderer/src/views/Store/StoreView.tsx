@@ -138,7 +138,11 @@ export function StoreView(): JSX.Element {
   const [query, setQuery] = useState('')
   const [selectedProductId, setSelectedProductId] = useState<string | null>(null)
   const lastOpenedProductId = useRef<string | null>(null)
-  const libraryGames = useLibraryStore((state) => state.snapshot.games)
+  const librarySnapshot = useLibraryStore((state) => state.snapshot)
+  const libraryGames = useMemo(
+    () => [...librarySnapshot.games, ...(librarySnapshot.excludedGames ?? [])],
+    [librarySnapshot.excludedGames, librarySnapshot.games]
+  )
   const isActive = useNavigationStore((state) => state.mainView === 'store')
   const {
     expanded: searchExpanded,
