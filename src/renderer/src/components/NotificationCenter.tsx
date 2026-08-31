@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { AnimatePresence, motion, useReducedMotion, type Variants } from 'framer-motion'
 import { BadgeEuro, BellRing, Check, CircleAlert, Sparkles } from 'lucide-react'
+import { ControllerButtonHint } from './ControllerButtonHint'
 import type { NotificationMotion, NotificationPosition } from '@shared/ipc'
 import { useT } from '@renderer/i18n/useT'
 import { usePreferencesStore } from '@renderer/state/preferencesStore'
@@ -81,7 +82,7 @@ export function NotificationCenter(): JSX.Element {
 
   return (
     <div
-      className={`pointer-events-none fixed z-[100] flex w-[min(26rem,calc(100vw-2rem))] flex-col ${POSITION_CLASS[position]}`}
+      className={`pointer-events-none fixed z-[100] flex w-[min(28rem,calc(100vw-2rem))] flex-col ${POSITION_CLASS[position]}`}
       aria-live="polite"
       aria-atomic="true"
     >
@@ -95,7 +96,7 @@ export function NotificationCenter(): JSX.Element {
             animate="animate"
             exit="exit"
             transition={{ duration: reduceMotion ? 0.12 : 0.42, ease: [0.22, 1, 0.36, 1] }}
-            className="relative w-full overflow-hidden rounded-[var(--radius-card)] border border-white/[0.11] bg-surface/90 p-1 shadow-[0_24px_70px_rgba(0,0,0,0.48)] backdrop-blur-2xl"
+            className="pointer-events-auto relative w-full overflow-hidden rounded-[var(--radius-card)] border border-white/[0.11] bg-surface/90 p-1 shadow-[0_24px_70px_rgba(0,0,0,0.48)] backdrop-blur-2xl"
           >
             <div className="relative flex items-center gap-3 overflow-hidden rounded-[calc(var(--radius-card)-0.25rem)] bg-[linear-gradient(135deg,rgb(255_255_255/0.055),transparent_64%)] px-4 py-3.5">
               <Sparkles
@@ -120,6 +121,27 @@ export function NotificationCenter(): JSX.Element {
                 ORBIT
               </span>
             </div>
+            {current.actionLabelKey && current.onAction && (
+              <button
+                data-focusable
+                data-notification-action="true"
+                type="button"
+                onClick={() => {
+                  current.onAction?.()
+                  dismiss(current.id)
+                }}
+                className="mx-2 mb-2 flex min-h-10 w-[calc(100%-1rem)] items-center justify-between rounded-[calc(var(--radius-card)*0.65)] border border-white/10 bg-white/[0.055] px-3 text-xs font-bold text-white/75 transition hover:bg-white/10 hover:text-white"
+              >
+                <span>{t(current.actionLabelKey, current.vars)}</span>
+                <span className="flex items-center gap-1.5 text-[10px] uppercase tracking-[0.12em] text-white/40">
+                  <ControllerButtonHint
+                    button="west"
+                    className="flex h-5 min-w-5 items-center justify-center rounded-full border border-white/15 bg-black/20 px-1 text-[9px] font-black text-white/70"
+                  />
+                  {t('friends.chat.notificationShortcut')}
+                </span>
+              </button>
+            )}
             <motion.div
               key={`${current.id}-progress`}
               initial={{ scaleX: 1 }}

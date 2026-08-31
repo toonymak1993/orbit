@@ -45,6 +45,7 @@ interface FriendsState {
 }
 
 let listening = false
+let initPromise: Promise<void> | null = null
 
 function commitSnapshot(snapshot: FriendsSnapshot): void {
   useFriendsStore.setState({ snapshot })
@@ -56,13 +57,23 @@ export const useFriendsStore = create<FriendsState>((set, get) => ({
   filter: 'all',
 
   init: async () => {
+    if (get().initialized) return
+    if (initPromise) return initPromise
     if (!listening) {
       listening = true
       window.api.friends.onUpdated(commitSnapshot)
     }
-    commitSnapshot(await window.api.friends.get())
-    set({ initialized: true })
-    void get().refresh().catch(() => undefined)
+    initPromise = window.api.friends
+      .get()
+      .then((snapshot) => {
+        commitSnapshot(snapshot)
+        set({ initialized: true })
+        void get().refresh().catch(() => undefined)
+      })
+      .finally(() => {
+        initPromise = null
+      })
+    return initPromise
   },
 
   refresh: async () => {

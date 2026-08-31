@@ -6,6 +6,7 @@ import { FriendsView } from '@renderer/views/Friends/FriendsView'
 import { LibraryView } from '@renderer/views/Library/LibraryView'
 import { StoreView } from '@renderer/views/Store/StoreView'
 import { SettingsView } from '@renderer/views/Settings/SettingsView'
+import { ApplicationsView } from '@renderer/views/Applications/ApplicationsView'
 import {
   useNavigationStore,
   type MainView
@@ -23,6 +24,7 @@ import { AppUpdateBanner } from './AppUpdateBanner'
 import { useAppUpdateStore } from '@renderer/state/appUpdateStore'
 import { BottomStatusHud } from './BottomStatusHud'
 import type { GameLaunchStatus } from '@shared/ipc'
+import { DiscordChatController } from './DiscordChatController'
 
 const SESSION_SUMMARY_VISIBLE_MS = 6_000
 
@@ -117,6 +119,7 @@ export function MainShell(): JSX.Element {
 
   function renderView(view: MainView): JSX.Element {
     if (view === 'home') return <HomeView />
+    if (view === 'applications') return <ApplicationsView />
     if (view === 'friends') return <FriendsView />
     if (view === 'library') return <LibraryView />
     if (view === 'store') return <StoreView />
@@ -125,6 +128,7 @@ export function MainShell(): JSX.Element {
 
   return (
     <div className="relative h-full w-full overflow-hidden">
+      <DiscordChatController />
       <div ref={shellRef} className="flex h-full w-full flex-col overflow-hidden">
         <TopBar />
         <main className="relative flex-1 overflow-hidden">

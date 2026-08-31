@@ -1,24 +1,31 @@
-import Store from 'electron-store'
 import { app } from 'electron'
-import type {
-  GameAchievement,
-  GameAchievementsSnapshot,
-  LibraryGame
-} from '@shared/ipc'
+import Store from 'electron-store'
+import type { GameAchievementsSnapshot, LibraryGame } from '@shared/ipc'
 import { latestLibraryActivity } from '@shared/libraryTime'
+import { fetchWithElectronNet } from '../networkFetch'
+import {
+  fetchRetroAchievements,
+  hasRetroAchievementsCredentials
+} from '../retro/retroAchievements'
 import { settingsStore } from '../settingsStore'
 import { steamAuthManager } from '../steam/steamAuth'
 import { syncCoordinator } from '../sync/syncCoordinator'
+import {
+  parseSteamCommunityAchievements,
+  parseSteamWebApiAchievements
+} from './steamAchievementParsers'
 
 interface AchievementDatabase {
   schemaVersion: number
   snapshots: Record<string, GameAchievementsSnapshot>
 }
 
+const ACHIEVEMENT_SCHEMA_VERSION = 4
 const AVAILABLE_TTL_MS = 6 * 60 * 60 * 1000
-const UNAVAILABLE_TTL_MS = 7 * 24 * 60 * 60 * 1000
-const STARTUP_BATCH_LIMIT = 12
-const REQUEST_PACING_MS = 450
+const PRIVATE_TTL_MS = 6 * 60 * 60 * 1000
+const UNSUPPORTED_TTL_MS = 30 * 24 * 60 * 60 * 1000
+const TRANSIENT_TTL_MS = 5 * 60 * 1000
+const REQUEST_PACING_MS = 900
 
 function wait(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds))
@@ -26,14 +33,21 @@ function wait(milliseconds: number): Promise<void> {
 
 const database = new Store<AchievementDatabase>({
   name: 'orbit-achievements',
-  defaults: { schemaVersion: 3, snapshots: {} }
+  defaults: { schemaVersion: ACHIEVEMENT_SCHEMA_VERSION, snapshots: {} }
 })
 const databaseState: AchievementDatabase = database.store
 let databasePersistTimer: ReturnType<typeof setTimeout> | undefined
 
-if (databaseState.schemaVersion < 3) {
-  databaseState.schemaVersion = 3
-  databaseState.snapshots = {}
+if (databaseState.schemaVersion < 3) databaseState.snapshots = {}
+if (databaseState.schemaVersion < ACHIEVEMENT_SCHEMA_VERSION) {
+  // Versions through 3 cached every network/session failure as a definitive
+  // seven-day miss. Preserve successful data, but let false negatives join
+  // the repaired background sync immediately.
+  for (const [gameId, snapshot] of Object.entries(databaseState.snapshots)) {
+    if (snapshot.state === 'unavailable') delete databaseState.snapshots[gameId]
+  }
+  databaseState.schemaVersion = ACHIEVEMENT_SCHEMA_VERSION
+  database.store = databaseState
 }
 
 function flushDatabase(): void {
@@ -51,106 +65,15 @@ function scheduleDatabasePersist(): void {
 app.on('before-quit', flushDatabase)
 
 function fresh(snapshot: GameAchievementsSnapshot): boolean {
-  const ttl = snapshot.state === 'available' ? AVAILABLE_TTL_MS : UNAVAILABLE_TTL_MS
+  const ttl =
+    snapshot.state === 'available'
+      ? AVAILABLE_TTL_MS
+      : snapshot.reason === 'unsupported'
+        ? UNSUPPORTED_TTL_MS
+        : snapshot.reason === 'private'
+          ? PRIVATE_TTL_MS
+          : TRANSIENT_TTL_MS
   return Date.now() - snapshot.fetchedAt < ttl
-}
-
-function decodeXml(value: string): string {
-  return value
-    .replace(/^<!\[CDATA\[|\]\]>$/g, '')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .trim()
-}
-
-function xmlTag(block: string, tag: string): string | undefined {
-  const match = block.match(new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, 'i'))
-  return match ? decodeXml(match[1]) : undefined
-}
-
-function parseSteamAchievements(game: LibraryGame, xml: string): GameAchievementsSnapshot {
-  const fetchedAt = Date.now()
-  if (/<privacyMessage>/i.test(xml)) {
-    return {
-      gameId: game.id,
-      provider: 'steam',
-      state: 'unavailable',
-      achievements: [],
-      unlocked: 0,
-      total: 0,
-      fetchedAt,
-      reason: 'private'
-    }
-  }
-
-  const achievements: GameAchievement[] = []
-  for (const match of xml.matchAll(/<achievement\b[^>]*>([\s\S]*?)<\/achievement>/gi)) {
-    const block = match[1]
-    const id = xmlTag(block, 'apiname')
-    const name = xmlTag(block, 'name')
-    if (!id || !name) continue
-    const unlocked = /<achievement\b[^>]*\bclosed=["']1["']/i.test(match[0])
-    const unlockSeconds = Number(xmlTag(block, 'unlockTimestamp'))
-    achievements.push({
-      id,
-      name,
-      description: xmlTag(block, 'description'),
-      iconUrl: xmlTag(block, 'iconClosed'),
-      lockedIconUrl: xmlTag(block, 'iconOpen'),
-      unlocked,
-      unlockedAt:
-        unlocked && Number.isFinite(unlockSeconds) && unlockSeconds > 0
-          ? unlockSeconds * 1000
-          : undefined
-    })
-  }
-
-  if (achievements.length === 0) {
-    return {
-      gameId: game.id,
-      provider: 'steam',
-      state: 'unavailable',
-      achievements: [],
-      unlocked: 0,
-      total: 0,
-      fetchedAt,
-      reason: 'unavailable'
-    }
-  }
-
-  return {
-    gameId: game.id,
-    provider: 'steam',
-    state: 'available',
-    achievements,
-    unlocked: achievements.filter((achievement) => achievement.unlocked).length,
-    total: achievements.length,
-    fetchedAt
-  }
-}
-
-async function fetchSteamAchievements(game: LibraryGame): Promise<GameAchievementsSnapshot> {
-  if (!game.appId) return unavailable(game, 'unavailable')
-  const account = steamAuthManager.getAccount() ?? (await steamAuthManager.restoreSession())
-  if (!account) return unavailable(game, 'unavailable')
-  const language = settingsStore.store.language === 'de' ? 'german' : 'english'
-  const url = new URL(
-    `https://steamcommunity.com/profiles/${account.steamId}/stats/${game.appId}/`
-  )
-  url.searchParams.set('xml', '1')
-  url.searchParams.set('l', language)
-  try {
-    const response = await steamAuthManager.fetchAuthenticated(url, {
-      signal: AbortSignal.timeout(15_000)
-    })
-    if (!response.ok) return unavailable(game, response.status === 403 ? 'private' : 'unavailable')
-    return parseSteamAchievements(game, await response.text())
-  } catch {
-    return unavailable(game, 'unavailable')
-  }
 }
 
 function unavailable(
@@ -169,16 +92,87 @@ function unavailable(
   }
 }
 
+async function fetchSteamWebApiAchievements(
+  game: LibraryGame,
+  steamId: string,
+  apiKey: string,
+  language: string
+): Promise<GameAchievementsSnapshot> {
+  const url = new URL(
+    'https://api.steampowered.com/ISteamUserStats/GetPlayerAchievements/v1/'
+  )
+  url.searchParams.set('key', apiKey)
+  url.searchParams.set('steamid', steamId)
+  url.searchParams.set('appid', String(game.appId))
+  url.searchParams.set('l', language)
+  try {
+    const response = await fetchWithElectronNet(url, { signal: AbortSignal.timeout(15_000) })
+    if (!response.ok) return unavailable(game, 'unavailable')
+    return parseSteamWebApiAchievements(game, await response.json())
+  } catch {
+    return unavailable(game, 'unavailable')
+  }
+}
+
+async function fetchSteamCommunityAchievements(
+  game: LibraryGame,
+  steamId: string,
+  language: string
+): Promise<GameAchievementsSnapshot> {
+  const url = new URL(`https://steamcommunity.com/profiles/${steamId}/stats/${game.appId}/`)
+  url.searchParams.set('xml', '1')
+  url.searchParams.set('l', language)
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const response = await steamAuthManager.fetchAuthenticated(url, {
+        signal: AbortSignal.timeout(15_000)
+      })
+      if (response.ok) return parseSteamCommunityAchievements(game, await response.text())
+      if (response.status !== 429 && response.status < 500) break
+    } catch {
+      // One paced retry absorbs brief session/network transitions without
+      // turning the entire library into a long-lived negative cache.
+    }
+    if (attempt === 0) await wait(800)
+  }
+  return unavailable(game, 'unavailable')
+}
+
+async function fetchSteamAchievements(game: LibraryGame): Promise<GameAchievementsSnapshot> {
+  if (!game.appId) return unavailable(game, 'unavailable')
+  const account = steamAuthManager.getAccount() ?? (await steamAuthManager.restoreSession())
+  if (!account) return unavailable(game, 'not-connected')
+  const language = settingsStore.store.language === 'de' ? 'german' : 'english'
+  const apiKey = settingsStore.store.steamWebApiKey?.trim()
+
+  if (apiKey) {
+    const apiSnapshot = await fetchSteamWebApiAchievements(
+      game,
+      account.steamId,
+      apiKey,
+      language
+    )
+    if (apiSnapshot.state === 'available' || apiSnapshot.reason !== 'unavailable') {
+      return apiSnapshot
+    }
+  }
+
+  return fetchSteamCommunityAchievements(game, account.steamId, language)
+}
+
 async function fetchProviderAchievements(game: LibraryGame): Promise<GameAchievementsSnapshot> {
   if (game.provider === 'steam') return fetchSteamAchievements(game)
+  if (game.provider === 'retro') return fetchRetroAchievements(game)
   // Epic achievement state requires game-specific EOS credentials. The adapter
-  // remains explicit and cached instead of pretending that an Epic web login
-  // grants access to EOS player data.
+  // remains explicit instead of pretending that an Epic web login grants access
+  // to EOS player data. Xbox and PlayStation need their own account adapters too.
   return unavailable(game, 'unsupported')
 }
 
 export class AchievementService {
   private inFlight = new Map<string, Promise<GameAchievementsSnapshot>>()
+  private syncInFlight: Promise<void> | null = null
 
   get(gameId: string): GameAchievementsSnapshot | null {
     return databaseState.snapshots[gameId] ?? null
@@ -212,28 +206,46 @@ export class AchievementService {
     return request
   }
 
-  async syncStartup(games: LibraryGame[]): Promise<void> {
+  syncStartup(games: LibraryGame[]): Promise<void> {
+    return this.sync(games)
+  }
+
+  sync(games: LibraryGame[], forceUnavailable = false): Promise<void> {
+    if (this.syncInFlight) return this.syncInFlight
+    const request = this.runSync(games, forceUnavailable).finally(() => {
+      if (this.syncInFlight === request) this.syncInFlight = null
+    })
+    this.syncInFlight = request
+    return request
+  }
+
+  private async runSync(games: LibraryGame[], forceUnavailable: boolean): Promise<void> {
     if (!settingsStore.store.showAchievements) {
       syncCoordinator.begin('achievements', 0, 0, undefined, 'system')
       return
     }
 
+    const steamConnected = Boolean(steamAuthManager.getAccount())
+    const retroConnected = hasRetroAchievementsCredentials()
     const candidates = games
       .filter(
         (game) =>
-          game.provider === 'steam' || game.provider === 'epic'
-      )
-      .filter(
-        (game) =>
-          (game.playtimeMinutes ?? 0) > 0 ||
-          (game.metadata.achievementCount ?? 0) > 0
+          (steamConnected && game.provider === 'steam' &&
+            ((game.metadata.achievementCount ?? 0) > 0 ||
+              this.get(game.id)?.state === 'available')) ||
+          (retroConnected &&
+            game.provider === 'retro' &&
+            Boolean(game.retro?.retroAchievementsGameId))
       )
       .sort((a, b) => latestLibraryActivity(b) - latestLibraryActivity(a))
-      .slice(0, STARTUP_BATCH_LIMIT)
 
     const stale = candidates.filter((game) => {
       const cached = this.get(game.id)
-      return !cached || !fresh(cached)
+      return (
+        !cached ||
+        !fresh(cached) ||
+        (forceUnavailable && cached.state === 'unavailable')
+      )
     })
     const completedInitially = candidates.length - stale.length
     syncCoordinator.begin(
@@ -250,7 +262,7 @@ export class AchievementService {
       while (queue.length > 0) {
         const game = queue.shift()
         if (!game) return
-        await this.resolve(game)
+        await this.resolve(game, forceUnavailable)
         completed += 1
         syncCoordinator.progress(
           'achievements',

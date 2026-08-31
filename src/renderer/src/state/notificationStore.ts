@@ -12,6 +12,8 @@ export interface OrbitNotificationInput {
   durationMs?: number
   force?: boolean
   replace?: boolean
+  actionLabelKey?: TranslationKey
+  onAction?: () => void
 }
 
 export interface OrbitNotification extends OrbitNotificationInput {

@@ -21,11 +21,20 @@ files:
 extraResources:
   - from: resources/release-manifest.json
     to: release-manifest.json
+  - from: LICENSE
+    to: LICENSE
+  - from: LICENSE_EXCEPTION.md
+    to: LICENSE_EXCEPTION.md
+  - from: THIRD_PARTY_NOTICES.md
+    to: THIRD_PARTY_NOTICES.md
   - from: resources/discord-social-sdk
     to: discord-social-sdk
+  - from: resources/wallpapers
+    to: wallpapers
 
 asar: true
 asarUnpack:
+  - node_modules/7zip-bin/**/*
   - node_modules/koffi/**/*
   - node_modules/@koromix/koffi-win32-x64/**/*
 compression: normal

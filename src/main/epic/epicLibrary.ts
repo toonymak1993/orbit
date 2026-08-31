@@ -83,7 +83,7 @@ export class EpicLibraryService
       this.pendingMetadataIds.delete(metadata.providerGameId)
       if (shouldRemoveEpicEntitlement(metadata.kind)) {
         this.unresolvedMetadataIds.delete(metadata.providerGameId)
-        if (gameRepository.removeProviderGame('epic', metadata.providerGameId)) this.emitSnapshot()
+        if (gameRepository.removeProviderContent('epic', metadata.providerGameId)) this.emitSnapshot()
         this.finishMetadataStatus()
         return
       }

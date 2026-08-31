@@ -1,16 +1,18 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
-import { AlertTriangle, Loader2, Save, X } from 'lucide-react'
+import { AlertTriangle, Loader2, RotateCcw, Save, ShieldCheck, X } from 'lucide-react'
 import type { LibrarySnapshot } from '@shared/ipc'
 import { useBackHandler } from '@renderer/hooks/useBackHandler'
 import { useT } from '@renderer/i18n/useT'
 import { focusElement } from '@renderer/lib/spatialNavigation'
 
 interface Props {
-  gameId: string
   gameName: string
   initialArguments?: string[]
+  defaultArguments?: string[]
+  context: 'local' | 'retro'
+  onSave: (launchArguments?: string) => Promise<LibrarySnapshot>
   onSaved: (snapshot: LibrarySnapshot) => void
   onClose: () => void
 }
@@ -36,14 +38,16 @@ function formatWindowsArgument(value: string): string {
   return output + '\\'.repeat(backslashes * 2) + '"'
 }
 
-function formatWindowsArguments(values: string[] | undefined): string {
+export function formatWindowsArguments(values: string[] | undefined): string {
   return (values ?? []).map(formatWindowsArgument).join(' ')
 }
 
 export function LaunchOptionsDialog({
-  gameId,
   gameName,
   initialArguments,
+  defaultArguments,
+  context,
+  onSave,
   onSaved,
   onClose
 }: Props): JSX.Element {
@@ -52,6 +56,7 @@ export function LaunchOptionsDialog({
   const [value, setValue] = useState(() => formatWindowsArguments(initialArguments))
   const [busy, setBusy] = useState(false)
   const [failed, setFailed] = useState(false)
+  const [resetToDefaultOnSave, setResetToDefaultOnSave] = useState(false)
 
   useBackHandler(() => {
     if (!busy) onClose()
@@ -72,10 +77,7 @@ export function LaunchOptionsDialog({
     setBusy(true)
     setFailed(false)
     try {
-      const snapshot = await window.api.library.custom.setLaunchArguments({
-        gameId,
-        launchArguments: value.trim() || undefined
-      })
+      const snapshot = await onSave(resetToDefaultOnSave ? undefined : value.trim() || undefined)
       onSaved(snapshot)
     } catch {
       setFailed(true)
@@ -115,7 +117,7 @@ export function LaunchOptionsDialog({
         <header className="relative flex items-start justify-between gap-5 border-b border-white/[0.07] px-7 py-5">
           <div className="min-w-0">
             <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-accent">
-              ORBIT · LOCAL
+              ORBIT · {context === 'retro' ? 'RETRO' : 'LOCAL'}
             </p>
             <h2 id="launch-options-title" className="mt-1 text-2xl font-bold text-white">
               {t('launchOptions.title')}
@@ -153,16 +155,26 @@ export function LaunchOptionsDialog({
               autoCapitalize="none"
               autoCorrect="off"
               placeholder={t('customGame.launchArgumentsPlaceholder')}
-              onChange={(event) => setValue(event.target.value)}
+              onChange={(event) => {
+                setValue(event.target.value)
+                setResetToDefaultOnSave(false)
+              }}
               onKeyDown={(event) => {
                 if (event.key === 'Enter') void save()
               }}
               className="w-full rounded-xl2 border border-white/10 bg-black/25 px-4 py-3.5 font-mono text-sm text-white outline-none transition-colors placeholder:text-white/25 focus:border-accent/60"
             />
             <span className="mt-2 block text-xs leading-relaxed text-white/40">
-              {t('launchOptions.hint')}
+              {t(context === 'retro' ? 'launchOptions.retroHint' : 'launchOptions.hint')}
             </span>
           </label>
+
+          {context === 'retro' && (
+            <p className="mt-4 flex items-start gap-2 rounded-xl border border-accent/15 bg-accent/[0.07] px-3.5 py-3 text-xs leading-relaxed text-white/55">
+              <ShieldCheck size={16} className="mt-0.5 shrink-0 text-accent" />
+              {t('launchOptions.fullscreenEnforced')}
+            </p>
+          )}
 
           {failed && (
             <p role="alert" className="mt-4 flex items-center gap-2 rounded-xl border border-rose-300/15 bg-rose-300/[0.08] px-3.5 py-3 text-sm text-rose-100">
@@ -173,6 +185,23 @@ export function LaunchOptionsDialog({
         </div>
 
         <footer className="relative flex items-center justify-end gap-2 border-t border-white/[0.07] px-7 py-4">
+          {defaultArguments && (
+            <button
+              data-focusable
+              data-disabled={busy ? 'true' : undefined}
+              disabled={busy}
+              type="button"
+              onClick={() => {
+                setValue(formatWindowsArguments(defaultArguments))
+                setResetToDefaultOnSave(true)
+                setFailed(false)
+              }}
+              className="mr-auto flex items-center gap-2 rounded-full px-4 py-3 text-sm font-semibold text-white/55 transition-colors hover:bg-white/[0.06] hover:text-white disabled:opacity-40"
+            >
+              <RotateCcw size={15} />
+              {t('launchOptions.resetDefault')}
+            </button>
+          )}
           <button
             data-focusable
             data-disabled={busy ? 'true' : undefined}

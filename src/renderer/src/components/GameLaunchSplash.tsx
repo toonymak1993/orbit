@@ -1,13 +1,18 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { motion, useReducedMotion } from 'framer-motion'
 import { AlertTriangle, ExternalLink, X } from 'lucide-react'
-import { GAME_LAUNCH_CANCEL_WINDOW_MS, type GameLaunchStatus } from '@shared/ipc'
+import {
+  GAME_LAUNCH_CANCEL_WINDOW_MS,
+  GAME_TRACKING_STOP_HOLD_MS,
+  type GameLaunchStatus
+} from '@shared/ipc'
 import { GameImage } from './GameImage'
 import { ControllerButtonHint } from './ControllerButtonHint'
 import { useBackHandler } from '@renderer/hooks/useBackHandler'
 import { useT } from '@renderer/i18n/useT'
 import { focusElement, focusFirstIn } from '@renderer/lib/spatialNavigation'
 import { playUiSound } from '@renderer/lib/uiAudio'
+import { subscribeBackInput } from '@renderer/lib/backHandlerStack'
 
 interface Props {
   status: GameLaunchStatus
@@ -31,9 +36,15 @@ export function GameLaunchSplash({ status }: Props): JSX.Element {
   const [, setClock] = useState(0)
   const [now, setNow] = useState(() => Date.now())
   const [cancelInFlight, setCancelInFlight] = useState(false)
+  const [stopTrackingInFlight, setStopTrackingInFlight] = useState(false)
+  const [stopHoldActive, setStopHoldActive] = useState(false)
+  const [stopHoldProgress, setStopHoldProgress] = useState(0)
   const cancelRef = useRef<HTMLButtonElement>(null)
   const revealRef = useRef<HTMLButtonElement>(null)
   const returnFocusRef = useRef<HTMLElement | null>(null)
+  const stopHoldStartedAtRef = useRef<number | null>(null)
+  const stopHoldFrameRef = useRef<number | null>(null)
+  const stopTrackingInFlightRef = useRef(false)
   const cancelableUntil = status.cancelableUntil
   const remainingMs = cancelableUntil ? Math.max(0, cancelableUntil - now) : 0
   const canCancel = status.phase === 'launching' && remainingMs > 0
@@ -46,6 +57,98 @@ export function GameLaunchSplash({ status }: Props): JSX.Element {
       )
     : 1
   const countdownProgress = Math.min(1, remainingMs / cancelWindowMs)
+  const stopHoldTotalSeconds = Math.ceil(GAME_TRACKING_STOP_HOLD_MS / 1_000)
+  const stopHoldRemainingSeconds = Math.max(
+    1,
+    Math.ceil((GAME_TRACKING_STOP_HOLD_MS * (1 - stopHoldProgress)) / 1_000)
+  )
+
+  const cancelStopHold = useCallback((): void => {
+    if (stopHoldFrameRef.current !== null) {
+      cancelAnimationFrame(stopHoldFrameRef.current)
+      stopHoldFrameRef.current = null
+    }
+    stopHoldStartedAtRef.current = null
+    if (!stopTrackingInFlightRef.current) {
+      setStopHoldActive(false)
+      setStopHoldProgress(0)
+    }
+  }, [])
+
+  const requestStopTracking = useCallback((): void => {
+    if (status.phase !== 'running' || stopTrackingInFlightRef.current) return
+    stopTrackingInFlightRef.current = true
+    setStopHoldActive(false)
+    setStopHoldProgress(1)
+    setStopTrackingInFlight(true)
+    playUiSound('close')
+    void window.api.game
+      .stopTracking()
+      .then((stopped) => {
+        if (stopped) return
+        stopTrackingInFlightRef.current = false
+        setStopTrackingInFlight(false)
+        setStopHoldProgress(0)
+        playUiSound('error')
+      })
+      .catch(() => {
+        stopTrackingInFlightRef.current = false
+        setStopTrackingInFlight(false)
+        setStopHoldProgress(0)
+        playUiSound('error')
+      })
+  }, [status.phase])
+
+  const beginStopHold = useCallback((): void => {
+    if (
+      status.phase !== 'running' ||
+      stopTrackingInFlightRef.current ||
+      stopHoldStartedAtRef.current !== null
+    ) {
+      return
+    }
+
+    stopHoldStartedAtRef.current = performance.now()
+    setStopHoldActive(true)
+    setStopHoldProgress(0)
+    const updateProgress = (timestamp: number): void => {
+      const startedAt = stopHoldStartedAtRef.current
+      if (startedAt === null) return
+      const progress = Math.min(1, (timestamp - startedAt) / GAME_TRACKING_STOP_HOLD_MS)
+      setStopHoldProgress(progress)
+      if (progress >= 1) {
+        stopHoldStartedAtRef.current = null
+        stopHoldFrameRef.current = null
+        requestStopTracking()
+        return
+      }
+      stopHoldFrameRef.current = requestAnimationFrame(updateProgress)
+    }
+    stopHoldFrameRef.current = requestAnimationFrame(updateProgress)
+  }, [requestStopTracking, status.phase])
+
+  useEffect(() => {
+    if (status.phase !== 'running') return
+    return subscribeBackInput((pressed) => {
+      if (pressed) beginStopHold()
+      else cancelStopHold()
+      return true
+    })
+  }, [beginStopHold, cancelStopHold, status.phase])
+
+  useEffect(() => {
+    if (status.phase === 'running') return
+    cancelStopHold()
+    stopTrackingInFlightRef.current = false
+    setStopTrackingInFlight(false)
+  }, [cancelStopHold, status.phase])
+
+  useEffect(
+    () => () => {
+      if (stopHoldFrameRef.current !== null) cancelAnimationFrame(stopHoldFrameRef.current)
+    },
+    []
+  )
 
   useEffect(() => {
     if (status.phase !== 'running') return
@@ -114,11 +217,13 @@ export function GameLaunchSplash({ status }: Props): JSX.Element {
         ? t('launch.backupComplete')
         : status.returnTask === 'backup-failed'
           ? t('launch.backupFailed')
-          : t('launch.returning')
+          : status.returnTask === 'tracking-stopped'
+            ? t('launch.trackingStopped')
+            : t('launch.returning')
   const failureTitle =
-    status.failureReason === 'monitor-unavailable'
-      ? t('launch.monitorUnavailable')
-      : t('launch.failed')
+    status.failureReason === 'launch-rejected'
+      ? t('launch.failed')
+      : t('launch.monitorUnavailable')
   const failureDescription =
     status.failureReason === 'launch-rejected'
       ? t('launch.failureLaunchRejected')
@@ -132,7 +237,11 @@ export function GameLaunchSplash({ status }: Props): JSX.Element {
     : status.phase === 'launching'
       ? t('launch.starting')
       : status.phase === 'running'
-        ? t('launch.running')
+        ? stopTrackingInFlight
+          ? t('launch.stoppingTracking')
+          : stopHoldActive
+            ? t('launch.stopTrackingCountdown', { seconds: stopHoldRemainingSeconds })
+            : t('launch.running')
         : status.phase === 'returning'
           ? returnTitle
           : failureTitle
@@ -239,6 +348,20 @@ export function GameLaunchSplash({ status }: Props): JSX.Element {
               style={{ transform: `scaleX(${countdownProgress})` }}
             />
           </div>
+        ) : status.phase === 'running' && (stopHoldActive || stopTrackingInFlight) ? (
+          <div
+            role="progressbar"
+            aria-label={t('launch.stopTracking')}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={Math.round(stopHoldProgress * 100)}
+            className="mt-4 h-1 w-[min(15rem,58vw)] overflow-hidden rounded-full bg-white/10"
+          >
+            <div
+              className={`h-full origin-left rounded-full bg-red-400 ${reduceMotion ? '' : 'transition-transform duration-75 ease-linear'}`}
+              style={{ transform: `scaleX(${stopHoldProgress})` }}
+            />
+          </div>
         ) : status.phase !== 'error' ? (
           <div className="mt-5 flex h-4 items-center gap-2">
             {[0, 1, 2].map((index) => (
@@ -261,11 +384,13 @@ export function GameLaunchSplash({ status }: Props): JSX.Element {
             ? t('launch.cancelHint')
             : status.phase === 'error'
               ? failureDescription
-            : status.phase === 'running'
-              ? t('launch.sessionActive')
-              : status.phase === 'launching'
-                ? t('launch.waitingForGame')
-                : t('launch.automaticReturn')}
+              : status.phase === 'running'
+                ? stopHoldActive
+                  ? t('launch.stopTrackingReleaseHint')
+                  : t('launch.sessionActive')
+                : status.phase === 'launching'
+                  ? t('launch.waitingForGame')
+                  : t('launch.automaticReturn')}
         </p>
         {elapsed && <p className="mt-2 font-mono text-xs tracking-wider text-white/45">{elapsed}</p>}
 
@@ -290,21 +415,69 @@ export function GameLaunchSplash({ status }: Props): JSX.Element {
         )}
 
         {showLauncher && (
-          <button
-            ref={revealRef}
-            data-focusable
-            type="button"
-            aria-keyshortcuts="Y"
-            onClick={() => void window.api.game.revealLauncher()}
-            className="mt-6 inline-flex items-center gap-2 rounded-full border border-white/12 bg-black/35 px-4 py-2 text-xs font-semibold text-white/65 backdrop-blur-xl transition-colors hover:border-accent/45 hover:text-white focus:border-accent/60 focus:text-white"
-          >
-            <ControllerButtonHint
-              button="north"
-              className="flex h-5 min-w-5 items-center justify-center rounded-md border border-white/15 bg-white/[0.07] px-1 text-[9px] font-black text-white/55"
-            />
-            <ExternalLink size={13} />
-            {t('launch.showLauncher')}
-          </button>
+          <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+            <button
+              ref={revealRef}
+              data-focusable
+              type="button"
+              aria-keyshortcuts="Y"
+              onClick={() => void window.api.game.revealLauncher()}
+              className="inline-flex items-center gap-2 rounded-full border border-white/12 bg-black/35 px-4 py-2 text-xs font-semibold text-white/65 backdrop-blur-xl transition-colors hover:border-accent/45 hover:text-white focus:border-accent/60 focus:text-white"
+            >
+              <ControllerButtonHint
+                button="north"
+                className="flex h-5 min-w-5 items-center justify-center rounded-md border border-white/15 bg-white/[0.07] px-1 text-[9px] font-black text-white/55"
+              />
+              <ExternalLink size={13} />
+              {t('launch.showLauncher')}
+            </button>
+
+            {status.phase === 'running' && (
+              <button
+                type="button"
+                tabIndex={-1}
+                aria-label={t('launch.stopTrackingHint', { seconds: stopHoldTotalSeconds })}
+                aria-keyshortcuts="Escape Backspace"
+                onClick={(event) => event.preventDefault()}
+                onPointerDown={(event) => {
+                  if (event.button !== 0) return
+                  event.currentTarget.setPointerCapture(event.pointerId)
+                  beginStopHold()
+                }}
+                onPointerUp={(event) => {
+                  if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                    event.currentTarget.releasePointerCapture(event.pointerId)
+                  }
+                  cancelStopHold()
+                }}
+                onPointerCancel={cancelStopHold}
+                onLostPointerCapture={cancelStopHold}
+                className={`relative inline-flex select-none items-center gap-2 overflow-hidden rounded-full border px-4 py-2 text-xs font-semibold backdrop-blur-xl transition-colors ${
+                  stopHoldActive || stopTrackingInFlight
+                    ? 'border-red-300/55 bg-red-500/10 text-white'
+                    : 'border-white/12 bg-black/35 text-white/55 hover:border-red-300/35 hover:text-white/80'
+                }`}
+              >
+                <span
+                  aria-hidden="true"
+                  className="absolute inset-y-0 left-0 origin-left bg-red-400/15"
+                  style={{ width: `${stopHoldProgress * 100}%` }}
+                />
+                <ControllerButtonHint
+                  button="east"
+                  className="relative flex h-5 min-w-5 items-center justify-center rounded-md border border-white/15 bg-white/[0.07] px-1 text-[9px] font-black text-white/60"
+                />
+                <X size={13} className="relative" />
+                <span className="relative">
+                  {stopTrackingInFlight
+                    ? t('launch.stoppingTracking')
+                    : stopHoldActive
+                      ? t('launch.stopTrackingHolding', { seconds: stopHoldRemainingSeconds })
+                      : t('launch.stopTrackingHold', { seconds: stopHoldTotalSeconds })}
+                </span>
+              </button>
+            )}
+          </div>
         )}
       </div>
     </motion.div>

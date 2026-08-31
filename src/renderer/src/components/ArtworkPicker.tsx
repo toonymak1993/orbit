@@ -12,7 +12,7 @@ import {
   Search,
   X
 } from 'lucide-react'
-import type { ImageOrientation, SteamGridDbArtworkOptions } from '@shared/ipc'
+import type { ArtworkSearchOptions, ImageOrientation } from '@shared/ipc'
 import { useBackHandler } from '@renderer/hooks/useBackHandler'
 import { useT } from '@renderer/i18n/useT'
 import { focusElement } from '@renderer/lib/spatialNavigation'
@@ -29,7 +29,7 @@ interface Props {
   onClose: () => void
 }
 
-type BusyAction = number | 'custom' | 'clipboard' | 'reset' | null
+type BusyAction = string | null
 type Failure = 'apply' | 'clipboard-empty' | null
 type Notice = 'applied' | 'reset' | null
 
@@ -53,7 +53,7 @@ export function ArtworkPicker({
   const [query, setQuery] = useState(initialQuery)
   const [submittedQuery, setSubmittedQuery] = useState(initialQuery)
   const [queryTooShort, setQueryTooShort] = useState(initialQuery.length < MIN_QUERY_LENGTH)
-  const [result, setResult] = useState<SteamGridDbArtworkOptions | null>(null)
+  const [result, setResult] = useState<ArtworkSearchOptions | null>(null)
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState<BusyAction>(null)
   const [failure, setFailure] = useState<Failure>(null)
@@ -84,7 +84,7 @@ export function ArtworkPicker({
       setResult(null)
       setLoading(true)
       void window.api.image
-        .listSteamGridDb(gameId, nextOrientation, normalizedQuery)
+        .searchArtwork(gameId, nextOrientation, normalizedQuery)
         .then((nextResult) => {
           if (requestGenerationRef.current === generation) {
             setResult(nextResult)
@@ -159,7 +159,7 @@ export function ArtworkPicker({
     })
   }
 
-  const applySteamGridDb = async (artworkId: number): Promise<void> => {
+  const applySearchedArtwork = async (artworkId: string): Promise<void> => {
     if (busy || orientation === 'icon') return
     const actionOrigin = document.activeElement as HTMLElement | null
     setBusy(artworkId)
@@ -167,7 +167,7 @@ export function ArtworkPicker({
     setNotice(null)
     try {
       if (
-        await window.api.image.applySteamGridDb(
+        await window.api.image.applySearchedArtwork(
           gameId,
           artworkId,
           orientation,
@@ -248,9 +248,7 @@ export function ArtworkPicker({
   const statusMessage =
     result?.state === 'missing' || result?.state === 'ready'
       ? t('artwork.missingQuery', { query: submittedQuery })
-      : result?.state === 'not-configured'
-        ? t('artwork.notConfigured')
-        : t('artwork.unavailable')
+      : t('artwork.unavailable')
   const orientationLabel =
     orientation === 'vertical'
       ? t('artwork.cover')
@@ -288,15 +286,10 @@ export function ArtworkPicker({
           onPointerDown={(event) => event.stopPropagation()}
           className="flex max-h-full w-full max-w-6xl flex-col overflow-hidden rounded-[clamp(1.35rem,2.5vw,2rem)] border border-white/10 bg-surface shadow-[0_36px_120px_rgba(0,0,0,0.75)]"
         >
-          <header className={`flex shrink-0 items-start justify-between border-b border-white/[0.07] ${compact ? 'gap-4 px-4 py-3' : 'gap-6 px-[clamp(1.15rem,2.4vw,1.75rem)] py-[clamp(0.9rem,2vh,1.25rem)]'}`}>
-            <div className="min-w-0">
-              <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-accent">
-                ORBIT · Artwork Studio
-              </p>
-              <h2 className="mt-1 truncate text-2xl font-bold text-white">{t('artwork.title')}</h2>
-              <p className="mt-1 text-sm text-white/45">
-                {t('artwork.subtitle', { name: gameName })}
-              </p>
+          <header className={`relative shrink-0 border-b border-white/[0.07] text-center ${compact ? 'px-16 py-3' : 'px-[clamp(4.5rem,10vw,7rem)] py-[clamp(1rem,2.2vh,1.4rem)]'}`}>
+            <div className="mx-auto min-w-0 max-w-3xl">
+              <h2 className="truncate text-2xl font-bold text-white">{gameName}</h2>
+              <p className="mt-1 text-sm font-medium text-white/45">{t('artwork.title')}</p>
             </div>
             <button
               data-focusable
@@ -305,7 +298,7 @@ export function ArtworkPicker({
               type="button"
               onClick={onClose}
               aria-label={t('artwork.close')}
-              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/[0.06] text-white/55 transition-colors hover:bg-white/15 hover:text-white disabled:opacity-40 data-[focused=true]:bg-white/15 data-[focused=true]:text-accent"
+              className="absolute right-[clamp(0.8rem,2vw,1.5rem)] top-1/2 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full bg-white/[0.06] text-white/55 transition-colors hover:bg-white/15 hover:text-white disabled:opacity-40 data-[focused=true]:bg-white/15 data-[focused=true]:text-accent"
             >
               <X size={18} />
             </button>
@@ -345,7 +338,7 @@ export function ArtworkPicker({
                 ))}
               </div>
 
-              {orientation !== 'icon' && result?.state !== 'not-configured' && (
+              {orientation !== 'icon' && (
               <form role="search" onSubmit={submitSearch} className="min-w-0 flex-1">
                 <label className="sr-only" htmlFor="artwork-search">
                   {t('artwork.searchLabel')}
@@ -513,9 +506,13 @@ export function ArtworkPicker({
                     disabled={Boolean(busy)}
                     type="button"
                     aria-label={`${orientationLabel}, ${t('artwork.option', { index: index + 1 })}${
-                      option.authorName ? `, ${t('artwork.by', { author: option.authorName })}` : ''
+                      option.sourceTitle
+                        ? `, ${option.sourceTitle}`
+                        : option.authorName
+                          ? `, ${t('artwork.by', { author: option.authorName })}`
+                          : ''
                     }`}
-                    onClick={() => void applySteamGridDb(option.id)}
+                    onClick={() => void applySearchedArtwork(option.id)}
                     className={`group relative ${optionAspectClass} overflow-hidden rounded-xl border border-white/10 bg-white/[0.04] text-left shadow-xl transition-all hover:-translate-y-1 hover:border-white/25 disabled:opacity-55 data-[focused=true]:-translate-y-1 data-[focused=true]:border-accent data-[focused=true]:shadow-[0_0_0_3px_rgb(var(--color-accent)/0.22),0_22px_45px_rgba(0,0,0,0.45)]`}
                   >
                     <img
@@ -527,9 +524,19 @@ export function ArtworkPicker({
                       className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.025] group-data-[focused=true]:scale-[1.025]"
                     />
                     <span className="absolute inset-x-0 bottom-0 flex min-h-12 items-end bg-gradient-to-t from-black/85 to-transparent px-2.5 pb-2 pt-6 text-[10px] font-medium text-white/70">
-                      {option.authorName
-                        ? t('artwork.by', { author: option.authorName })
-                        : `#${index + 1}`}
+                      <span className="min-w-0">
+                        <span className="block truncate text-white/85">
+                          {option.sourceTitle ||
+                            (option.authorName
+                              ? t('artwork.by', { author: option.authorName })
+                              : t('artwork.option', { index: index + 1 }))}
+                        </span>
+                        <span className="block text-[9px] uppercase tracking-[0.12em] text-white/45">
+                          {option.source === 'steam-store'
+                            ? t('artwork.sourceSteamStore')
+                            : t('artwork.sourceSteamGridDb')}
+                        </span>
+                      </span>
                     </span>
                     {busy === option.id && (
                       <span className="absolute inset-0 flex items-center justify-center bg-black/65">
@@ -540,30 +547,24 @@ export function ArtworkPicker({
                 ))}
               </div>
             ) : (
-              <div
-                role="status"
-                aria-live="polite"
-                className="flex min-h-64 flex-col items-center justify-center gap-4 text-center"
-              >
+              <div role="status" aria-live="polite" className="flex min-h-64 flex-col items-center justify-center gap-4 text-center">
                 <p className="max-w-lg text-sm leading-relaxed text-white/50">{statusMessage}</p>
-                {result.state !== 'not-configured' && (
-                  <button
-                    data-focusable
-                    type="button"
-                    disabled={loading || Boolean(busy)}
-                    data-disabled={loading || busy ? 'true' : undefined}
-                    onClick={() => load(orientation, submittedQuery)}
-                    className="flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.06] px-4 py-2.5 text-sm font-semibold text-white data-[focused=true]:border-accent/60 data-[focused=true]:bg-accent/15"
-                  >
-                    <RefreshCw size={15} />
-                    {t('artwork.retry')}
-                  </button>
-                )}
+                <button
+                  data-focusable
+                  type="button"
+                  disabled={loading || Boolean(busy)}
+                  data-disabled={loading || busy ? 'true' : undefined}
+                  onClick={() => load(orientation, submittedQuery)}
+                  className="flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.06] px-4 py-2.5 text-sm font-semibold text-white data-[focused=true]:border-accent/60 data-[focused=true]:bg-accent/15"
+                >
+                  <RefreshCw size={15} />
+                  {t('artwork.retry')}
+                </button>
               </div>
             )}
           </div>
 
-          <footer className={`shrink-0 border-t border-white/[0.06] text-[10px] uppercase tracking-[0.16em] text-white/25 ${compact ? 'px-4 py-2' : 'px-[clamp(1.15rem,2.4vw,1.75rem)] py-2.5'}`}>
+          <footer className={`shrink-0 border-t border-white/[0.06] text-center text-[11px] text-white/25 ${compact ? 'px-4 py-2' : 'px-[clamp(1.15rem,2.4vw,1.75rem)] py-2.5'}`}>
             {t('artwork.localFooter')}
             {result?.state === 'ready' && result.options.length > 0
               ? ` · ${t('artwork.credit')}`

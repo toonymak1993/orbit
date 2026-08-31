@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
   AppWindow,
@@ -9,11 +9,13 @@ import {
   Download,
   DownloadCloud,
   ExternalLink,
+  Film,
   AudioLines,
   Globe2,
   Grid3X3,
   Gamepad2,
   Eye,
+  EyeOff,
   ImageIcon,
   Layers3,
   LayoutTemplate,
@@ -27,6 +29,7 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Trophy,
+  Undo2,
   UserRound
 } from 'lucide-react'
 import { useAutoFocus } from '@renderer/hooks/useAutoFocus'
@@ -41,6 +44,7 @@ import {
 } from '@renderer/state/preferencesStore'
 import { useAuthStore } from '@renderer/state/authStore'
 import { useEpicAuthStore } from '@renderer/state/epicAuthStore'
+import { usePlayStationStore } from '@renderer/state/playstationStore'
 import { useLibraryStore } from '@renderer/state/libraryStore'
 import { useNavigationStore } from '@renderer/state/navigationStore'
 import {
@@ -54,7 +58,9 @@ import {
   hardwareControlButtonLabel
 } from '@renderer/components/HardwareControlPanel'
 import { OrbitBackgroundServicePanel } from '@renderer/components/OrbitBackgroundServicePanel'
+import { OrbitWallpaperPanel } from '@renderer/components/OrbitWallpaperPanel'
 import { ControllerButtonHint } from '@renderer/components/ControllerButtonHint'
+import { GameImage } from '@renderer/components/GameImage'
 import {
   PROFILE_AVATAR_OPTIONS,
   ProfileAvatarPicker
@@ -65,11 +71,15 @@ import { focusElement } from '@renderer/lib/spatialNavigation'
 import { notify } from '@renderer/state/notificationStore'
 import { useLibraryCollectionsStore } from '@renderer/state/libraryCollectionsStore'
 import { useAppUpdateStore } from '@renderer/state/appUpdateStore'
+import { useSyncStore } from '@renderer/state/syncStore'
 import type { TranslationKey } from '@renderer/i18n/translations'
 import type {
   AudioPreset,
   AppUpdateSnapshot,
   BackdropIntensity,
+  DockMotion,
+  DockSize,
+  DockThemeId,
   GameCardSize,
   HomeLayoutId,
   LibraryDetectionMethod,
@@ -83,7 +93,10 @@ import type {
   NotificationMotion,
   NotificationPosition,
   OrbitSettings,
+  PlayStationRemotePlayPreference,
+  PlayStationRemotePlayStatus,
   StoreRegionId,
+  StartupAnimationMode,
   SystemUpdateSnapshot,
   ThemeId,
   UiDensity
@@ -108,7 +121,8 @@ const themeSwatch: Record<ThemeId, string> = {
 const HOME_LAYOUT_BODY_KEYS: Record<HomeLayoutId, TranslationKey> = {
   orbit: 'settings.homeLayout.orbitBody',
   float: 'settings.homeLayout.floatBody',
-  coresense: 'settings.homeLayout.coresenseBody'
+  coresense: 'settings.homeLayout.coresenseBody',
+  xmode: 'settings.homeLayout.xmodeBody'
 }
 
 const DENSITY_OPTIONS: {
@@ -117,6 +131,99 @@ const DENSITY_OPTIONS: {
 }[] = [
   { id: 'standard', labelKey: 'settings.density.standard' },
   { id: 'compact', labelKey: 'settings.density.compact' }
+]
+
+const DOCK_THEME_OPTIONS: Array<{
+  id: DockThemeId
+  labelKey: TranslationKey
+  bodyKey: TranslationKey
+}> = [
+  {
+    id: 'standard',
+    labelKey: 'settings.dock.theme.standard',
+    bodyKey: 'settings.dock.theme.standardBody'
+  },
+  {
+    id: 'glass',
+    labelKey: 'settings.dock.theme.glass',
+    bodyKey: 'settings.dock.theme.glassBody'
+  },
+  {
+    id: 'neon',
+    labelKey: 'settings.dock.theme.neon',
+    bodyKey: 'settings.dock.theme.neonBody'
+  },
+  {
+    id: 'minimal',
+    labelKey: 'settings.dock.theme.minimal',
+    bodyKey: 'settings.dock.theme.minimalBody'
+  }
+]
+
+const DOCK_SIZE_OPTIONS: Array<{
+  id: DockSize
+  labelKey: TranslationKey
+  bodyKey: TranslationKey
+}> = [
+  {
+    id: 'compact',
+    labelKey: 'settings.dock.size.compact',
+    bodyKey: 'settings.dock.size.compactBody'
+  },
+  {
+    id: 'standard',
+    labelKey: 'settings.dock.size.standard',
+    bodyKey: 'settings.dock.size.standardBody'
+  },
+  {
+    id: 'large',
+    labelKey: 'settings.dock.size.large',
+    bodyKey: 'settings.dock.size.largeBody'
+  }
+]
+
+const DOCK_MOTION_OPTIONS: Array<{
+  id: DockMotion
+  labelKey: TranslationKey
+  bodyKey: TranslationKey
+}> = [
+  {
+    id: 'calm',
+    labelKey: 'settings.dock.motion.calm',
+    bodyKey: 'settings.dock.motion.calmBody'
+  },
+  {
+    id: 'standard',
+    labelKey: 'settings.dock.motion.standard',
+    bodyKey: 'settings.dock.motion.standardBody'
+  },
+  {
+    id: 'lively',
+    labelKey: 'settings.dock.motion.lively',
+    bodyKey: 'settings.dock.motion.livelyBody'
+  }
+]
+
+const STARTUP_ANIMATION_OPTIONS: Array<{
+  id: StartupAnimationMode
+  labelKey: TranslationKey
+  bodyKey: TranslationKey
+}> = [
+  {
+    id: 'orbit',
+    labelKey: 'settings.startup.orbit',
+    bodyKey: 'settings.startup.orbitBody'
+  },
+  {
+    id: 'custom',
+    labelKey: 'settings.startup.custom',
+    bodyKey: 'settings.startup.customBody'
+  },
+  {
+    id: 'off',
+    labelKey: 'settings.startup.off',
+    bodyKey: 'settings.startup.offBody'
+  }
 ]
 
 const GAME_CARD_SIZE_COPY: Record<
@@ -270,6 +377,14 @@ const LIBRARY_METHOD_KEYS: Record<LibraryDetectionMethod, TranslationKey> = {
   'xbox-app-cache': 'settings.libraryStatus.method.xboxAppCache',
   'xbox-display-catalog': 'settings.libraryStatus.method.xboxDisplayCatalog',
   'windows-packages': 'settings.libraryStatus.method.windowsPackages',
+  'psn-purchased-library': 'settings.libraryStatus.method.psnPurchased',
+  'psn-play-history': 'settings.libraryStatus.method.psnPlayed',
+  'remote-play-apps': 'settings.libraryStatus.method.remotePlayApps',
+  'windows-registry': 'settings.libraryStatus.method.windowsRegistry',
+  'launcher-cache': 'settings.libraryStatus.method.launcherCache',
+  'rom-folders': 'settings.libraryStatus.method.romFolders',
+  'emulator-installations': 'settings.libraryStatus.method.emulatorInstallations',
+  'retroachievements-hash': 'settings.libraryStatus.method.retroAchievementsHash',
   'cached-data': 'settings.libraryStatus.method.cachedData'
 }
 
@@ -278,6 +393,10 @@ const LIBRARY_ISSUE_KEYS: Record<LibraryProviderIssue, TranslationKey> = {
   'online-library-unavailable': 'settings.libraryStatus.issue.onlineUnavailable',
   'metadata-pending': 'settings.libraryStatus.issue.metadataPending',
   'source-unavailable': 'settings.libraryStatus.issue.sourceUnavailable',
+  'authentication-failed': 'settings.libraryStatus.issue.authenticationFailed',
+  'remote-play-app-unavailable': 'settings.libraryStatus.issue.remotePlayUnavailable',
+  'emulator-missing': 'settings.libraryStatus.issue.emulatorMissing',
+  'rom-source-unavailable': 'settings.libraryStatus.issue.romSourceUnavailable',
   'no-games-found': 'settings.libraryStatus.issue.noGames'
 }
 
@@ -315,10 +434,16 @@ export function SettingsView(): JSX.Element {
     libraryGridColumns,
     backdropIntensity,
     homeCardBubbleEffect,
+    startupAnimationMode,
+    customStartupVideoUrl,
+    dockTheme,
+    dockSize,
+    dockMotion,
     uiDensity,
     language,
     audioPreset,
     showStoreTab,
+    showFriendsHub,
     showHomeBanners,
     showAchievements,
     closeLaunchersAfterGame,
@@ -336,10 +461,16 @@ export function SettingsView(): JSX.Element {
     setLibraryGridColumns,
     setBackdropIntensity,
     setHomeCardBubbleEffect,
+    setStartupAnimationMode,
+    selectCustomStartupVideo,
+    setDockTheme,
+    setDockSize,
+    setDockMotion,
     setDensity,
     setLanguage,
     setAudioPreset,
     setShowStoreTab,
+    setShowFriendsHub,
     setShowHomeBanners,
     setShowAchievements,
     setCloseLaunchersAfterGame,
@@ -359,9 +490,16 @@ export function SettingsView(): JSX.Element {
   const epicStatus = useEpicAuthStore((s) => s.status)
   const startEpicLogin = useEpicAuthStore((s) => s.startLogin)
   const logoutEpic = useEpicAuthStore((s) => s.logout)
+  const playStationAccount = usePlayStationStore((s) => s.account)
+  const playStationStatus = usePlayStationStore((s) => s.status)
+  const remotePlayStatus = usePlayStationStore((s) => s.remotePlay)
+  const startPlayStationLogin = usePlayStationStore((s) => s.startLogin)
+  const logoutPlayStation = usePlayStationStore((s) => s.logout)
+  const refreshRemotePlay = usePlayStationStore((s) => s.refreshRemotePlay)
   const refreshLibrary = useLibraryStore((s) => s.refresh)
   const librarySnapshot = useLibraryStore((s) => s.snapshot)
   const isRefreshingLibrary = useLibraryStore((s) => s.isRefreshing)
+  const achievementSync = useSyncStore((s) => s.status.pipelines.achievements)
   const steamLibraryStatus = providerStatusOrFallback(
     librarySnapshot.providerStatuses,
     librarySnapshot.providerGames,
@@ -374,20 +512,70 @@ export function SettingsView(): JSX.Element {
     'epic',
     epicAccount ? 'connected' : 'not-connected'
   )
+  const gogLibraryStatus = providerStatusOrFallback(
+    librarySnapshot.providerStatuses,
+    librarySnapshot.providerGames,
+    'gog',
+    'automatic'
+  )
   const xboxLibraryStatus = providerStatusOrFallback(
     librarySnapshot.providerStatuses,
     librarySnapshot.providerGames,
     'xbox',
     'automatic'
   )
-  const readyLibraryCount = [steamLibraryStatus, epicLibraryStatus, xboxLibraryStatus].filter(
-    (status) => status.state === 'ready'
-  ).length
-  const accountSignature = `${account?.steamId ?? ''}:${epicAccount?.accountId ?? ''}`
+  const playStationLibraryStatus = providerStatusOrFallback(
+    librarySnapshot.providerStatuses,
+    librarySnapshot.providerGames,
+    'playstation',
+    playStationAccount ? 'connected' : 'not-connected'
+  )
+  const eaLibraryStatus = providerStatusOrFallback(
+    librarySnapshot.providerStatuses,
+    librarySnapshot.providerGames,
+    'ea',
+    'automatic'
+  )
+  const ubisoftLibraryStatus = providerStatusOrFallback(
+    librarySnapshot.providerStatuses,
+    librarySnapshot.providerGames,
+    'ubisoft',
+    'automatic'
+  )
+  const retroLibraryStatus = providerStatusOrFallback(
+    librarySnapshot.providerStatuses,
+    librarySnapshot.providerGames,
+    'retro',
+    'automatic'
+  )
+  const readyLibraryCount = [
+    steamLibraryStatus,
+    epicLibraryStatus,
+    gogLibraryStatus,
+    xboxLibraryStatus,
+    playStationLibraryStatus,
+    eaLibraryStatus,
+    ubisoftLibraryStatus,
+    retroLibraryStatus
+  ].filter((status) => status.state === 'ready').length
+  const accountSignature = `${account?.steamId ?? ''}:${epicAccount?.accountId ?? ''}:${playStationAccount?.accountId ?? ''}`
   const previousAccountSignature = useRef(accountSignature)
   const [version, setVersion] = useState('')
   const [settings, setSettings] = useState<OrbitSettings | null>(null)
+  const [achievementSyncError, setAchievementSyncError] = useState(false)
+  const [retroAchievementsUsername, setRetroAchievementsUsername] = useState('')
+  const [retroAchievementsSaveState, setRetroAchievementsSaveState] = useState<
+    'idle' | 'saving' | 'saved' | 'error'
+  >('idle')
+  const [retroAchievementsApiKeyConfigured, setRetroAchievementsApiKeyConfigured] =
+    useState(false)
+  const [remotePlaySaving, setRemotePlaySaving] = useState(false)
+  const [startupVideoBusy, setStartupVideoBusy] = useState(false)
+  const [startupVideoError, setStartupVideoError] = useState(false)
   const [regionSaveState, setRegionSaveState] = useState<'idle' | 'saving' | 'error'>('idle')
+  const [restoringGameId, setRestoringGameId] = useState<string | null>(null)
+  const [restoreErrorGameId, setRestoreErrorGameId] = useState<string | null>(null)
+  const [excludedRenderLimit, setExcludedRenderLimit] = useState(40)
   const [updateSnapshot, setUpdateSnapshot] = useState<SystemUpdateSnapshot | null>(null)
   const [updateCheckState, setUpdateCheckState] = useState<'idle' | 'checking' | 'error'>('idle')
   const appUpdateSnapshot = useAppUpdateStore((state) => state.snapshot)
@@ -401,6 +589,39 @@ export function SettingsView(): JSX.Element {
     (updateSnapshot?.graphicsDriverUpdates.length ?? 0)
   const activePage = SETTINGS_PAGES.find((item) => item.id === page) ?? SETTINGS_PAGES[0]
   const activePageIndex = SETTINGS_PAGES.indexOf(activePage)
+  const excludedGames = useMemo(
+    () =>
+      [...(librarySnapshot.excludedGames ?? [])].sort((left, right) =>
+        left.name.localeCompare(right.name, language === 'de' ? 'de-DE' : 'en-US')
+      ),
+    [language, librarySnapshot.excludedGames]
+  )
+  const visibleExcludedGames = excludedGames.slice(0, excludedRenderLimit)
+  const { steamAchievementGameCount, retroAchievementGameCount } = useMemo(
+    () =>
+      librarySnapshot.games.reduce(
+        (counts, game) => {
+          if (game.provider === 'steam' && (game.metadata.achievementCount ?? 0) > 0) {
+            counts.steamAchievementGameCount += 1
+          } else if (
+            game.provider === 'retro' &&
+            Boolean(game.retro?.retroAchievementsGameId)
+          ) {
+            counts.retroAchievementGameCount += 1
+          }
+          return counts
+        },
+        { steamAchievementGameCount: 0, retroAchievementGameCount: 0 }
+      ),
+    [librarySnapshot.games]
+  )
+  const retroAchievementsConfigured = Boolean(
+    settings?.retroAchievementsUsername?.trim() &&
+      retroAchievementsApiKeyConfigured
+  )
+  const achievementEligibleGameCount =
+    (account ? steamAchievementGameCount : 0) +
+    (retroAchievementsConfigured ? retroAchievementGameCount : 0)
   const pageHighlights =
     page === 'appearance'
       ? [
@@ -415,6 +636,13 @@ export function SettingsView(): JSX.Element {
           {
             label: t('settings.summary.theme'),
             value: THEME_OPTIONS.find((item) => item.id === theme)?.label ?? theme
+          },
+          {
+            label: t('settings.dock.title'),
+            value: t(
+              DOCK_THEME_OPTIONS.find((item) => item.id === dockTheme)?.labelKey ??
+                'settings.dock.theme.standard'
+            )
           },
           { label: t('settings.summary.home'), value: homeLayout.toUpperCase() }
         ]
@@ -446,7 +674,8 @@ export function SettingsView(): JSX.Element {
               {
                 label: t('settings.summary.sources'),
                 value: t('settings.summary.sourcesValue', {
-                  count: readyLibraryCount
+                  count: readyLibraryCount,
+                  total: 8
                 })
               },
               {
@@ -511,7 +740,14 @@ export function SettingsView(): JSX.Element {
 
   useEffect(() => {
     void window.api.app.getVersion().then(setVersion)
-    void window.api.settings.get().then(setSettings)
+    void Promise.all([
+      window.api.settings.get(),
+      window.api.retroAchievements.credentials.get()
+    ]).then(([value, credentialStatus]) => {
+      setSettings(value)
+      setRetroAchievementsUsername(value.retroAchievementsUsername ?? '')
+      setRetroAchievementsApiKeyConfigured(credentialStatus.configured)
+    })
   }, [])
 
   useEffect(() => {
@@ -524,6 +760,10 @@ export function SettingsView(): JSX.Element {
     previousAccountSignature.current = accountSignature
     void refreshLibrary()
   }, [accountSignature, refreshLibrary])
+
+  useEffect(() => {
+    if (page === 'libraries' && !remotePlayStatus) void refreshRemotePlay()
+  }, [page, refreshRemotePlay, remotePlayStatus])
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
@@ -546,6 +786,118 @@ export function SettingsView(): JSX.Element {
       setRegionSaveState('idle')
     } catch {
       setRegionSaveState('error')
+    }
+  }
+
+  async function saveRetroAchievementsUsername(): Promise<void> {
+    if (!settings || retroAchievementsSaveState === 'saving') return
+    setRetroAchievementsSaveState('saving')
+    try {
+      const username = retroAchievementsUsername.trim() || undefined
+      const next = await window.api.settings.set({ retroAchievementsUsername: username })
+      setSettings(next)
+      setRetroAchievementsUsername(next.retroAchievementsUsername ?? '')
+      setRetroAchievementsSaveState('saved')
+    } catch {
+      setRetroAchievementsSaveState('error')
+    }
+  }
+
+  async function syncAchievementsNow(): Promise<void> {
+    if (achievementSync.state === 'running') return
+    setAchievementSyncError(false)
+    try {
+      await window.api.game.syncAchievements()
+    } catch {
+      setAchievementSyncError(true)
+    }
+  }
+
+  async function updateRemotePlayPreference(
+    preference: PlayStationRemotePlayPreference
+  ): Promise<void> {
+    if (
+      remotePlaySaving ||
+      !settings ||
+      settings.playstationRemotePlayPreference === preference
+    ) {
+      return
+    }
+    setRemotePlaySaving(true)
+    try {
+      const next = await window.api.settings.set({
+        playstationRemotePlayPreference: preference
+      })
+      setSettings(next)
+      await refreshRemotePlay()
+    } finally {
+      setRemotePlaySaving(false)
+    }
+  }
+
+  async function chooseStartupAnimationMode(mode: StartupAnimationMode): Promise<void> {
+    if (startupVideoBusy || mode === startupAnimationMode) return
+    const opensPicker = mode === 'custom' && !customStartupVideoUrl
+    if (opensPicker) setStartupVideoBusy(true)
+    setStartupVideoError(false)
+    try {
+      await setStartupAnimationMode(mode)
+    } catch {
+      setStartupVideoError(true)
+    } finally {
+      if (opensPicker) setStartupVideoBusy(false)
+    }
+  }
+
+  async function chooseCustomStartupVideo(): Promise<void> {
+    if (startupVideoBusy) return
+    setStartupVideoBusy(true)
+    setStartupVideoError(false)
+    try {
+      await selectCustomStartupVideo()
+    } catch {
+      setStartupVideoError(true)
+    } finally {
+      setStartupVideoBusy(false)
+    }
+  }
+
+  async function restoreExcludedGame(game: LibraryGame): Promise<void> {
+    if (restoringGameId) return
+    const buttons = Array.from(
+      containerRef.current?.querySelectorAll<HTMLElement>('[data-excluded-game-restore]') ?? []
+    )
+    const origin = buttons.find((button) => button.dataset.excludedGameRestore === game.id) ?? null
+    const currentIndex = origin ? buttons.indexOf(origin) : -1
+    const focusTarget =
+      currentIndex >= 0
+        ? (buttons[currentIndex + 1] ?? buttons[currentIndex - 1] ?? null)
+        : null
+    const libraryTab = containerRef.current?.querySelector<HTMLElement>(
+      '[data-settings-page="libraries"]'
+    )
+
+    setRestoringGameId(game.id)
+    setRestoreErrorGameId(null)
+    try {
+      const snapshot = await window.api.library.restore(game.id)
+      useLibraryStore.getState().applySnapshot(snapshot)
+      notify({
+        tone: 'success',
+        titleKey: 'notification.libraryRestored.title',
+        messageKey: 'notification.libraryRestored.body',
+        vars: { game: game.name },
+        force: true,
+        replace: true
+      })
+      requestAnimationFrame(() => {
+        focusElement(focusTarget?.isConnected ? focusTarget : (libraryTab ?? null))
+      })
+    } catch {
+      setRestoreErrorGameId(game.id)
+      requestAnimationFrame(() => focusElement(origin))
+    } finally {
+      setRestoringGameId(null)
     }
   }
 
@@ -704,7 +1056,134 @@ export function SettingsView(): JSX.Element {
                   </div>
                 </SettingsSection>
 
-                <SettingsSection index="03" icon={Layers3} title={t('settings.presentation.title')}>
+                <SettingsSection index="03" icon={ImageIcon} title={t('settings.wallpaper.title')}>
+                  <OrbitWallpaperPanel />
+                </SettingsSection>
+
+                <SettingsSection index="04" icon={Film} title={t('settings.startup.title')}>
+                  <p className="mb-4 max-w-3xl text-xs leading-relaxed text-muted">
+                    {t('settings.startup.body')}
+                  </p>
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+                    {STARTUP_ANIMATION_OPTIONS.map((option) => (
+                      <PresentationChoice
+                        key={option.id}
+                        active={startupAnimationMode === option.id}
+                        title={t(option.labelKey)}
+                        description={t(option.bodyKey)}
+                        onClick={() => void chooseStartupAnimationMode(option.id)}
+                        preview={
+                          option.id === 'orbit' ? (
+                            <span className="relative h-9 w-12">
+                              <span className="absolute inset-x-0 top-2 h-5 rounded-[50%] border border-accent/75 [transform:rotate(-12deg)]" />
+                              <span className="absolute left-1/2 top-1/2 h-2 w-2 -translate-x-1/2 -translate-y-1/2 rounded-full bg-accent shadow-[0_0_12px_rgb(var(--color-accent)/0.8)]" />
+                              <span className="absolute right-0 top-3 h-1.5 w-1.5 rounded-full bg-accent-2" />
+                            </span>
+                          ) : option.id === 'custom' ? (
+                            <Film size={24} className="text-accent" />
+                          ) : (
+                            <EyeOff size={24} className="text-white/35" />
+                          )
+                        }
+                      />
+                    ))}
+                  </div>
+
+                  <div className="mt-4 flex flex-col gap-3 rounded-2xl border border-white/[0.07] bg-black/20 p-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0">
+                      <p className="text-xs font-bold text-white/80">
+                        {t(
+                          customStartupVideoUrl
+                            ? 'settings.startup.customReady'
+                            : 'settings.startup.customMissing'
+                        )}
+                      </p>
+                      <p className="mt-1 text-[11px] leading-relaxed text-white/40">
+                        {startupVideoError
+                          ? t('settings.startup.error')
+                          : t('settings.startup.customHint')}
+                      </p>
+                    </div>
+                    <FocusableButton
+                      variant="ghost"
+                      disabled={startupVideoBusy}
+                      aria-busy={startupVideoBusy}
+                      onClick={() => void chooseCustomStartupVideo()}
+                      className="shrink-0 disabled:cursor-wait disabled:opacity-50"
+                    >
+                      {startupVideoBusy
+                        ? t('settings.startup.selecting')
+                        : t(
+                            customStartupVideoUrl
+                              ? 'settings.startup.replace'
+                              : 'settings.startup.choose'
+                          )}
+                    </FocusableButton>
+                  </div>
+                </SettingsSection>
+
+                <SettingsSection index="05" icon={AppWindow} title={t('settings.dock.title')}>
+                  <p className="mb-4 max-w-3xl text-xs leading-relaxed text-muted">
+                    {t('settings.dock.body')}
+                  </p>
+                  <div className="grid grid-cols-1 gap-3 xl:grid-cols-3">
+                    <PresentationGroup
+                      eyebrow={t('settings.dock.theme.title')}
+                      description={t('settings.dock.theme.body')}
+                    >
+                      {DOCK_THEME_OPTIONS.map((option) => (
+                        <PresentationChoice
+                          key={option.id}
+                          active={dockTheme === option.id}
+                          title={t(option.labelKey)}
+                          description={t(option.bodyKey)}
+                          badge={option.id === 'standard' ? t('settings.default') : undefined}
+                          onClick={() => void setDockTheme(option.id)}
+                          preview={<DockThemePreview theme={option.id} />}
+                        />
+                      ))}
+                    </PresentationGroup>
+
+                    <PresentationGroup
+                      eyebrow={t('settings.dock.size.title')}
+                      description={t('settings.dock.size.body')}
+                    >
+                      {DOCK_SIZE_OPTIONS.map((option) => (
+                        <PresentationChoice
+                          key={option.id}
+                          active={dockSize === option.id}
+                          title={t(option.labelKey)}
+                          description={t(option.bodyKey)}
+                          badge={option.id === 'standard' ? t('settings.default') : undefined}
+                          onClick={() => void setDockSize(option.id)}
+                          preview={<DockSizePreview size={option.id} />}
+                        />
+                      ))}
+                    </PresentationGroup>
+
+                    <PresentationGroup
+                      eyebrow={t('settings.dock.motion.title')}
+                      description={t('settings.dock.motion.body')}
+                    >
+                      {DOCK_MOTION_OPTIONS.map((option) => (
+                        <PresentationChoice
+                          key={option.id}
+                          active={dockMotion === option.id}
+                          title={t(option.labelKey)}
+                          description={t(option.bodyKey)}
+                          badge={option.id === 'standard' ? t('settings.default') : undefined}
+                          onClick={() => void setDockMotion(option.id)}
+                          preview={<DockMotionPreview motionMode={option.id} />}
+                        />
+                      ))}
+                    </PresentationGroup>
+                  </div>
+                  <p className="mt-3 text-[10px] leading-relaxed text-white/35">
+                    {t('settings.dock.reducedMotionHint')}
+                  </p>
+                </SettingsSection>
+
+                <SettingsSection index="06" icon={Layers3} title={t('settings.presentation.title')}>
                   <p className="mb-4 max-w-3xl text-xs leading-relaxed text-muted">
                     {t('settings.presentation.body')}
                   </p>
@@ -763,7 +1242,7 @@ export function SettingsView(): JSX.Element {
                   </div>
                 </SettingsSection>
 
-                <SettingsSection index="04" icon={LayoutTemplate} title={t('settings.homeLayout.title')}>
+                <SettingsSection index="07" icon={LayoutTemplate} title={t('settings.homeLayout.title')}>
                   <p className="mb-4 text-xs leading-relaxed text-muted">
                     {t('settings.homeLayout.body')}
                   </p>
@@ -825,6 +1304,18 @@ export function SettingsView(): JSX.Element {
                       })}
                       defaultActive
                       onChange={(active) => void setShowStoreTab(active)}
+                      t={t}
+                    />
+                    <SettingsToggle
+                      id="showFriendsHub"
+                      active={showFriendsHub}
+                      title={t('settings.visibility.friends')}
+                      description={t('settings.visibility.friendsBody', {
+                        previous: controllerLabels.leftBumper,
+                        next: controllerLabels.rightBumper
+                      })}
+                      defaultActive
+                      onChange={(active) => void setShowFriendsHub(active)}
                       t={t}
                     />
                     <SettingsToggle
@@ -980,15 +1471,153 @@ export function SettingsView(): JSX.Element {
                 </SettingsSection>
 
                 <SettingsSection index="05" icon={Trophy} title={t('settings.integrations.title')}>
-                  <SettingsToggle
-                    id="showAchievements"
-                    active={showAchievements}
-                    title={t('settings.integrations.achievements')}
-                    description={t('settings.integrations.achievementsBody')}
-                    defaultActive
-                    onChange={(active) => void setShowAchievements(active)}
-                    t={t}
-                  />
+                  <div className="space-y-4">
+                    <SettingsToggle
+                      id="showAchievements"
+                      active={showAchievements}
+                      title={t('settings.integrations.achievements')}
+                      description={t('settings.integrations.achievementsBody')}
+                      defaultActive
+                      onChange={(active) => void setShowAchievements(active)}
+                      t={t}
+                    />
+
+                    <div>
+                      <p className="mb-2 text-[10px] font-bold uppercase tracking-[0.16em] text-white/38">
+                        {t('settings.integrations.syncMap')}
+                      </p>
+                      <div className="grid gap-2 lg:grid-cols-3">
+                        <div className="rounded-2xl border border-emerald-300/15 bg-emerald-300/[0.055] p-3.5">
+                          <div className="flex items-center justify-between gap-3">
+                            <p className="text-sm font-semibold text-white">Steam</p>
+                            <span className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.12em] ${account ? 'bg-emerald-300/10 text-emerald-200' : 'bg-white/[0.06] text-white/45'}`}>
+                              {t(
+                                account
+                                  ? 'settings.integrations.automatic'
+                                  : 'settings.integrations.notConnected'
+                              )}
+                            </span>
+                          </div>
+                          <p className="mt-2 text-xs leading-relaxed text-white/52">
+                            {t('settings.integrations.steamBody', {
+                              count: steamAchievementGameCount
+                            })}
+                          </p>
+                        </div>
+
+                        <div className="rounded-2xl border border-accent/15 bg-accent/[0.045] p-3.5">
+                          <div className="flex items-center justify-between gap-3">
+                            <p className="text-sm font-semibold text-white">RetroAchievements</p>
+                            <span className={`rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.12em] ${retroAchievementsConfigured ? 'bg-accent/10 text-accent' : 'bg-white/[0.06] text-white/45'}`}>
+                              {t(
+                                retroAchievementsConfigured
+                                  ? 'settings.integrations.configured'
+                                  : 'settings.integrations.notConfigured'
+                              )}
+                            </span>
+                          </div>
+                          <p className="mt-2 text-xs leading-relaxed text-white/52">
+                            {t('settings.integrations.retroBody', {
+                              count: retroAchievementGameCount
+                            })}
+                          </p>
+                        </div>
+
+                        <div className="rounded-2xl border border-white/[0.07] bg-black/15 p-3.5">
+                          <div className="flex items-center justify-between gap-3">
+                            <p className="text-sm font-semibold text-white">
+                              {t('settings.integrations.otherProviders')}
+                            </p>
+                            <span className="rounded-full bg-white/[0.06] px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.12em] text-white/45">
+                              {t('settings.integrations.notAvailable')}
+                            </span>
+                          </div>
+                          <p className="mt-2 text-xs leading-relaxed text-white/52">
+                            {t('settings.integrations.otherBody')}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid gap-4 rounded-2xl border border-white/[0.07] bg-black/15 p-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+                      <div className="min-w-0">
+                        <p className="text-xs leading-relaxed text-white/55">
+                          {t('settings.integrations.steamKeyBody')}
+                        </p>
+                        {settings ? (
+                          <div className="mt-3">
+                            <ApiKeyField
+                              label={t('settings.integrations.steamApiKey')}
+                              value={settings.steamWebApiKey ?? ''}
+                              placeholder={t('settings.integrations.steamApiKeyPlaceholder')}
+                              getKeyLabel={t('settings.integrations.getSteamApiKey')}
+                              getKeyUrl="https://steamcommunity.com/dev/apikey"
+                              onSave={async (value) => {
+                                const next = await window.api.settings.set({
+                                  steamWebApiKey: value || undefined
+                                })
+                                setSettings(next)
+                              }}
+                            />
+                          </div>
+                        ) : (
+                          <div className="mt-3 flex items-center gap-2 text-sm text-muted">
+                            <Loader2 size={16} className="animate-spin" />
+                            {t('settings.loading')}
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="flex min-w-[12rem] flex-col items-stretch gap-2 lg:items-end">
+                        <FocusableButton
+                          variant="ghost"
+                          disabled={
+                            !showAchievements ||
+                            achievementEligibleGameCount === 0 ||
+                            achievementSync.state === 'running'
+                          }
+                          data-disabled={
+                            !showAchievements ||
+                            achievementEligibleGameCount === 0 ||
+                            achievementSync.state === 'running'
+                              ? 'true'
+                              : undefined
+                          }
+                          onClick={() => void syncAchievementsNow()}
+                        >
+                          <span className="flex items-center gap-2">
+                            <RefreshCw
+                              size={14}
+                              className={achievementSync.state === 'running' ? 'animate-spin' : ''}
+                            />
+                            {t(
+                              achievementSync.state === 'running'
+                                ? 'settings.integrations.syncing'
+                                : 'settings.integrations.syncNow',
+                              {
+                                completed: achievementSync.completed,
+                                total: achievementSync.total
+                              }
+                            )}
+                          </span>
+                        </FocusableButton>
+                        <p className="max-w-xs text-right text-[10px] leading-relaxed text-white/38">
+                          {achievementSyncError
+                            ? t('settings.integrations.syncError')
+                            : achievementSync.state === 'complete' && achievementSync.total > 0
+                              ? t('settings.integrations.lastSync', {
+                                  count: achievementSync.total
+                                })
+                              : t('settings.integrations.syncHint')}
+                        </p>
+                      </div>
+                    </div>
+
+                    <p className="flex items-start gap-2 text-xs leading-relaxed text-white/42">
+                      <ShieldCheck size={14} className="mt-0.5 shrink-0 text-accent" />
+                      {t('settings.integrations.privacy')}
+                    </p>
+                  </div>
                 </SettingsSection>
 
                 <SettingsSection index="06" icon={AppWindow} title={t('settings.launchBehavior.title')}>
@@ -1034,7 +1663,102 @@ export function SettingsView(): JSX.Element {
                   </div>
                 </SettingsSection>
 
-                <SettingsSection index="02" icon={LibraryBig} title={t('settings.account.title')}>
+                <SettingsSection index="02" icon={EyeOff} title={t('settings.excludedGames.title')}>
+                  <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+                    <p className="max-w-3xl text-sm leading-relaxed text-muted">
+                      {t('settings.excludedGames.body')}
+                    </p>
+                    <span className="rounded-full border border-white/10 bg-white/[0.05] px-3 py-1.5 text-xs font-semibold text-white/55">
+                      {t('settings.excludedGames.count', { count: excludedGames.length })}
+                    </span>
+                  </div>
+
+                  {excludedGames.length === 0 ? (
+                    <div
+                      role="status"
+                      className="flex min-h-24 items-center gap-3 rounded-xl2 border border-dashed border-white/10 bg-black/15 px-4 py-5 text-sm text-muted"
+                    >
+                      <EyeOff size={18} className="shrink-0 text-white/35" />
+                      {t('settings.excludedGames.empty')}
+                    </div>
+                  ) : (
+                    <>
+                      <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+                        {visibleExcludedGames.map((game) => {
+                          const restoring = restoringGameId === game.id
+                          const failed = restoreErrorGameId === game.id
+                          return (
+                            <div
+                              key={game.id}
+                              className="flex min-w-0 items-center gap-3 rounded-xl2 border border-white/10 bg-black/20 p-2.5"
+                            >
+                              <div className="h-16 w-24 shrink-0 overflow-hidden rounded-xl bg-black/30">
+                                <GameImage
+                                  gameId={game.id}
+                                  name={game.name}
+                                  orientation="horizontal"
+                                  className="h-full w-full object-cover"
+                                />
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <p className="truncate text-sm font-semibold text-white/90">
+                                  {game.name}
+                                </p>
+                                <p className="mt-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-white/35">
+                                  {game.provider}
+                                </p>
+                              </div>
+                              <FocusableButton
+                                variant="ghost"
+                                data-excluded-game-restore={game.id}
+                                aria-disabled={restoring}
+                                data-disabled={restoring ? 'true' : undefined}
+                                aria-label={t('settings.excludedGames.restoreNamed', {
+                                  name: game.name
+                                })}
+                                onClick={() => void restoreExcludedGame(game)}
+                                className={`shrink-0 px-4 py-2 text-xs ${
+                                  failed ? 'border-amber-200/25 text-amber-100' : ''
+                                }`}
+                              >
+                                <span className="flex items-center gap-2" aria-live="polite">
+                                  {restoring ? (
+                                    <Loader2 size={14} className="animate-spin" />
+                                  ) : (
+                                    <Undo2 size={14} />
+                                  )}
+                                  {t(
+                                    restoring
+                                      ? 'settings.excludedGames.restoring'
+                                      : failed
+                                        ? 'settings.excludedGames.retry'
+                                        : 'settings.excludedGames.restore'
+                                  )}
+                                </span>
+                              </FocusableButton>
+                            </div>
+                          )
+                        })}
+                      </div>
+
+                      {visibleExcludedGames.length < excludedGames.length && (
+                        <div className="mt-4 flex justify-center">
+                          <FocusableButton
+                            variant="ghost"
+                            onClick={() => setExcludedRenderLimit((current) => current + 40)}
+                            className="px-5 py-2 text-xs"
+                          >
+                            {t('settings.excludedGames.showMore', {
+                              count: Math.min(40, excludedGames.length - visibleExcludedGames.length)
+                            })}
+                          </FocusableButton>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </SettingsSection>
+
+                <SettingsSection index="03" icon={LibraryBig} title={t('settings.account.title')}>
                   <div className="mb-4 flex flex-wrap items-center justify-between gap-4">
                     <p className="max-w-3xl text-xs leading-relaxed text-muted">
                       {t('settings.libraryStatus.body')}
@@ -1063,7 +1787,7 @@ export function SettingsView(): JSX.Element {
                       </span>
                     </FocusableButton>
                   </div>
-                  <div className="grid grid-cols-1 gap-3 2xl:grid-cols-3">
+                  <div className="grid grid-cols-1 gap-3 xl:grid-cols-2 2xl:grid-cols-3">
                     <LibraryProviderCard
                       store="Steam"
                       badge="S"
@@ -1135,10 +1859,198 @@ export function SettingsView(): JSX.Element {
                       language={language}
                       t={t}
                     />
+                    <LibraryProviderCard
+                      store="GOG"
+                      badge="G"
+                      badgeClass="bg-gradient-to-br from-[#8637d5] to-[#4d1d91]"
+                      status={gogLibraryStatus}
+                      description={t('settings.libraryStatus.gogAutomatic')}
+                      connected
+                      automatic
+                      waiting={false}
+                      error={gogLibraryStatus.state === 'error'}
+                      connectLabel=""
+                      signOutLabel=""
+                      language={language}
+                      t={t}
+                    />
+                    <LibraryProviderCard
+                      store="PlayStation"
+                      badge="P"
+                      badgeClass="bg-[#006fcd]"
+                      status={playStationLibraryStatus}
+                      description={
+                        playStationAccount
+                          ? t('settings.account.connectedName', {
+                              name: playStationAccount.onlineId
+                            })
+                          : playStationStatus.state === 'error'
+                            ? t('settings.account.playstationConnectionFailed')
+                            : t('settings.account.playstationNotConnected')
+                      }
+                      connected={Boolean(playStationAccount)}
+                      waiting={playStationStatus.state === 'waiting-for-browser'}
+                      error={playStationStatus.state === 'error'}
+                      connectLabel={t(
+                        playStationStatus.state === 'waiting-for-browser'
+                          ? 'settings.account.connecting'
+                          : playStationStatus.state === 'error'
+                            ? 'settings.account.retry'
+                            : 'settings.account.connectPlayStation'
+                      )}
+                      signOutLabel={t('settings.account.signOut')}
+                      onConnect={() => void startPlayStationLogin()}
+                      onLogout={() => void logoutPlayStation()}
+                      language={language}
+                      t={t}
+                    />
+                    <LibraryProviderCard
+                      store="EA app"
+                      badge="EA"
+                      badgeClass="bg-[#ff4747]"
+                      status={eaLibraryStatus}
+                      description={t('settings.libraryStatus.eaAutomatic')}
+                      connected
+                      automatic
+                      waiting={false}
+                      error={eaLibraryStatus.state === 'error'}
+                      connectLabel=""
+                      signOutLabel=""
+                      language={language}
+                      t={t}
+                    />
+                    <LibraryProviderCard
+                      store="Ubisoft Connect"
+                      badge="U"
+                      badgeClass="bg-gradient-to-br from-[#008de5] to-[#0050a5]"
+                      status={ubisoftLibraryStatus}
+                      description={t('settings.libraryStatus.ubisoftAutomatic')}
+                      connected
+                      automatic
+                      waiting={false}
+                      error={ubisoftLibraryStatus.state === 'error'}
+                      connectLabel=""
+                      signOutLabel=""
+                      language={language}
+                      t={t}
+                    />
+                    <LibraryProviderCard
+                      store="Retro"
+                      badge="R"
+                      badgeClass="bg-gradient-to-br from-[#ff7a18] to-[#af002d]"
+                      status={retroLibraryStatus}
+                      description={t('settings.libraryStatus.retroAutomatic')}
+                      connected
+                      automatic
+                      waiting={false}
+                      error={retroLibraryStatus.state === 'error'}
+                      connectLabel=""
+                      signOutLabel=""
+                      language={language}
+                      t={t}
+                    />
                   </div>
+                  <PlayStationRemotePlayPanel
+                    remotePlay={remotePlayStatus}
+                    preference={settings?.playstationRemotePlayPreference ?? 'auto'}
+                    saving={remotePlaySaving}
+                    onPreference={(preference) => void updateRemotePlayPreference(preference)}
+                    onRefresh={() => void refreshRemotePlay()}
+                    t={t}
+                  />
                 </SettingsSection>
 
-                <SettingsSection index="03" icon={Globe2} title={t('settings.storeRegion.title')}>
+                <SettingsSection
+                  index="04"
+                  icon={Trophy}
+                  title={t('settings.retroAchievements.title')}
+                >
+                  <p className="mb-4 max-w-4xl text-sm leading-relaxed text-muted">
+                    {t('settings.retroAchievements.body')}
+                  </p>
+                  {settings ? (
+                    <div className="space-y-4">
+                      <label className="block max-w-2xl">
+                        <span className="mb-2 block text-xs font-semibold uppercase tracking-[0.14em] text-muted">
+                          {t('settings.retroAchievements.username')}
+                        </span>
+                        <div className="flex flex-col gap-3 sm:flex-row">
+                          <input
+                            data-focusable="true"
+                            value={retroAchievementsUsername}
+                            onChange={(event) => {
+                              setRetroAchievementsUsername(event.target.value)
+                              setRetroAchievementsSaveState('idle')
+                            }}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter') void saveRetroAchievementsUsername()
+                            }}
+                            placeholder={t('settings.retroAchievements.usernamePlaceholder')}
+                            autoComplete="username"
+                            className="min-w-0 flex-1 rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-sm text-white outline-none transition focus:border-accent/60 focus:ring-2 focus:ring-accent/20"
+                          />
+                          <FocusableButton
+                            variant="ghost"
+                            aria-disabled={retroAchievementsSaveState === 'saving'}
+                            data-disabled={
+                              retroAchievementsSaveState === 'saving' ? 'true' : undefined
+                            }
+                            onClick={() => void saveRetroAchievementsUsername()}
+                          >
+                            <span className="flex items-center gap-2">
+                              {retroAchievementsSaveState === 'saving' ? (
+                                <Loader2 size={14} className="animate-spin" />
+                              ) : retroAchievementsSaveState === 'saved' ? (
+                                <Check size={14} />
+                              ) : retroAchievementsSaveState === 'error' ? (
+                                <CircleAlert size={14} />
+                              ) : null}
+                              {t(
+                                retroAchievementsSaveState === 'saving'
+                                  ? 'settings.saving'
+                                  : retroAchievementsSaveState === 'saved'
+                                    ? 'settings.images.saved'
+                                    : retroAchievementsSaveState === 'error'
+                                      ? 'settings.saveFailed'
+                                      : 'settings.retroAchievements.save'
+                              )}
+                            </span>
+                          </FocusableButton>
+                        </div>
+                      </label>
+                      <ApiKeyField
+                        label={t('settings.retroAchievements.apiKeyLabel')}
+                        value=""
+                        placeholder={t('settings.retroAchievements.apiKeyPlaceholder')}
+                        getKeyLabel={t('settings.retroAchievements.getKey')}
+                        getKeyUrl="https://retroachievements.org/controlpanel.php"
+                        configured={retroAchievementsApiKeyConfigured}
+                        configuredLabel={t('settings.retroAchievements.apiKeyConfigured')}
+                        notConfiguredLabel={t('settings.retroAchievements.apiKeyNotConfigured')}
+                        clearLabel={t('settings.retroAchievements.clearApiKey')}
+                        onSave={async (value) => {
+                          const status = await window.api.retroAchievements.credentials.set(value)
+                          setRetroAchievementsApiKeyConfigured(status.configured)
+                        }}
+                        onClear={async () => {
+                          const status = await window.api.retroAchievements.credentials.clear()
+                          setRetroAchievementsApiKeyConfigured(status.configured)
+                        }}
+                      />
+                      <div className="flex items-start gap-3 rounded-2xl border border-amber-300/15 bg-amber-300/[0.05] px-4 py-3 text-xs leading-relaxed text-amber-100/80">
+                        <CircleAlert size={15} className="mt-0.5 shrink-0" />
+                        <span>{t('settings.retroAchievements.emulatorNote')}</span>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 text-sm text-muted">
+                      <Loader2 size={16} className="animate-spin" />
+                      {t('settings.loading')}
+                    </div>
+                  )}
+                </SettingsSection>
+
+                <SettingsSection index="05" icon={Globe2} title={t('settings.storeRegion.title')}>
                   <p className="mb-4 text-sm text-muted">{t('settings.storeRegion.body')}</p>
                   <div className="flex flex-wrap gap-3">
                     {STORE_REGION_OPTIONS.map((option) => (
@@ -1166,7 +2078,7 @@ export function SettingsView(): JSX.Element {
                   </div>
                 </SettingsSection>
 
-                <SettingsSection index="04" icon={ImageIcon} title={t('settings.images.title')}>
+                <SettingsSection index="06" icon={ImageIcon} title={t('settings.images.title')}>
                   <p className="mb-4 max-w-4xl text-sm leading-relaxed text-muted">
                     {t('settings.images.body')}
                   </p>
@@ -1927,12 +2839,14 @@ function PresentationChoice({
   active,
   title,
   description,
+  badge,
   preview,
   onClick
 }: {
   active: boolean
   title: string
   description: string
+  badge?: string
   preview: React.ReactNode
   onClick: () => void
 }): JSX.Element {
@@ -1954,8 +2868,15 @@ function PresentationChoice({
         {preview}
       </span>
       <span className="min-w-0 flex-1">
-        <span className={`block text-xs font-bold ${active ? 'text-white' : 'text-white/70'}`}>
-          {title}
+        <span className="flex flex-wrap items-center gap-1.5">
+          <span className={`text-xs font-bold ${active ? 'text-white' : 'text-white/70'}`}>
+            {title}
+          </span>
+          {badge && (
+            <span className="rounded-full bg-white/[0.07] px-1.5 py-0.5 text-[7px] font-bold uppercase tracking-wider text-white/35">
+              {badge}
+            </span>
+          )}
         </span>
         <span className="mt-1 block text-[10px] leading-snug text-white/38">{description}</span>
       </span>
@@ -1970,7 +2891,107 @@ function PresentationChoice({
   )
 }
 
+function DockThemePreview({ theme }: { theme: DockThemeId }): JSX.Element {
+  const shellClass =
+    theme === 'glass'
+      ? 'border-white/25 bg-gradient-to-br from-white/20 via-white/[0.07] to-accent/10 shadow-[inset_0_1px_0_rgba(255,255,255,0.18)]'
+      : theme === 'neon'
+        ? 'border-accent/55 bg-black/70 shadow-[0_0_12px_rgb(var(--color-accent)/0.32)]'
+        : theme === 'minimal'
+          ? 'border-transparent bg-transparent'
+          : 'border-white/10 bg-black/35 shadow-[0_6px_14px_rgba(0,0,0,0.28)]'
+
+  return (
+    <span
+      aria-hidden="true"
+      className={`flex h-6 w-14 items-center justify-center gap-1 rounded-full border ${shellClass}`}
+    >
+      {[0, 1, 2, 3].map((index) => (
+        <span
+          key={index}
+          className={`block rounded-full ${
+            index === 1
+              ? `h-3 w-3 bg-accent/25 shadow-[0_0_8px_rgb(var(--color-accent)/0.35)] ${
+                  theme === 'neon' ? 'border border-accent/65' : 'border border-white/10'
+                }`
+              : 'h-1.5 w-1.5 bg-white/30'
+          }`}
+        />
+      ))}
+    </span>
+  )
+}
+
+function DockSizePreview({ size }: { size: DockSize }): JSX.Element {
+  const shellSize =
+    size === 'compact' ? 'h-4 w-10' : size === 'large' ? 'h-7 w-[3.75rem]' : 'h-5 w-12'
+  const dotSize = size === 'large' ? 'h-2.5 w-2.5' : size === 'compact' ? 'h-1.5 w-1.5' : 'h-2 w-2'
+
+  return (
+    <span
+      aria-hidden="true"
+      className={`flex items-center justify-center gap-1 rounded-full border border-white/12 bg-black/40 ${shellSize}`}
+    >
+      {[0, 1, 2].map((index) => (
+        <span
+          key={index}
+          className={`${dotSize} rounded-full ${index === 1 ? 'bg-accent/80' : 'bg-white/25'}`}
+        />
+      ))}
+    </span>
+  )
+}
+
+function DockMotionPreview({ motionMode }: { motionMode: DockMotion }): JSX.Element {
+  const offsets =
+    motionMode === 'lively' ? [-5, 0, 5] : motionMode === 'standard' ? [-2, 0, 2] : [0, 0, 0]
+
+  return (
+    <span aria-hidden="true" className="relative flex h-8 w-14 items-center justify-center gap-1.5">
+      {motionMode === 'lively' && (
+        <span className="absolute inset-x-1 top-1/2 h-px bg-gradient-to-r from-transparent via-accent/45 to-transparent" />
+      )}
+      {offsets.map((offset, index) => (
+        <span
+          key={index}
+          className={`relative block rounded-full ${
+            index === 1
+              ? 'h-3 w-3 bg-accent shadow-[0_0_10px_rgb(var(--color-accent)/0.48)]'
+              : 'h-2 w-2 bg-white/30'
+          }`}
+          style={{ transform: `translateY(${offset}px)` }}
+        />
+      ))}
+    </span>
+  )
+}
+
 function HomeLayoutPreview({ layout }: { layout: HomeLayoutId }): JSX.Element {
+  if (layout === 'xmode') {
+    return (
+      <span className="flex w-full flex-col gap-1.5">
+        <span className="mx-auto h-2.5 w-2/3 rounded-full border border-white/10 bg-white/10" />
+        <span className="grid grid-cols-[repeat(6,minmax(0,1fr))_1.35fr] gap-1">
+          {[0, 1, 2, 3, 4, 5].map((index) => (
+            <span
+              key={index}
+              className={`aspect-square rounded-[3px] border ${
+                index === 0
+                  ? 'border-accent/80 bg-gradient-to-br from-accent/85 to-accent-2/55'
+                  : 'border-white/10 bg-white/10'
+              }`}
+            />
+          ))}
+          <span className="rounded-[3px] border border-white/10 bg-white/[0.07]" />
+        </span>
+        <span className="grid flex-1 grid-cols-2 gap-1.5">
+          <span className="rounded-[4px] bg-gradient-to-r from-accent/35 to-white/[0.07]" />
+          <span className="rounded-[4px] bg-gradient-to-r from-white/[0.07] to-accent-2/25" />
+        </span>
+      </span>
+    )
+  }
+
   if (layout === 'coresense') {
     return (
       <span className="flex w-full flex-col justify-between gap-2">
@@ -2216,6 +3237,122 @@ function OptionPill({
       {active && <Check size={14} />}
       {children}
     </motion.button>
+  )
+}
+
+function PlayStationRemotePlayPanel({
+  remotePlay,
+  preference,
+  saving,
+  onPreference,
+  onRefresh,
+  t
+}: {
+  remotePlay: PlayStationRemotePlayStatus | null
+  preference: PlayStationRemotePlayPreference
+  saving: boolean
+  onPreference: (preference: PlayStationRemotePlayPreference) => void
+  onRefresh: () => void
+  t: ReturnType<typeof useT>
+}): JSX.Element {
+  const choices: Array<{
+    id: PlayStationRemotePlayPreference
+    title: string
+    description: string
+  }> = [
+    {
+      id: 'auto',
+      title: t('settings.playstation.remotePlay.auto'),
+      description: t('settings.playstation.remotePlay.autoBody')
+    },
+    {
+      id: 'chiaki',
+      title: 'Chiaki-ng',
+      description: t('settings.playstation.remotePlay.chiakiBody')
+    },
+    {
+      id: 'ps-remote-play',
+      title: 'PS Remote Play',
+      description: t('settings.playstation.remotePlay.officialBody')
+    }
+  ]
+  const installed = new Set(remotePlay?.apps.filter((app) => app.installed).map((app) => app.id))
+  const selectedName = remotePlay?.apps.find((app) => app.id === remotePlay.selectedApp)?.name
+
+  return (
+    <div className="mt-4 overflow-hidden rounded-2xl border border-[#1788ff]/20 bg-[linear-gradient(135deg,rgba(0,77,168,0.16),rgba(0,0,0,0.28)_55%)]">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.07] px-4 py-3">
+        <div>
+          <p className="text-sm font-bold text-white">{t('settings.playstation.remotePlay.title')}</p>
+          <p className="mt-0.5 text-[11px] text-white/45">
+            {selectedName
+              ? t('settings.playstation.remotePlay.selected', { app: selectedName })
+              : t('settings.playstation.remotePlay.noneDetected')}
+          </p>
+        </div>
+        <FocusableButton variant="ghost" onClick={onRefresh} className="shrink-0">
+          <span className="flex items-center gap-2">
+            <RefreshCw size={13} />
+            {t('settings.playstation.remotePlay.detectAgain')}
+          </span>
+        </FocusableButton>
+      </div>
+
+      <div className="grid min-w-0 grid-cols-1 gap-2 p-4">
+        {choices.map((choice) => {
+          const isInstalled =
+            choice.id === 'auto' ? installed.size > 0 : installed.has(choice.id)
+          return (
+            <motion.button
+              key={choice.id}
+              data-focusable
+              type="button"
+              aria-pressed={preference === choice.id}
+              disabled={saving}
+              onClick={() => onPreference(choice.id)}
+              whileTap={{ scale: 0.985 }}
+              className={`flex min-w-0 items-start gap-3 rounded-xl border p-3 text-left transition-colors ${
+                preference === choice.id
+                  ? 'border-[#238cff]/60 bg-[#0878e8]/15'
+                  : 'border-white/[0.07] bg-black/20 hover:bg-white/[0.045]'
+              } disabled:opacity-50`}
+            >
+              <span
+                className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${
+                  preference === choice.id
+                    ? 'border-[#3b9dff] bg-[#1687f5] text-white'
+                    : 'border-white/20 text-transparent'
+                }`}
+              >
+                <Check size={11} strokeWidth={3} />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="flex flex-wrap items-center gap-2 text-xs font-bold text-white/88">
+                  {choice.title}
+                  <span
+                    className={`rounded-full px-2 py-0.5 text-[8px] uppercase tracking-wider ${
+                      isInstalled
+                        ? 'bg-emerald-400/10 text-emerald-300'
+                        : 'bg-white/[0.06] text-white/35'
+                    }`}
+                  >
+                    {t(
+                      isInstalled
+                        ? 'settings.playstation.remotePlay.detected'
+                        : 'settings.playstation.remotePlay.notDetected'
+                    )}
+                  </span>
+                </span>
+                <span className="mt-1.5 block text-[10px] leading-relaxed text-white/42">
+                  {choice.description}
+                </span>
+              </span>
+            </motion.button>
+          )
+        })}
+      </div>
+
+    </div>
   )
 }
 

@@ -30,6 +30,7 @@ $certificateMetadataPath = Join-Path $repoRoot '.certificates\orbit-development.
 $inspectionDir = Join-Path $releaseDir '_orbit-xbox-inspection'
 $readmePath = Join-Path $releaseDir 'XBOX-MODE-README.txt'
 $installerDefinitionPath = Join-Path $repoRoot 'build\xbox\OrbitXboxInstaller.nsi'
+$legalDocumentNames = @('LICENSE', 'LICENSE_EXCEPTION.md', 'THIRD_PARTY_NOTICES.md')
 $certificate = $null
 
 if (!(Test-Path -LiteralPath $packagePath)) { throw "Missing Xbox Mode package: $packagePath" }
@@ -48,6 +49,9 @@ $installerLanguageMatches = [regex]::Matches(
 $installerLanguages = @($installerLanguageMatches | ForEach-Object { $_.Groups['language'].Value })
 if ($installerLanguages.Count -ne 1 -or $installerLanguages[0] -cne 'English') {
   throw "The Xbox Mode installer must contain English as its only UI language. Found: $([string]::Join(', ', $installerLanguages))"
+}
+if ($installerDefinition -notmatch '(?m)^\s*File\s+/oname=ORBIT\.appx\s+"\$\{APPX_PATH\}"\s*$') {
+  throw 'The Xbox Mode installer must embed the verified AppX package.'
 }
 
 $resolvedRelease = [System.IO.Path]::GetFullPath($releaseDir).TrimEnd('\') + '\'
@@ -145,8 +149,23 @@ try {
     (Join-Path $inspectionDir 'app\resources\discord-social-sdk\License-Notices.txt'),
     (Join-Path $inspectionDir 'app\resources\discord-social-sdk\README.md'),
     (Join-Path $inspectionDir 'app\resources\discord-social-sdk\win32-x64\discord_partner_sdk.dll')
-  )) {
+  ) + @($legalDocumentNames | ForEach-Object {
+    Join-Path $inspectionDir "app\resources\$_"
+  })) {
     if (!(Test-Path -LiteralPath $requiredPath)) { throw "Package is missing: $requiredPath" }
+  }
+
+  foreach ($legalDocumentName in $legalDocumentNames) {
+    $sourcePath = Join-Path $repoRoot $legalDocumentName
+    $packagedPath = Join-Path $inspectionDir "app\resources\$legalDocumentName"
+    if (!(Test-Path -LiteralPath $sourcePath)) {
+      throw "Repository legal document is missing: $sourcePath"
+    }
+    $sourceHash = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash
+    $packagedHash = (Get-FileHash -LiteralPath $packagedPath -Algorithm SHA256).Hash
+    if ($sourceHash -cne $packagedHash) {
+      throw "Packaged legal document does not match the repository source: $legalDocumentName"
+    }
   }
 
   $packagedRelease = Get-Content -LiteralPath (Join-Path $inspectionDir 'app\resources\release-manifest.json') -Raw | ConvertFrom-Json

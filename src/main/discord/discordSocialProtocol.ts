@@ -1,4 +1,10 @@
-import type { OrbitFriend } from '@shared/ipc'
+import type {
+  DiscordChatEvent,
+  DiscordChatHistory,
+  DiscordChatInbox,
+  DiscordChatSendResult,
+  OrbitFriend
+} from '@shared/ipc'
 
 export interface DiscordSocialTokens {
   accessToken: string
@@ -27,7 +33,16 @@ export interface DiscordSocialSnapshot {
   issue?: DiscordSocialIssue
 }
 
-export type DiscordWorkerCommand = 'probe' | 'refresh' | 'connect' | 'disconnect' | 'dispose'
+export type DiscordWorkerCommand =
+  | 'probe'
+  | 'refresh'
+  | 'connect'
+  | 'disconnect'
+  | 'chat-inbox'
+  | 'chat-history'
+  | 'chat-send'
+  | 'chat-showing'
+  | 'dispose'
 
 export interface DiscordWorkerRequest {
   type: 'request'
@@ -35,6 +50,10 @@ export interface DiscordWorkerRequest {
   command: DiscordWorkerCommand
   applicationId?: string
   tokens?: DiscordSocialTokens
+  recipientId?: string
+  content?: string
+  limit?: number
+  showing?: boolean
 }
 
 export interface DiscordWorkerResponse {
@@ -46,6 +65,9 @@ export interface DiscordWorkerResponse {
   clearTokens?: boolean
   version?: string
   error?: DiscordSocialIssue
+  chatInbox?: DiscordChatInbox
+  chatHistory?: DiscordChatHistory
+  chatSend?: DiscordChatSendResult
 }
 
 export interface DiscordWorkerUpdatedEvent {
@@ -58,7 +80,13 @@ export interface DiscordWorkerReadyEvent {
   version: string
 }
 
+export interface DiscordWorkerChatEvent {
+  type: 'chat-message'
+  event: DiscordChatEvent
+}
+
 export type DiscordWorkerMessage =
   | DiscordWorkerResponse
   | DiscordWorkerUpdatedEvent
+  | DiscordWorkerChatEvent
   | DiscordWorkerReadyEvent

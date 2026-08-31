@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { motion } from 'framer-motion'
+import { motion, useReducedMotion } from 'framer-motion'
 import {
   CalendarDays,
   Archive,
+  CircleAlert,
+  EyeOff,
   ExternalLink,
   FolderOpen,
   Gamepad2,
@@ -11,6 +13,7 @@ import {
   LibraryBig,
   Loader2,
   Play,
+  RefreshCw,
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
@@ -27,9 +30,10 @@ import type {
   ImageUpdate,
   LibraryGame
 } from '@shared/ipc'
+import { retroLaunchArguments } from '@shared/retroSystems'
 import { GameImage } from './GameImage'
 import { ArtworkPicker } from './ArtworkPicker'
-import { LaunchOptionsDialog } from './LaunchOptionsDialog'
+import { formatWindowsArguments, LaunchOptionsDialog } from './LaunchOptionsDialog'
 import { LibraryCollectionDialog } from './LibraryCollectionDialog'
 import { useBackHandler } from '@renderer/hooks/useBackHandler'
 import { useLaunchGame } from '@renderer/hooks/useLaunchGame'
@@ -40,6 +44,7 @@ import { focusElement } from '@renderer/lib/spatialNavigation'
 import { formatPlaytime } from '@renderer/lib/playtime'
 import { useLibraryStore } from '@renderer/state/libraryStore'
 import { useLibraryCollectionsStore } from '@renderer/state/libraryCollectionsStore'
+import { notify } from '@renderer/state/notificationStore'
 
 interface Props {
   game: LibraryGame
@@ -62,8 +67,10 @@ function formatHours(minutes: number | undefined, language: 'en' | 'de'): string
 
 export function GameDetailPanel({ game }: Props): JSX.Element {
   const t = useT()
+  const reduceMotion = Boolean(useReducedMotion())
   const language = usePreferencesStore((state) => state.language)
   const showAchievements = usePreferencesStore((state) => state.showAchievements)
+  const achievementsSupported = game.provider === 'steam' || game.provider === 'retro'
   const closeGame = useGameDetailStore((state) => state.closeGame)
   const launch = useLaunchGame()
   const detailRootRef = useRef<HTMLDivElement>(null)
@@ -77,7 +84,9 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
   )
   const [loadingTimes, setLoadingTimes] = useState(!game.metadata.completionTimes)
   const [achievements, setAchievements] = useState<GameAchievementsSnapshot | null>(null)
-  const [loadingAchievements, setLoadingAchievements] = useState(showAchievements)
+  const [loadingAchievements, setLoadingAchievements] = useState(
+    showAchievements && achievementsSupported
+  )
   const [backupBusy, setBackupBusy] = useState(false)
   const [backupFeedback, setBackupFeedback] = useState<'success' | 'failed' | null>(null)
   const [confirmRemove, setConfirmRemove] = useState(false)
@@ -85,6 +94,7 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
   const [launchOptionsOpen, setLaunchOptionsOpen] = useState(false)
   const [collectionsOpen, setCollectionsOpen] = useState(false)
   const [favoriteBusy, setFavoriteBusy] = useState(false)
+  const [excludeState, setExcludeState] = useState<'idle' | 'saving' | 'error'>('idle')
   const [hasArtworkOverrides, setHasArtworkOverrides] = useState({
     vertical: false,
     horizontal: false,
@@ -100,14 +110,19 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
   useEffect(() => {
     const previousFocus = document.activeElement as HTMLElement | null
     returnFocusRef.current = previousFocus
-    const frame = requestAnimationFrame(() => focusElement(launchRef.current))
+    const frame = requestAnimationFrame(() => {
+      // The panel is still translated outside the viewport during this frame.
+      // Scrolling it into view would move the inert shell until the slide settles.
+      focusElement(launchRef.current, { ensureVisible: false })
+    })
     return () => {
       cancelAnimationFrame(frame)
       requestAnimationFrame(() => {
+        const returnTarget = returnFocusRef.current
         const fallback =
           document.querySelector<HTMLElement>('[data-library-source][aria-pressed="true"]') ??
           document.querySelector<HTMLElement>('[data-top-nav] [aria-current="page"]')
-        focusElement(previousFocus?.isConnected ? previousFocus : fallback)
+        focusElement(returnTarget?.isConnected ? returnTarget : fallback)
       })
     }
   }, [])
@@ -132,8 +147,8 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
   useEffect(() => {
     let active = true
     setAchievements(null)
-    setLoadingAchievements(showAchievements)
-    if (showAchievements) {
+    setLoadingAchievements(showAchievements && achievementsSupported)
+    if (showAchievements && achievementsSupported) {
       void window.api.game
         .resolveAchievements(game.id)
         .then((result) => {
@@ -146,7 +161,19 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
     return () => {
       active = false
     }
-  }, [game.id, showAchievements])
+  }, [achievementsSupported, game.id, showAchievements])
+
+  async function retryAchievements(): Promise<void> {
+    if (loadingAchievements) return
+    setLoadingAchievements(true)
+    try {
+      setAchievements(await window.api.game.resolveAchievements(game.id, true))
+    } catch {
+      // Keep the previous explanatory state visible when IPC itself fails.
+    } finally {
+      setLoadingAchievements(false)
+    }
+  }
 
   useEffect(() => {
     if (!confirmRemove) return
@@ -209,6 +236,25 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
   const genreText = useMemo(() => game.metadata.genres?.slice(0, 3).join(' · '), [game.metadata.genres])
   const completionAvailable = completionTimes?.state === 'available'
   const local = game.provider === 'local' ? game.local : undefined
+  const retro = game.provider === 'retro' ? game.retro : undefined
+  const retroDefaultArguments = useMemo(() => {
+    if (!retro) return undefined
+    try {
+      return retroLaunchArguments({ ...retro, launchArguments: undefined })
+    } catch {
+      return [retro.romPath]
+    }
+  }, [retro])
+  const retroEffectiveArguments = useMemo(() => {
+    if (!retro) return undefined
+    try {
+      return retroLaunchArguments(retro)
+    } catch {
+      return retroDefaultArguments
+    }
+  }, [retro, retroDefaultArguments])
+  const retroLaunchCommand = formatWindowsArguments(retroEffectiveArguments)
+  const retroLaunchUnavailable = Boolean(retro && (!game.installed || !retro.emulatorPath))
   const lastBackupLabel =
     backupFeedback === 'failed' || local?.lastBackupState === 'failed'
       ? t('details.backupFailed')
@@ -222,6 +268,7 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
         : t('details.backupNever')
 
   const handleLaunch = (): void => {
+    if (retroLaunchUnavailable) return
     launch(game.id)
     closeGame()
   }
@@ -244,56 +291,57 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
     }
   }
 
+  const findFocusAfterLibraryRemoval = (): HTMLElement | null => {
+    const originCard = returnFocusRef.current?.closest<HTMLElement>('[data-game-card="true"]')
+    const activePane = originCard?.closest<HTMLElement>('[data-view-pane]')
+    const visibleCards = activePane
+      ? Array.from(activePane.querySelectorAll<HTMLElement>('[data-game-card="true"]'))
+      : []
+    const currentIndex = originCard ? visibleCards.indexOf(originCard) : -1
+    const fallbackCard =
+      currentIndex >= 0
+        ? (visibleCards[currentIndex + 1] ?? visibleCards[currentIndex - 1] ?? null)
+        : null
+    return (
+      fallbackCard ??
+      document.querySelector<HTMLElement>('[data-library-source][aria-pressed="true"]') ??
+      document.querySelector<HTMLElement>('[data-top-nav] [aria-current="page"]')
+    )
+  }
+
+  const handleExclude = async (): Promise<void> => {
+    if (excludeState === 'saving') return
+    const focusTarget = findFocusAfterLibraryRemoval()
+    setExcludeState('saving')
+    try {
+      const snapshot = await window.api.library.exclude(game.id)
+      returnFocusRef.current = focusTarget
+      useLibraryStore.getState().applySnapshot(snapshot)
+      notify({
+        tone: 'success',
+        titleKey: 'notification.libraryExcluded.title',
+        messageKey: 'notification.libraryExcluded.body',
+        vars: { game: game.name },
+        force: true,
+        replace: true
+      })
+      closeGame()
+    } catch {
+      setExcludeState('error')
+    }
+  }
+
   const handleRemove = async (): Promise<void> => {
     if (!confirmRemove) {
       setConfirmRemove(true)
       return
     }
-    const allGameCards = Array.from(
-      document.querySelectorAll<HTMLElement>('[data-game-card="true"]')
-    )
-    const originCard = returnFocusRef.current?.closest<HTMLElement>('[data-game-card="true"]')
-    const gridCard =
-      originCard?.closest('[data-navigation-grid]')
-        ? originCard
-        : allGameCards.find(
-            (candidate) =>
-              candidate.dataset.gameId === game.id &&
-              Boolean(candidate.closest('[data-navigation-grid]'))
-          )
-    const visibleCards = gridCard
-      ? Array.from(
-          gridCard
-            .closest('[data-navigation-grid]')
-            ?.querySelectorAll<HTMLElement>('[data-game-card="true"]') ?? []
-        )
-      : []
-    const currentIndex = gridCard ? visibleCards.indexOf(gridCard) : -1
-    const fallbackCard =
-      currentIndex >= 0
-        ? (visibleCards[currentIndex + 1] ?? visibleCards[currentIndex - 1] ?? null)
-        : null
-    const fallbackSource = document.querySelector<HTMLElement>(
-      '[data-library-source][aria-pressed="true"]'
-    )
-    const fallbackControl =
-      fallbackSource ??
-      document.querySelector<HTMLElement>('[data-top-nav] [aria-current="page"]') ??
-      allGameCards.find((candidate) => candidate.dataset.gameId !== game.id) ??
-      null
+    const focusTarget = findFocusAfterLibraryRemoval()
     try {
       const snapshot = await window.api.library.custom.remove(game.id)
+      returnFocusRef.current = focusTarget
       useLibraryStore.getState().applySnapshot(snapshot)
       closeGame()
-      requestAnimationFrame(() => {
-        focusElement(
-          fallbackCard?.isConnected
-            ? fallbackCard
-            : fallbackControl?.isConnected
-              ? fallbackControl
-              : null
-        )
-      })
     } catch {
       setConfirmRemove(false)
     }
@@ -340,20 +388,41 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
       role="dialog"
       aria-modal="true"
       aria-label={game.name}
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      transition={{ duration: 0.22 }}
-      onPointerDown={(event) => {
-        if (event.currentTarget === event.target) closeGame()
-      }}
-      className="fixed inset-0 z-50 bg-black/60 backdrop-blur-[6px]"
+      initial="closed"
+      animate="open"
+      exit="closed"
+      onPointerDown={closeGame}
+      className="fixed inset-0 z-50"
     >
+      <motion.div
+        aria-hidden="true"
+        variants={{
+          closed: {
+            opacity: 0,
+            transition: reduceMotion
+              ? { duration: 0.12 }
+              : { duration: 0.2, delay: 0.12, ease: [0.4, 0, 1, 1] }
+          },
+          open: {
+            opacity: 1,
+            transition: reduceMotion
+              ? { duration: 0.12 }
+              : { duration: 0.24, ease: [0, 0, 0.2, 1] }
+          }
+        }}
+        className="absolute inset-0 bg-black/65"
+      />
       <motion.section
-        initial={{ x: '108%', opacity: 0.65, scale: 0.985 }}
-        animate={{ x: 0, opacity: 1, scale: 1 }}
-        exit={{ x: '108%', opacity: 0.55, scale: 0.99 }}
-        transition={{ type: 'spring', stiffness: 280, damping: 31, mass: 0.9 }}
+        variants={
+          reduceMotion
+            ? { closed: { opacity: 0 }, open: { opacity: 1 } }
+            : { closed: { x: '102%' }, open: { x: 0 } }
+        }
+        transition={
+          reduceMotion
+            ? { duration: 0.12 }
+            : { duration: 0.32, ease: [0.22, 1, 0.36, 1] }
+        }
         onPointerDown={(event) => event.stopPropagation()}
         className="game-detail-panel absolute overflow-hidden rounded-[clamp(1.4rem,2.3vw,2.8rem)] border border-white/10 bg-surface shadow-[0_32px_100px_rgba(0,0,0,0.65)]"
       >
@@ -367,14 +436,44 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
         <div className="absolute inset-0 bg-gradient-to-t from-black via-black/45 to-black/10" />
         <div className="absolute inset-0 bg-[radial-gradient(circle_at_82%_18%,transparent_0%,rgba(0,0,0,0.28)_48%,rgba(0,0,0,0.72)_100%)]" />
 
-        <button
-          data-focusable
-          onClick={closeGame}
-          aria-label={t('details.close')}
-          className="absolute right-[clamp(1rem,2vw,2rem)] top-[clamp(1rem,2vw,2rem)] z-30 flex h-11 w-11 items-center justify-center rounded-full border border-white/10 bg-black/35 text-white backdrop-blur-xl transition-colors hover:bg-white/15"
-        >
-          <X size={20} />
-        </button>
+        <div className="absolute right-[clamp(1rem,2vw,2rem)] top-[clamp(1rem,2vw,2rem)] z-30 flex items-center gap-2">
+          <button
+            data-focusable
+            type="button"
+            aria-disabled={excludeState === 'saving'}
+            data-disabled={excludeState === 'saving' ? 'true' : undefined}
+            onClick={() => void handleExclude()}
+            className={`flex h-11 items-center gap-2 rounded-full border px-4 text-xs font-semibold backdrop-blur-xl transition-colors ${
+              excludeState === 'error'
+                ? 'border-amber-200/25 bg-amber-300/[0.12] text-amber-100 hover:bg-amber-300/20'
+                : 'border-white/10 bg-black/35 text-white/75 hover:bg-white/15 hover:text-white'
+            }`}
+          >
+            {excludeState === 'saving' ? (
+              <Loader2 size={16} className="animate-spin" />
+            ) : (
+              <EyeOff size={16} />
+            )}
+            <span aria-live="polite">
+              {t(
+                excludeState === 'saving'
+                  ? 'details.excludeSaving'
+                  : excludeState === 'error'
+                    ? 'details.excludeRetry'
+                    : 'details.exclude'
+              )}
+            </span>
+          </button>
+
+          <button
+            data-focusable
+            onClick={closeGame}
+            aria-label={t('details.close')}
+            className="flex h-11 w-11 items-center justify-center rounded-full border border-white/10 bg-black/35 text-white backdrop-blur-xl transition-colors hover:bg-white/15"
+          >
+            <X size={20} />
+          </button>
+        </div>
 
         <div className="absolute inset-0 z-20 overflow-hidden">
           <div className="game-detail-layout grid h-full">
@@ -468,6 +567,46 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
                   </div>
                 </div>
               )}
+
+              {retro && (
+                <div className="game-detail-backup rounded-xl border border-white/10 bg-black/30 px-3.5 py-3 backdrop-blur-md">
+                  <div className="flex items-start gap-3">
+                    {retro.emulatorPath ? (
+                      <Gamepad2 size={16} className="mt-0.5 shrink-0 text-accent" />
+                    ) : (
+                      <CircleAlert size={16} className="mt-0.5 shrink-0 text-amber-300" />
+                    )}
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold text-white/80">
+                        {retro.systemName}
+                        <span className="px-1.5 text-white/25">·</span>
+                        {retro.emulatorName ?? t('details.retroMissingEmulator')}
+                      </p>
+                      <p className="mt-1 text-[10px] text-white/45">
+                        {t(
+                          retro.retroAchievementsMatch === 'matched'
+                            ? 'details.retroAchievementsMatched'
+                            : retro.retroAchievementsMatch === 'not-configured'
+                              ? 'details.retroAchievementsSetup'
+                              : retro.retroAchievementsMatch === 'unmatched'
+                                ? 'details.retroAchievementsUnmatched'
+                                : retro.retroAchievementsMatch === 'unavailable'
+                                  ? 'details.retroAchievementsUnavailable'
+                                  : 'details.retroAchievementsUnsupported'
+                        )}
+                      </p>
+                      {retroLaunchCommand && (
+                        <p
+                          className="mt-1.5 truncate font-mono text-[10px] text-white/35"
+                          title={retroLaunchCommand}
+                        >
+                          {retroLaunchCommand}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="min-w-0">
@@ -528,10 +667,11 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
                 </div>
               </section>
 
-              {showAchievements && (loadingAchievements || achievements?.state === 'available') && (
+              {showAchievements && achievementsSupported && (
                 <AchievementGallery
                   snapshot={achievements}
                   loading={loadingAchievements}
+                  onRetry={() => void retryAchievements()}
                   t={t}
                 />
               )}
@@ -542,11 +682,29 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
               <button
                 ref={launchRef}
                 data-focusable
+                aria-disabled={retroLaunchUnavailable}
+                data-disabled={retroLaunchUnavailable ? 'true' : undefined}
                 onClick={handleLaunch}
-                className="game-detail-action border-transparent bg-accent font-bold text-black shadow-[0_12px_40px_rgb(var(--color-accent)/0.25)] hover:scale-[1.015]"
+                className={`game-detail-action border-transparent bg-accent font-bold text-black shadow-[0_12px_40px_rgb(var(--color-accent)/0.25)] ${
+                  retroLaunchUnavailable
+                    ? 'cursor-not-allowed opacity-55'
+                    : 'hover:scale-[1.015]'
+                }`}
               >
-                {game.installed ? <Play size={17} fill="currentColor" /> : <HardDriveDownload size={17} />}
-                {game.installed ? t('details.play') : t('details.install')}
+                {retroLaunchUnavailable ? (
+                  <CircleAlert size={17} />
+                ) : game.installed ? (
+                  <Play size={17} fill="currentColor" />
+                ) : (
+                  <HardDriveDownload size={17} />
+                )}
+                {retro && !game.installed
+                  ? t('details.romMissing')
+                  : retro && !retro.emulatorPath
+                    ? t('details.retroMissingEmulator')
+                    : game.installed
+                      ? t('details.play')
+                      : t('details.install')}
               </button>
 
               <button
@@ -617,7 +775,7 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
                 </button>
               )}
 
-              {local && (
+              {(local || retro) && (
                 <button
                   ref={launchOptionsRef}
                   data-focusable
@@ -658,11 +816,17 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
         onClose={closeArtworkPicker}
       />
     )}
-    {launchOptionsOpen && local && (
+    {launchOptionsOpen && (local || retro) && (
       <LaunchOptionsDialog
-        gameId={game.id}
         gameName={game.name}
-        initialArguments={local.launchArguments}
+        context={retro ? 'retro' : 'local'}
+        initialArguments={retro ? retroEffectiveArguments : local?.launchArguments}
+        defaultArguments={retro ? retroDefaultArguments : undefined}
+        onSave={(launchArguments) =>
+          retro
+            ? window.api.library.retro.setLaunchArguments({ gameId: game.id, launchArguments })
+            : window.api.library.custom.setLaunchArguments({ gameId: game.id, launchArguments })
+        }
         onSaved={(snapshot) => {
           useLibraryStore.getState().applySnapshot(snapshot)
           closeLaunchOptions()
@@ -686,10 +850,12 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
 function AchievementGallery({
   snapshot,
   loading,
+  onRetry,
   t
 }: {
   snapshot: GameAchievementsSnapshot | null
   loading: boolean
+  onRetry: () => void
   t: ReturnType<typeof useT>
 }): JSX.Element {
   if (loading) {
@@ -698,10 +864,47 @@ function AchievementGallery({
     )
   }
 
-  const ordered = [...(snapshot?.achievements ?? [])].sort(
+  if (!snapshot || snapshot.state === 'unavailable') {
+    const reason = snapshot?.reason ?? 'unavailable'
+    const reasonKey = {
+      private: 'achievements.private',
+      unsupported: 'achievements.unsupported',
+      unavailable: 'achievements.unavailable',
+      'not-connected': 'achievements.notConnected'
+    } as const
+    return (
+      <section className="game-detail-achievements rounded-xl2 border border-white/10 bg-black/30 p-3.5 backdrop-blur-md">
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <p className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.14em] text-white/60">
+              <Trophy size={14} className="text-accent" />
+              {t('achievements.title')}
+            </p>
+            <p className="mt-2 flex items-start gap-2 text-xs leading-relaxed text-white/55">
+              <CircleAlert size={14} className="mt-0.5 shrink-0 text-amber-300" />
+              {t(reasonKey[reason])}
+            </p>
+          </div>
+          {reason !== 'unsupported' && (
+            <button
+              data-focusable
+              type="button"
+              onClick={onRetry}
+              className="flex shrink-0 items-center gap-2 rounded-full border border-white/10 bg-white/[0.06] px-3 py-2 text-[11px] font-semibold text-white/65 transition-colors hover:bg-white/[0.12] hover:text-white"
+            >
+              <RefreshCw size={13} />
+              {t('achievements.retry')}
+            </button>
+          )}
+        </div>
+      </section>
+    )
+  }
+
+  const ordered = [...snapshot.achievements].sort(
     (a, b) => Number(b.unlocked) - Number(a.unlocked) || (b.unlockedAt ?? 0) - (a.unlockedAt ?? 0)
   )
-  const percent = snapshot?.total ? Math.round((snapshot.unlocked / snapshot.total) * 100) : 0
+  const percent = snapshot.total ? Math.round((snapshot.unlocked / snapshot.total) * 100) : 0
 
   return (
     <section className="game-detail-achievements rounded-xl2 border border-white/10 bg-black/30 p-3.5 backdrop-blur-md">
@@ -713,8 +916,8 @@ function AchievementGallery({
           </p>
           <p className="mt-0.5 text-xs font-semibold text-white">
             {t('achievements.progress', {
-              unlocked: snapshot?.unlocked ?? 0,
-              total: snapshot?.total ?? 0
+              unlocked: snapshot.unlocked,
+              total: snapshot.total
             })}
           </p>
         </div>

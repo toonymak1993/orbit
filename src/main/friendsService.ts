@@ -3,6 +3,10 @@ import { shell } from 'electron'
 import Store from 'electron-store'
 import { FRIENDS_PROVIDERS } from '@shared/ipc'
 import type {
+  DiscordChatEvent,
+  DiscordChatHistory,
+  DiscordChatInbox,
+  DiscordChatSendResult,
   FriendPresence,
   EpicAccount,
   FriendsProvider,
@@ -196,11 +200,14 @@ function cachedSnapshot(): FriendsSnapshot {
   const friends = cached.friends
     .map(sanitizedCachedFriend)
     .filter((friend): friend is OrbitFriend => friend !== null)
+    .filter((friend) => friend.provider !== 'discord')
   const providers = Object.fromEntries(
     FRIENDS_PROVIDERS.map((provider) => {
       const providerFriends = friends.filter((friend) => friend.provider === provider)
       const cachedStatus = cached.providers?.[provider]
-      const ready = cachedStatus?.state === 'ready' || providerFriends.length > 0
+      const ready =
+        provider !== 'discord' &&
+        (cachedStatus?.state === 'ready' || providerFriends.length > 0)
       const status: FriendsProviderStatus = {
         provider,
         state: ready ? 'ready' : 'not-connected',
@@ -210,7 +217,8 @@ function cachedSnapshot(): FriendsSnapshot {
           typeof cachedStatus?.updatedAt === 'number' && Number.isFinite(cachedStatus.updatedAt)
             ? cachedStatus.updatedAt
             : undefined,
-        accountName: sanitizedAccountName(cachedStatus?.accountName)
+        accountName:
+          provider === 'discord' ? undefined : sanitizedAccountName(cachedStatus?.accountName)
       }
       return [provider, status]
     })
@@ -423,6 +431,7 @@ export class FriendsService extends EventEmitter {
   constructor() {
     super()
     discordSocialService.on('updated', this.handleDiscordUpdated)
+    discordSocialService.on('chat-message', this.handleDiscordChatMessage)
     epicSocialPresence.on('updated', this.handleEpicPresenceUpdated)
   }
 
@@ -434,7 +443,16 @@ export class FriendsService extends EventEmitter {
     this.snapshot = snapshot
     if (!snapshot.isRefreshing) {
       try {
-        friendsCache.set('snapshot', { ...snapshot, isRefreshing: false })
+        const cachedFriends = snapshot.friends.filter((friend) => friend.provider !== 'discord')
+        friendsCache.set('snapshot', {
+          ...snapshot,
+          friends: cachedFriends,
+          providers: {
+            ...snapshot.providers,
+            discord: providerStatus('discord', 'not-connected')
+          },
+          isRefreshing: false
+        })
       } catch {
         // A read-only or temporarily unavailable cache must not block live friends.
       }
@@ -466,6 +484,10 @@ export class FriendsService extends EventEmitter {
 
   private readonly handleDiscordUpdated = (snapshot: DiscordSocialSnapshot): void => {
     if (!this.disposed) this.mergeDiscord(snapshot)
+  }
+
+  private readonly handleDiscordChatMessage = (event: DiscordChatEvent): void => {
+    if (!this.disposed) this.emit('discord-chat-message', event)
   }
 
   private readonly handleEpicPresenceUpdated = (snapshot: EpicPresenceSnapshot): void => {
@@ -655,6 +677,22 @@ export class FriendsService extends EventEmitter {
     return this.mergeDiscord(snapshot)
   }
 
+  getDiscordChatHistory(userId: unknown, limit: unknown): Promise<DiscordChatHistory> {
+    return discordSocialService.getChatHistory(ORBIT_DISCORD_APPLICATION_ID, userId, limit)
+  }
+
+  getDiscordChatInbox(): Promise<DiscordChatInbox> {
+    return discordSocialService.getChatInbox(ORBIT_DISCORD_APPLICATION_ID)
+  }
+
+  sendDiscordChatMessage(userId: unknown, content: unknown): Promise<DiscordChatSendResult> {
+    return discordSocialService.sendChatMessage(ORBIT_DISCORD_APPLICATION_ID, userId, content)
+  }
+
+  setDiscordChatVisible(showing: unknown): Promise<void> {
+    return discordSocialService.setShowingChat(ORBIT_DISCORD_APPLICATION_ID, showing)
+  }
+
   async openProvider(provider: FriendsProvider): Promise<void> {
     const account = steamAuthManager.getAccount()
     const url =
@@ -677,6 +715,7 @@ export class FriendsService extends EventEmitter {
     if (this.disposed) return
     this.disposed = true
     discordSocialService.off('updated', this.handleDiscordUpdated)
+    discordSocialService.off('chat-message', this.handleDiscordChatMessage)
     epicSocialPresence.off('updated', this.handleEpicPresenceUpdated)
     epicSocialPresence.disconnect()
     discordSocialService.dispose()

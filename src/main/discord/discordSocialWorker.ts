@@ -1,6 +1,15 @@
 import { EventEmitter } from 'node:events'
 import koffi, { type LibraryHandle, type TypeObject } from 'koffi'
-import type { FriendPresence, OrbitFriend } from '@shared/ipc'
+import type {
+  DiscordChatConversation,
+  DiscordChatEvent,
+  DiscordChatHistory,
+  DiscordChatInbox,
+  DiscordChatMessage,
+  DiscordChatSendResult,
+  FriendPresence,
+  OrbitFriend
+} from '@shared/ipc'
 import type {
   DiscordSocialIssue,
   DiscordSocialSnapshot,
@@ -16,6 +25,9 @@ const READY_STATUS = 3
 const FRIEND_RELATIONSHIP = 1
 const BEARER_TOKEN = 1
 const MAX_DISCORD_FRIENDS = 1_000
+const MAX_CHAT_CONVERSATIONS = 500
+const MAX_CHAT_HISTORY = 200
+const MAX_MESSAGE_LENGTH = 2_000
 
 interface NativeString {
   ptr: bigint | null
@@ -42,6 +54,21 @@ type NativeFunction = ReturnType<LibraryHandle['func']>
 function cleanText(value: string, fallback = ''): string {
   const cleaned = value.replace(/[\u0000-\u001f\u007f]/g, '').trim()
   return (cleaned || fallback).slice(0, 100)
+}
+
+function cleanMessageContent(value: string): string {
+  return value
+    .replace(/\r\n?/g, '\n')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
+    .slice(0, MAX_MESSAGE_LENGTH)
+}
+
+function timestampFromDiscordSnowflake(value: string): number {
+  try {
+    return Number((BigInt(value) >> 22n) + 1_420_070_400_000n)
+  } catch {
+    return 0
+  }
 }
 
 function presenceFromDiscord(status: number): FriendPresence {
@@ -108,6 +135,11 @@ class DiscordNativeBindings {
   readonly AuthorizationCodeVerifier: TypeObject
   readonly RelationshipHandle: TypeObject
   readonly RelationshipSpan: TypeObject
+  readonly MessageHandle: TypeObject
+  readonly MessageSpan: TypeObject
+  readonly UserMessageSummary: TypeObject
+  readonly UserMessageSummarySpan: TypeObject
+  readonly AdditionalContent: TypeObject
   readonly UserHandle: TypeObject
   readonly Activity: TypeObject
 
@@ -116,6 +148,10 @@ class DiscordNativeBindings {
   readonly resultCallbackType: TypeObject
   readonly statusCallbackType: TypeObject
   readonly changedCallbackType: TypeObject
+  readonly messageResultCallbackType: TypeObject
+  readonly messageSpanCallbackType: TypeObject
+  readonly userMessageSummarySpanCallbackType: TypeObject
+  readonly messageDeletedCallbackType: TypeObject
 
   readonly allocNative: NativeFunction
   readonly freeNative: NativeFunction
@@ -138,13 +174,21 @@ class DiscordNativeBindings {
   readonly clientAbortAuthorize: NativeFunction
   readonly clientAuthorize: NativeFunction
   readonly clientCreateAuthorizationCodeVerifier: NativeFunction
-  readonly clientGetDefaultPresenceScopes: NativeFunction
+  readonly clientGetDefaultCommunicationScopes: NativeFunction
   readonly clientGetToken: NativeFunction
   readonly clientRefreshToken: NativeFunction
   readonly clientUpdateToken: NativeFunction
   readonly clientRevokeToken: NativeFunction
   readonly clientGetRelationships: NativeFunction
   readonly clientGetCurrentUserV2: NativeFunction
+  readonly clientGetMessageHandle: NativeFunction
+  readonly clientGetUserMessageSummaries: NativeFunction
+  readonly clientGetUserMessagesWithLimit: NativeFunction
+  readonly clientSendUserMessage: NativeFunction
+  readonly clientSetMessageCreatedCallback: NativeFunction
+  readonly clientSetMessageUpdatedCallback: NativeFunction
+  readonly clientSetMessageDeletedCallback: NativeFunction
+  readonly clientSetShowingChat: NativeFunction
 
   readonly clientResultSuccessful: NativeFunction
   readonly clientResultToString: NativeFunction
@@ -164,6 +208,18 @@ class DiscordNativeBindings {
   readonly relationshipDiscordType: NativeFunction
   readonly relationshipUser: NativeFunction
   readonly relationshipDrop: NativeFunction
+  readonly messageId: NativeFunction
+  readonly messageAuthorId: NativeFunction
+  readonly messageRecipientId: NativeFunction
+  readonly messageContent: NativeFunction
+  readonly messageSentTimestamp: NativeFunction
+  readonly messageEditedTimestamp: NativeFunction
+  readonly messageAdditionalContent: NativeFunction
+  readonly messageDrop: NativeFunction
+  readonly userMessageSummaryUserId: NativeFunction
+  readonly userMessageSummaryLastMessageId: NativeFunction
+  readonly userMessageSummaryDrop: NativeFunction
+  readonly additionalContentDrop: NativeFunction
   readonly userId: NativeFunction
   readonly userDisplayName: NativeFunction
   readonly userUsername: NativeFunction
@@ -194,6 +250,17 @@ class DiscordNativeBindings {
       ptr: koffi.pointer(this.RelationshipHandle),
       size: 'size_t'
     })
+    this.MessageHandle = handle('Orbit_Discord_MessageHandle')
+    this.MessageSpan = koffi.struct('Orbit_Discord_MessageHandleSpan', {
+      ptr: koffi.pointer(this.MessageHandle),
+      size: 'size_t'
+    })
+    this.UserMessageSummary = handle('Orbit_Discord_UserMessageSummary')
+    this.UserMessageSummarySpan = koffi.struct('Orbit_Discord_UserMessageSummarySpan', {
+      ptr: koffi.pointer(this.UserMessageSummary),
+      size: 'size_t'
+    })
+    this.AdditionalContent = handle('Orbit_Discord_AdditionalContent')
     this.UserHandle = handle('Orbit_Discord_UserHandle')
     this.Activity = handle('Orbit_Discord_Activity')
 
@@ -226,6 +293,26 @@ class DiscordNativeBindings {
       'uint64_t',
       'void *'
     ])
+    this.messageResultCallbackType = koffi.proto(
+      'Orbit_Discord_MessageResultCallback',
+      'void',
+      [resultPointer, 'uint64_t', 'void *']
+    )
+    this.messageSpanCallbackType = koffi.proto(
+      'Orbit_Discord_MessageSpanCallback',
+      'void',
+      [resultPointer, this.MessageSpan, 'void *']
+    )
+    this.userMessageSummarySpanCallbackType = koffi.proto(
+      'Orbit_Discord_UserMessageSummarySpanCallback',
+      'void',
+      [resultPointer, this.UserMessageSummarySpan, 'void *']
+    )
+    this.messageDeletedCallbackType = koffi.proto(
+      'Orbit_Discord_MessageDeletedCallback',
+      'void',
+      ['uint64_t', 'uint64_t', 'void *']
+    )
 
     const fn = (name: string, result: string | TypeObject, args: unknown[]): NativeFunction =>
       this.lib.func(name, result, args as never[])
@@ -281,8 +368,8 @@ class DiscordNativeBindings {
       'void',
       [pointer(this.Client), koffi.out(pointer(this.AuthorizationCodeVerifier))]
     )
-    this.clientGetDefaultPresenceScopes = fn(
-      'Discord_Client_GetDefaultPresenceScopes',
+    this.clientGetDefaultCommunicationScopes = fn(
+      'Discord_Client_GetDefaultCommunicationScopes',
       'void',
       [koffi.out(pointer(this.DiscordString))]
     )
@@ -327,6 +414,60 @@ class DiscordNativeBindings {
     this.clientGetCurrentUserV2 = fn('Discord_Client_GetCurrentUserV2', 'bool', [
       pointer(this.Client),
       koffi.out(pointer(this.UserHandle))
+    ])
+    this.clientGetMessageHandle = fn('Discord_Client_GetMessageHandle', 'bool', [
+      pointer(this.Client),
+      'uint64_t',
+      koffi.out(pointer(this.MessageHandle))
+    ])
+    this.clientGetUserMessageSummaries = fn(
+      'Discord_Client_GetUserMessageSummaries',
+      'void',
+      [
+        pointer(this.Client),
+        pointer(this.userMessageSummarySpanCallbackType),
+        'void *',
+        'void *'
+      ]
+    )
+    this.clientGetUserMessagesWithLimit = fn(
+      'Discord_Client_GetUserMessagesWithLimit',
+      'void',
+      [
+        pointer(this.Client),
+        'uint64_t',
+        'int32_t',
+        pointer(this.messageSpanCallbackType),
+        'void *',
+        'void *'
+      ]
+    )
+    this.clientSendUserMessage = fn('Discord_Client_SendUserMessage', 'void', [
+      pointer(this.Client),
+      'uint64_t',
+      this.DiscordString,
+      pointer(this.messageResultCallbackType),
+      'void *',
+      'void *'
+    ])
+    this.clientSetMessageCreatedCallback = fn(
+      'Discord_Client_SetMessageCreatedCallback',
+      'void',
+      [pointer(this.Client), pointer(this.changedCallbackType), 'void *', 'void *']
+    )
+    this.clientSetMessageUpdatedCallback = fn(
+      'Discord_Client_SetMessageUpdatedCallback',
+      'void',
+      [pointer(this.Client), pointer(this.changedCallbackType), 'void *', 'void *']
+    )
+    this.clientSetMessageDeletedCallback = fn(
+      'Discord_Client_SetMessageDeletedCallback',
+      'void',
+      [pointer(this.Client), pointer(this.messageDeletedCallbackType), 'void *', 'void *']
+    )
+    this.clientSetShowingChat = fn('Discord_Client_SetShowingChat', 'void', [
+      pointer(this.Client),
+      'bool'
     ])
 
     this.clientResultSuccessful = fn('Discord_ClientResult_Successful', 'bool', [resultPointer])
@@ -386,6 +527,42 @@ class DiscordNativeBindings {
     this.relationshipDrop = fn('Discord_RelationshipHandle_Drop', 'void', [
       pointer(this.RelationshipHandle)
     ])
+    this.messageId = fn('Discord_MessageHandle_Id', 'uint64_t', [pointer(this.MessageHandle)])
+    this.messageAuthorId = fn('Discord_MessageHandle_AuthorId', 'uint64_t', [
+      pointer(this.MessageHandle)
+    ])
+    this.messageRecipientId = fn('Discord_MessageHandle_RecipientId', 'uint64_t', [
+      pointer(this.MessageHandle)
+    ])
+    this.messageContent = fn('Discord_MessageHandle_Content', 'void', [
+      pointer(this.MessageHandle),
+      koffi.out(pointer(this.DiscordString))
+    ])
+    this.messageSentTimestamp = fn('Discord_MessageHandle_SentTimestamp', 'uint64_t', [
+      pointer(this.MessageHandle)
+    ])
+    this.messageEditedTimestamp = fn('Discord_MessageHandle_EditedTimestamp', 'uint64_t', [
+      pointer(this.MessageHandle)
+    ])
+    this.messageAdditionalContent = fn('Discord_MessageHandle_AdditionalContent', 'bool', [
+      pointer(this.MessageHandle),
+      koffi.out(pointer(this.AdditionalContent))
+    ])
+    this.messageDrop = fn('Discord_MessageHandle_Drop', 'void', [pointer(this.MessageHandle)])
+    this.userMessageSummaryUserId = fn('Discord_UserMessageSummary_UserId', 'uint64_t', [
+      pointer(this.UserMessageSummary)
+    ])
+    this.userMessageSummaryLastMessageId = fn(
+      'Discord_UserMessageSummary_LastMessageId',
+      'uint64_t',
+      [pointer(this.UserMessageSummary)]
+    )
+    this.userMessageSummaryDrop = fn('Discord_UserMessageSummary_Drop', 'void', [
+      pointer(this.UserMessageSummary)
+    ])
+    this.additionalContentDrop = fn('Discord_AdditionalContent_Drop', 'void', [
+      pointer(this.AdditionalContent)
+    ])
     this.userId = fn('Discord_UserHandle_Id', 'uint64_t', [pointer(this.UserHandle)])
     this.userDisplayName = fn('Discord_UserHandle_DisplayName', 'void', [
       pointer(this.UserHandle),
@@ -443,6 +620,14 @@ class DiscordSocialEngine extends EventEmitter {
 
   version(): string {
     return this.native.version()
+  }
+
+  tokens(): DiscordSocialTokens | undefined {
+    return this.currentTokens ? { ...this.currentTokens } : undefined
+  }
+
+  chatBindingsAvailable(): boolean {
+    return this.communicationScopes().trim().length > 0
   }
 
   private register(callback: Function, type: TypeObject): bigint {
@@ -514,6 +699,23 @@ class DiscordSocialEngine extends EventEmitter {
       (): void => this.scheduleChangedSnapshot(),
       this.native.changedCallbackType
     )
+    const messageCreatedCallback = this.register(
+      (messageId: bigint): void => this.emitMessageEvent('created', messageId),
+      this.native.changedCallbackType
+    )
+    const messageUpdatedCallback = this.register(
+      (messageId: bigint): void => this.emitMessageEvent('updated', messageId),
+      this.native.changedCallbackType
+    )
+    const messageDeletedCallback = this.register(
+      (messageId: bigint): void => {
+        this.emit('chat-message', {
+          kind: 'deleted',
+          messageId: String(messageId)
+        } satisfies DiscordChatEvent)
+      },
+      this.native.messageDeletedCallbackType
+    )
     this.native.clientSetStatusChangedCallback(this.client, statusCallback, null, null)
     this.native.clientSetRelationshipGroupsUpdatedCallback(
       this.client,
@@ -522,6 +724,9 @@ class DiscordSocialEngine extends EventEmitter {
       null
     )
     this.native.clientSetUserUpdatedCallback(this.client, userChangedCallback, null, null)
+    this.native.clientSetMessageCreatedCallback(this.client, messageCreatedCallback, null, null)
+    this.native.clientSetMessageUpdatedCallback(this.client, messageUpdatedCallback, null, null)
+    this.native.clientSetMessageDeletedCallback(this.client, messageDeletedCallback, null, null)
     this.callbackTimer = setInterval(() => {
       try {
         this.native.runCallbacks()
@@ -583,6 +788,19 @@ class DiscordSocialEngine extends EventEmitter {
     }, 180)
   }
 
+  private communicationScopes(): string {
+    return this.outputString((output) =>
+      this.native.clientGetDefaultCommunicationScopes(output)
+    )
+  }
+
+  private hasCommunicationScopes(tokens: DiscordSocialTokens | undefined): boolean {
+    if (!tokens?.scopes) return false
+    const granted = new Set(tokens.scopes.split(/[\s,]+/u).filter(Boolean))
+    const required = this.communicationScopes().split(/[\s,]+/u).filter(Boolean)
+    return required.length > 0 && required.every((scope) => granted.has(scope))
+  }
+
   private authorize(applicationId: string): Promise<DiscordSocialTokens> {
     if (!this.client) return Promise.reject(new Error('Discord client is not initialized'))
     const verifier = koffi.alloc(this.native.AuthorizationCodeVerifier, 1)
@@ -591,9 +809,7 @@ class DiscordSocialEngine extends EventEmitter {
     this.native.clientCreateAuthorizationCodeVerifier(this.client, verifier)
     this.native.verifierChallenge(verifier, challenge)
     const verifierText = this.outputString((output) => this.native.verifierVerifier(verifier, output))
-    const scopes = this.outputString((output) =>
-      this.native.clientGetDefaultPresenceScopes(output)
-    )
+    const scopes = this.communicationScopes()
     this.native.authorizationArgsInit(args)
     this.native.authorizationArgsSetClientId(args, BigInt(applicationId))
     this.native.authorizationArgsSetScopes(args, this.inputString(scopes))
@@ -922,6 +1138,322 @@ class DiscordSocialEngine extends EventEmitter {
     }
   }
 
+  private accountId(): string | undefined {
+    if (!this.client) return undefined
+    const user: Record<string, unknown> = {}
+    if (!this.native.clientGetCurrentUserV2(this.client, user)) return undefined
+    try {
+      return String(this.native.userId(user))
+    } finally {
+      this.native.userDrop(user)
+    }
+  }
+
+  private toChatMessage(
+    handle: unknown,
+    fallbackUserId?: string,
+    currentUserId = this.accountId()
+  ): DiscordChatMessage {
+    const authorId = String(this.native.messageAuthorId(handle))
+    const recipientId = String(this.native.messageRecipientId(handle))
+    const direction = currentUserId && authorId === currentUserId ? 'outgoing' : 'incoming'
+    const conversationUserId = direction === 'outgoing' ? recipientId : authorId
+    const userId = /^\d{17,20}$/u.test(conversationUserId)
+      ? conversationUserId
+      : fallbackUserId ?? ''
+    const content = cleanMessageContent(
+      this.outputString((output) => this.native.messageContent(handle, output))
+    )
+    const additionalContent: Record<string, unknown> = {}
+    const hasAdditionalContent = this.native.messageAdditionalContent(handle, additionalContent)
+    if (hasAdditionalContent) this.native.additionalContentDrop(additionalContent)
+    const sentAt = Number(this.native.messageSentTimestamp(handle))
+    const editedAt = Number(this.native.messageEditedTimestamp(handle))
+    return {
+      id: String(this.native.messageId(handle)),
+      userId,
+      content,
+      sentAt: Number.isFinite(sentAt) && sentAt > 0 ? sentAt : Date.now(),
+      editedAt: Number.isFinite(editedAt) && editedAt > 0 ? editedAt : undefined,
+      direction,
+      unsupportedContent: content.length === 0 || hasAdditionalContent
+    }
+  }
+
+  private messageFromId(messageId: bigint, fallbackUserId?: string): DiscordChatMessage | null {
+    if (!this.client) return null
+    const handle: Record<string, unknown> = {}
+    if (!this.native.clientGetMessageHandle(this.client, messageId, handle)) return null
+    try {
+      return this.toChatMessage(handle, fallbackUserId)
+    } finally {
+      this.native.messageDrop(handle)
+    }
+  }
+
+  private emitMessageEvent(kind: 'created' | 'updated', messageId: bigint): void {
+    try {
+      const message = this.messageFromId(messageId)
+      if (message?.userId) {
+        this.emit('chat-message', { kind, message } satisfies DiscordChatEvent)
+      }
+    } catch {
+      // A subsequent history refresh can recover if Discord evicted the handle.
+    }
+  }
+
+  private async ensureChatReady(
+    applicationId: string,
+    tokens?: DiscordSocialTokens
+  ): Promise<void> {
+    const resumed = await this.refresh(applicationId, tokens)
+    if (resumed.snapshot.state !== 'ready') {
+      throw new Error('Discord chat is not connected')
+    }
+  }
+
+  async getChatInbox(
+    applicationId: string,
+    tokens?: DiscordSocialTokens
+  ): Promise<DiscordChatInbox> {
+    try {
+      await this.ensureChatReady(applicationId, tokens)
+    } catch {
+      return { state: 'unavailable', conversations: [], issue: 'not-connected' }
+    }
+    if (!this.client) throw new Error('Discord client is not initialized')
+    try {
+      const conversations = await timeoutAfter(
+        new Promise<DiscordChatConversation[]>((resolve, reject) => {
+          let callbackPointer = 0n
+          callbackPointer = this.register(
+            (result: unknown, span: NativeSpan): void => {
+              const count = Math.min(Number(span.size) || 0, MAX_CHAT_CONVERSATIONS)
+              try {
+                this.assertSuccessful(result)
+                if (!span.ptr || count === 0) {
+                  resolve([])
+                  return
+                }
+                const handles = koffi.decode(
+                  span.ptr,
+                  this.native.UserMessageSummary,
+                  count
+                ) as NativeHandle[]
+                const decoded: DiscordChatConversation[] = []
+                for (const handle of handles) {
+                  try {
+                    const userId = String(this.native.userMessageSummaryUserId(handle))
+                    const lastMessageId = String(
+                      this.native.userMessageSummaryLastMessageId(handle)
+                    )
+                    if (!/^\d{17,20}$/u.test(userId) || !/^\d{17,20}$/u.test(lastMessageId)) {
+                      continue
+                    }
+                    decoded.push({
+                      userId,
+                      lastMessageId,
+                      lastMessage: this.messageFromId(BigInt(lastMessageId), userId) ?? undefined
+                    })
+                  } finally {
+                    this.native.userMessageSummaryDrop(handle)
+                  }
+                }
+                resolve(decoded)
+              } catch (error) {
+                reject(error)
+              } finally {
+                if (span.ptr) this.native.freeNative(span.ptr)
+                queueMicrotask(() => this.unregister(callbackPointer))
+              }
+            },
+            this.native.userMessageSummarySpanCallbackType
+          )
+          try {
+            this.native.clientGetUserMessageSummaries(
+              this.client,
+              callbackPointer,
+              null,
+              null
+            )
+          } catch (error) {
+            this.unregister(callbackPointer)
+            reject(error)
+          }
+        }),
+        REQUEST_TIMEOUT_MS
+      )
+      return {
+        state: 'ready',
+        conversations: conversations.sort(
+          (left, right) =>
+            (right.lastMessage?.sentAt ?? timestampFromDiscordSnowflake(right.lastMessageId)) -
+            (left.lastMessage?.sentAt ?? timestampFromDiscordSnowflake(left.lastMessageId))
+        )
+      }
+    } catch {
+      return { state: 'unavailable', conversations: [], issue: 'history-unavailable' }
+    }
+  }
+
+  async getChatHistory(
+    applicationId: string,
+    tokens: DiscordSocialTokens | undefined,
+    recipientId: string,
+    limit: number
+  ): Promise<DiscordChatHistory> {
+    try {
+      await this.ensureChatReady(applicationId, tokens)
+    } catch {
+      return {
+        state: 'unavailable',
+        userId: recipientId,
+        messages: [],
+        issue: 'not-connected'
+      }
+    }
+    if (!this.client) throw new Error('Discord client is not initialized')
+    const safeLimit = Math.max(1, Math.min(MAX_CHAT_HISTORY, Math.trunc(limit)))
+    const currentUserId = this.accountId()
+    try {
+      const messages = await timeoutAfter(
+        new Promise<DiscordChatMessage[]>((resolve, reject) => {
+          let callbackPointer = 0n
+          callbackPointer = this.register(
+            (result: unknown, span: NativeSpan): void => {
+              const count = Math.min(Number(span.size) || 0, safeLimit)
+              try {
+                this.assertSuccessful(result)
+                if (!span.ptr || count === 0) {
+                  resolve([])
+                  return
+                }
+                const handles = koffi.decode(
+                  span.ptr,
+                  this.native.MessageHandle,
+                  count
+                ) as NativeHandle[]
+                const decoded: DiscordChatMessage[] = []
+                for (const handle of handles) {
+                  try {
+                    const message = this.toChatMessage(handle, recipientId, currentUserId)
+                    if (message.userId === recipientId) decoded.push(message)
+                  } finally {
+                    this.native.messageDrop(handle)
+                  }
+                }
+                resolve(decoded)
+              } catch (error) {
+                reject(error)
+              } finally {
+                if (span.ptr) this.native.freeNative(span.ptr)
+                queueMicrotask(() => this.unregister(callbackPointer))
+              }
+            },
+            this.native.messageSpanCallbackType
+          )
+          try {
+            this.native.clientGetUserMessagesWithLimit(
+              this.client,
+              BigInt(recipientId),
+              safeLimit,
+              callbackPointer,
+              null,
+              null
+            )
+          } catch (error) {
+            this.unregister(callbackPointer)
+            reject(error)
+          }
+        }),
+        REQUEST_TIMEOUT_MS
+      )
+      return {
+        state: 'ready',
+        userId: recipientId,
+        messages: messages.sort((left, right) => left.sentAt - right.sentAt)
+      }
+    } catch {
+      return {
+        state: 'unavailable',
+        userId: recipientId,
+        messages: [],
+        issue: 'history-unavailable'
+      }
+    }
+  }
+
+  async sendChatMessage(
+    applicationId: string,
+    tokens: DiscordSocialTokens | undefined,
+    recipientId: string,
+    content: string
+  ): Promise<DiscordChatSendResult> {
+    try {
+      await this.ensureChatReady(applicationId, tokens)
+    } catch {
+      return { ok: false, issue: 'not-connected' }
+    }
+    if (!this.client) throw new Error('Discord client is not initialized')
+    const messageContent = cleanMessageContent(content).trim()
+    if (!messageContent) return { ok: false, issue: 'send-failed' }
+    try {
+      const messageId = await timeoutAfter(
+        new Promise<bigint>((resolve, reject) => {
+          let callbackPointer = 0n
+          callbackPointer = this.register(
+            (result: unknown, id: bigint): void => {
+              try {
+                this.assertSuccessful(result)
+                resolve(id)
+              } catch (error) {
+                reject(error)
+              } finally {
+                queueMicrotask(() => this.unregister(callbackPointer))
+              }
+            },
+            this.native.messageResultCallbackType
+          )
+          try {
+            this.native.clientSendUserMessage(
+              this.client,
+              BigInt(recipientId),
+              this.inputString(messageContent),
+              callbackPointer,
+              null,
+              null
+            )
+          } catch (error) {
+            this.unregister(callbackPointer)
+            reject(error)
+          }
+        }),
+        REQUEST_TIMEOUT_MS
+      )
+      const message = this.messageFromId(messageId, recipientId) ?? {
+        id: String(messageId),
+        userId: recipientId,
+        content: messageContent,
+        sentAt: Date.now(),
+        direction: 'outgoing' as const,
+        unsupportedContent: false
+      }
+      return { ok: true, message }
+    } catch {
+      return { ok: false, issue: 'send-failed' }
+    }
+  }
+
+  async setShowingChat(
+    applicationId: string,
+    tokens: DiscordSocialTokens | undefined,
+    showing: boolean
+  ): Promise<void> {
+    await this.ensureChatReady(applicationId, tokens)
+    if (!this.client) throw new Error('Discord client is not initialized')
+    this.native.clientSetShowingChat(this.client, showing)
+  }
+
   private readySnapshot(): DiscordSocialSnapshot {
     return {
       state: 'ready',
@@ -940,6 +1472,17 @@ class DiscordSocialEngine extends EventEmitter {
 
   async refresh(applicationId: string, storedTokens?: DiscordSocialTokens): Promise<EngineResult> {
     this.ensureClient(applicationId)
+    const availableTokens = storedTokens ?? this.currentTokens
+    if (availableTokens && !this.hasCommunicationScopes(availableTokens)) {
+      if (this.client) this.native.clientDisconnect(this.client)
+      this.currentTokens = undefined
+      this.disposeClient()
+      this.ensureClient(applicationId)
+      return {
+        snapshot: this.stateSnapshot('not-connected'),
+        clearTokens: true
+      }
+    }
     if (this.client && this.native.clientGetStatus(this.client) === READY_STATUS) {
       return { snapshot: this.readySnapshot(), tokens: this.currentTokens }
     }
@@ -1038,6 +1581,9 @@ try {
   engine.on('updated', (snapshot: DiscordSocialSnapshot) => {
     send({ type: 'updated', snapshot })
   })
+  engine.on('chat-message', (event: DiscordChatEvent) => {
+    send({ type: 'chat-message', event })
+  })
   send({ type: 'ready', version: engine.version() })
 } catch {
   send({ type: 'ready', version: 'unavailable' })
@@ -1052,6 +1598,10 @@ parentPort?.on('message', (event) => {
       return
     }
     if (request.command === 'probe') {
+      if (!engine.chatBindingsAvailable()) {
+        errorResponse(request, 'sdk-unavailable')
+        return
+      }
       send({ type: 'response', id: request.id, ok: true, version: engine.version() })
       return
     }
@@ -1063,6 +1613,84 @@ parentPort?.on('message', (event) => {
     }
     if (!request.applicationId || !/^\d{17,20}$/.test(request.applicationId)) {
       errorResponse(request, 'authentication-failed')
+      return
+    }
+    if (request.command === 'chat-inbox') {
+      const chatInbox = await engine.getChatInbox(request.applicationId, request.tokens)
+      const tokens = engine.tokens()
+      send({
+        type: 'response',
+        id: request.id,
+        ok: true,
+        chatInbox,
+        tokens,
+        clearTokens: !tokens
+      })
+      return
+    }
+    if (request.command === 'chat-history') {
+      if (!request.recipientId || !/^\d{17,20}$/.test(request.recipientId)) {
+        errorResponse(request, 'provider-unavailable')
+        return
+      }
+      const chatHistory = await engine.getChatHistory(
+        request.applicationId,
+        request.tokens,
+        request.recipientId,
+        request.limit ?? 50
+      )
+      const tokens = engine.tokens()
+      send({
+        type: 'response',
+        id: request.id,
+        ok: true,
+        chatHistory,
+        tokens,
+        clearTokens: !tokens
+      })
+      return
+    }
+    if (request.command === 'chat-send') {
+      if (
+        !request.recipientId ||
+        !/^\d{17,20}$/.test(request.recipientId) ||
+        typeof request.content !== 'string' ||
+        request.content.length > MAX_MESSAGE_LENGTH
+      ) {
+        errorResponse(request, 'provider-unavailable')
+        return
+      }
+      const chatSend = await engine.sendChatMessage(
+        request.applicationId,
+        request.tokens,
+        request.recipientId,
+        request.content
+      )
+      const tokens = engine.tokens()
+      send({
+        type: 'response',
+        id: request.id,
+        ok: true,
+        chatSend,
+        tokens,
+        clearTokens: !tokens
+      })
+      return
+    }
+    if (request.command === 'chat-showing') {
+      if (typeof request.showing !== 'boolean') {
+        errorResponse(request, 'provider-unavailable')
+        return
+      }
+      await engine.setShowingChat(request.applicationId, request.tokens, request.showing)
+      const tokens = engine.tokens()
+      send({
+        type: 'response',
+        id: request.id,
+        ok: true,
+        tokens,
+        clearTokens: !tokens
+      })
       return
     }
     let result: EngineResult

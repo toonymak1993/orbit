@@ -8,7 +8,7 @@ import { fetchWithElectronNet } from '../networkFetch'
 const POSITIVE_TTL_MS = 30 * 24 * 60 * 60 * 1000
 const NEGATIVE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 const REQUEST_GAP_MS = 900
-const METADATA_SCHEMA_VERSION = 2
+const METADATA_SCHEMA_VERSION = 3
 
 export interface SteamAppMetadata {
   appId: number
@@ -202,7 +202,8 @@ async function fetchMetadata(appId: number, language: string): Promise<CachedMet
           content_descriptors?: { notes?: string }
           pc_requirements?: { minimum?: string; recommended?: string } | unknown[]
           header_image?: string
-          screenshots?: Array<{ path_full: string }>
+          background?: string
+          background_raw?: string
         }
       }
     >
@@ -256,7 +257,9 @@ async function fetchMetadata(appId: number, language: string): Promise<CachedMet
               recommended: htmlToText(requirements.recommended)
             }
           : undefined,
-        backgroundUrl: data.screenshots?.[0]?.path_full,
+        // Steam's store-page background is curated key art. A gameplay
+        // screenshot may be larger, but looks wrong in ORBIT's Home hero.
+        backgroundUrl: data.background_raw ?? data.background ?? data.header_image,
         storeHeaderUrl: data.header_image
       },
       locale: language,

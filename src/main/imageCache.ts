@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 import Store from 'electron-store'
 import type { ImageOrientation, ImageUpdate, LibraryGame, ResolvedImage } from '@shared/ipc'
 import { settingsStore } from './settingsStore'
-import { fetchSteamGridDbImage } from './steamGridDb'
+import { fetchSteamGridDbArtworkCandidates } from './steamGridDb'
 import { fetchWithElectronNet } from './networkFetch'
 import {
   isTransientArtworkStatus,
@@ -21,6 +21,20 @@ import { getBuiltinSteamGridDbKey } from './builtinKeys'
 import { getSteamInstallPath } from './steam/steamInstall'
 import { syncCoordinator } from './sync/syncCoordinator'
 import { customArtworkService } from './customArtwork'
+import {
+  discoverExactStoreArtwork,
+  discoverLibretroArtwork
+} from './artworkFallback'
+import {
+  artworkIdentitySignature,
+  automaticArtworkQuality,
+  automaticArtworkScore,
+  canonicalArtworkTitle,
+  libretroArtworkFolderPriority,
+  libretroArtworkFolders,
+  shareArtworkIdentity,
+  type LibretroArtworkFolder
+} from '@shared/artworkMatching'
 
 const CACHE_DIR = join(app.getPath('userData'), 'artwork-v2')
 const CDN_HOSTS = ['cdn.akamai.steamstatic.com', 'cdn.cloudflare.steamstatic.com']
@@ -31,20 +45,27 @@ const MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
 const ASSET_TIMEOUT_MS = 8_000
 const TRANSIENT_RETRY_BASE_MS = 2 * 60 * 1000
 const TRANSIENT_RETRY_MAX_MS = 6 * 60 * 60 * 1000
+const QUALITY_UPGRADE_RETRY_BASE_MS = 6 * 60 * 60 * 1000
+const QUALITY_UPGRADE_RETRY_MAX_MS = 7 * 24 * 60 * 60 * 1000
 const ORPHAN_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_ORPHAN_DELETIONS_PER_RUN = 25
-const GENERATED_CACHE_FILE = /-(?:vertical|horizontal|icon)-[a-f0-9]{16}\.(?:jpg|png|webp)$/i
+const GENERATED_CACHE_FILE = /-(?:vertical|horizontal|icon)-[a-f0-9]{16}\.(?:ico|jpg|png|webp)$/i
 const CUSTOM_CACHE_FILE = /^custom-(?:cover|background|icon)-[a-f0-9]{12}-[a-f0-9]{16}\.png$/i
 // Keep background artwork decoding below the point where it competes with the
 // controller UI on handheld CPUs. Delta sync is continuous, so latency matters
 // less here than stable frame times.
 const MAX_CONCURRENCY = 3
-const PIPELINE_VERSION = 5
+const LIBRETRO_ARTWORK_ROLE_POLICY_VERSION = 15
+const PIPELINE_VERSION = 15
+const ARTWORK_ORIENTATIONS: ImageOrientation[] = ['vertical', 'horizontal', 'icon']
 
 type ArtworkSource =
   | 'steam-local'
   | 'steam-cdn'
   | 'provider-metadata'
+  | 'library-match'
+  | 'libretro'
+  | 'store-fallback'
   | 'steamgriddb'
   | 'local-icon'
   | 'none'
@@ -64,6 +85,15 @@ interface ManifestEntry {
   artworkFingerprint?: string
   retryAt?: number
   failureCount?: number
+  libraryMatchSourceKey?: string
+  libraryMatchSourceRevision?: number
+  libretroFolder?: LibretroArtworkFolder
+}
+
+interface LibraryArtworkMatch {
+  entry: ManifestEntry
+  sourceKey: string
+  sourceRevision: number
 }
 
 interface QueueItem {
@@ -78,6 +108,12 @@ interface ValidatedImage {
   height: number
   quality: Exclude<ArtworkQuality, 'none'>
   extension: string
+  contain: boolean
+}
+
+interface ImageValidationOptions {
+  allowFallback?: boolean
+  containFallback?: boolean
 }
 
 const manifestStore = new Store<{ schemaVersion: number; entries: Record<string, ManifestEntry> }>({
@@ -195,9 +231,26 @@ function toResolved(entry: ManifestEntry): ResolvedImage {
 function extensionFromType(contentType: string | null, sourceUrl: string): string {
   if (contentType?.includes('png')) return 'png'
   if (contentType?.includes('webp')) return 'webp'
+  if (contentType?.includes('icon')) return 'ico'
   if (contentType?.includes('jpeg') || contentType?.includes('jpg')) return 'jpg'
   const extension = extname(new URL(sourceUrl).pathname).slice(1).toLowerCase()
-  return ['png', 'webp', 'jpg', 'jpeg'].includes(extension) ? extension.replace('jpeg', 'jpg') : 'jpg'
+  return ['ico', 'png', 'webp', 'jpg', 'jpeg'].includes(extension)
+    ? extension.replace('jpeg', 'jpg')
+    : 'jpg'
+}
+
+function isSupportedArtworkResponse(contentType: string | null, sourceUrl: string): boolean {
+  if (!contentType) return true
+  const normalizedType = contentType.split(';', 1)[0].trim().toLowerCase()
+  if (normalizedType.startsWith('image/')) return true
+  if (normalizedType !== 'application/octet-stream' && normalizedType !== 'binary/octet-stream') {
+    return false
+  }
+  // Ubisoft's official asset CDN serves valid images as generic binary data.
+  // Only accept that MIME fallback for an explicit image extension; the same
+  // bounded nativeImage decode below remains the final content validation.
+  const extension = extname(new URL(sourceUrl).pathname).slice(1).toLowerCase()
+  return ['ico', 'jpeg', 'jpg', 'png', 'webp'].includes(extension)
 }
 
 function validateImage(
@@ -219,7 +272,8 @@ function validateImage(
       width,
       height,
       extension,
-      quality: width >= 128 && height >= 128 ? 'high' : 'low'
+      quality: automaticArtworkQuality(width, height, orientation),
+      contain: true
     }
   }
 
@@ -230,7 +284,8 @@ function validateImage(
       width,
       height,
       extension,
-      quality: width >= 600 && height >= 900 ? 'high' : 'low'
+      quality: automaticArtworkQuality(width, height, orientation),
+      contain: false
     }
   }
 
@@ -240,18 +295,50 @@ function validateImage(
     width,
     height,
     extension,
-    quality: width >= 1200 && height >= 500 ? 'high' : 'low'
+    quality: automaticArtworkQuality(width, height, orientation),
+    contain: false
+  }
+}
+
+function validateImageFallback(
+  buffer: Buffer,
+  orientation: ImageOrientation,
+  extension: string,
+  contain: boolean
+): ValidatedImage | null {
+  if (orientation === 'icon') return null
+  if (buffer.byteLength === 0 || buffer.byteLength > MAX_DOWNLOAD_BYTES) return null
+  const image = nativeImage.createFromBuffer(buffer)
+  if (image.isEmpty()) return null
+  const { width, height } = image.getSize()
+  if (width < 128 || height < 128) return null
+  // Cross-orientation provider art normally fills its slot. Callers may keep a
+  // semantically authoritative landscape box intact; the renderer then gives
+  // it an intentional backdrop instead of destructively cropping it.
+  return {
+    buffer,
+    width,
+    height,
+    extension,
+    quality: automaticArtworkQuality(width, height, orientation),
+    contain
   }
 }
 
 async function validateLocalFile(
   filePath: string,
-  orientation: ImageOrientation
+  orientation: ImageOrientation,
+  options: ImageValidationOptions = {}
 ): Promise<ValidatedImage | null> {
   try {
     const buffer = await readFile(filePath)
     const extension = extname(filePath).slice(1).toLowerCase() || 'jpg'
-    return validateImage(buffer, orientation, extension)
+    return (
+      validateImage(buffer, orientation, extension) ??
+      (options.allowFallback
+        ? validateImageFallback(buffer, orientation, extension, options.containFallback ?? false)
+        : null)
+    )
   } catch {
     return null
   }
@@ -285,7 +372,8 @@ async function discardResponse(response: Response): Promise<void> {
 
 async function downloadValidated(
   remoteUrl: string,
-  orientation: ImageOrientation
+  orientation: ImageOrientation,
+  options: ImageValidationOptions = {}
 ): Promise<ArtworkNetworkAttempt<ValidatedImage>> {
   try {
     const parsedUrl = new URL(remoteUrl)
@@ -302,7 +390,7 @@ async function downloadValidated(
         return { state: isTransientArtworkStatus(response.status) ? 'unavailable' : 'missing' }
       }
       const contentType = response.headers.get('content-type')
-      if (contentType && !contentType.toLowerCase().startsWith('image/')) {
+      if (!isSupportedArtworkResponse(contentType, remoteUrl)) {
         await discardResponse(response)
         return { state: 'missing' }
       }
@@ -313,11 +401,12 @@ async function downloadValidated(
       }
       const buffer = await readBoundedResponse(response)
       if (!buffer) return { state: 'missing' }
-      const validated = validateImage(
-        buffer,
-        orientation,
-        extensionFromType(contentType, remoteUrl)
-      )
+      const extension = extensionFromType(contentType, remoteUrl)
+      const validated =
+        validateImage(buffer, orientation, extension) ??
+        (options.allowFallback
+          ? validateImageFallback(buffer, orientation, extension, options.containFallback ?? false)
+          : null)
       return validated ? { state: 'success', value: validated } : { state: 'missing' }
     })
   } catch {
@@ -329,7 +418,8 @@ async function persistImage(
   game: LibraryGame,
   orientation: ImageOrientation,
   validated: ValidatedImage,
-  source: ArtworkSource
+  source: ArtworkSource,
+  libretroFolder?: LibretroArtworkFolder
 ): Promise<ManifestEntry> {
   ensureCacheDir()
   const hash = createHash('sha256').update(validated.buffer).digest('hex').slice(0, 16)
@@ -350,7 +440,7 @@ async function persistImage(
   }
   return {
     url: `orbit-image://${fileName}`,
-    contain: orientation === 'icon',
+    contain: validated.contain,
     width: validated.width,
     height: validated.height,
     resolvedAt: Date.now(),
@@ -361,11 +451,18 @@ async function persistImage(
     metadataRevision: game.metadataRevision,
     artworkFingerprint: artworkFingerprint(game, orientation),
     retryAt: undefined,
-    failureCount: undefined
+    failureCount: undefined,
+    libretroFolder: source === 'libretro' ? libretroFolder : undefined
   }
 }
 
-function localSteamCandidates(appId: number, orientation: ImageOrientation): string[] {
+type SteamArtworkTier = 'all' | 'primary' | 'fallback'
+
+function localSteamCandidates(
+  appId: number,
+  orientation: ImageOrientation,
+  tier: SteamArtworkTier = 'all'
+): string[] {
   const steamPath = getSteamInstallPath()
   if (!steamPath) return []
   const cacheRoot = join(steamPath, 'appcache', 'librarycache')
@@ -374,7 +471,11 @@ function localSteamCandidates(appId: number, orientation: ImageOrientation): str
     orientation === 'vertical'
       ? ['library_600x900_2x.jpg', 'library_600x900.jpg', 'library_capsule.jpg']
       : orientation === 'horizontal'
-        ? ['library_hero.jpg', 'page_bg_generated_v6b.jpg']
+        ? tier === 'primary'
+          ? ['library_hero.jpg']
+          : tier === 'fallback'
+            ? ['page_bg_generated_v6b.jpg']
+            : ['library_hero.jpg', 'page_bg_generated_v6b.jpg']
         : ['icon.jpg']
   let hashedRoots: string[] = []
   if (existsSync(appRoot)) {
@@ -394,12 +495,30 @@ function localSteamCandidates(appId: number, orientation: ImageOrientation): str
   ]
 }
 
-function steamCdnCandidates(appId: number, orientation: ImageOrientation): string[] {
+function steamCdnCandidates(
+  appId: number,
+  orientation: ImageOrientation,
+  tier: SteamArtworkTier = 'all'
+): string[] {
   if (orientation === 'icon') return []
+  if (orientation === 'horizontal') {
+    const fastlyRoot = `https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/${appId}`
+    const primary = [
+      `${fastlyRoot}/library_hero.jpg`,
+      ...CDN_HOSTS.map((host) => `https://${host}/steam/apps/${appId}/library_hero.jpg`)
+    ]
+    const fallback = [
+      `https://store.akamai.steamstatic.com/images/storepagebackground/app/${appId}`,
+      ...['page_bg_generated_v6b.jpg', 'page_bg_generated.jpg'].flatMap((path) =>
+        CDN_HOSTS.map((host) => `https://${host}/steam/apps/${appId}/${path}`)
+      )
+    ]
+    return tier === 'primary' ? primary : tier === 'fallback' ? fallback : [...primary, ...fallback]
+  }
   const paths =
     orientation === 'vertical'
       ? ['library_600x900_2x.jpg', 'library_600x900.jpg']
-      : ['library_hero.jpg', 'page_bg_generated_v6b.jpg', 'page_bg_generated.jpg']
+      : []
   return paths.flatMap((path) => CDN_HOSTS.map((host) => `https://${host}/steam/apps/${appId}/${path}`))
 }
 
@@ -414,6 +533,46 @@ function providerMetadataCandidates(game: LibraryGame, orientation: ImageOrienta
   return [...new Set([...explicit, ...legacy].filter((url): url is string => Boolean(url)))]
 }
 
+function providerMetadataFallbackCandidates(
+  game: LibraryGame,
+  orientation: ImageOrientation
+): string[] {
+  if (orientation === 'icon') return []
+  const primary = new Set(providerMetadataCandidates(game, orientation))
+  const artwork = game.metadata.artwork
+  const alternatives =
+    orientation === 'vertical'
+      ? [
+          ...(artwork?.icon ?? []),
+          ...(artwork?.horizontal ?? []),
+          game.metadata.iconUrl,
+          game.metadata.storeHeaderUrl,
+          game.metadata.backgroundUrl
+        ]
+      : [
+          // A large Landscape slot must not silently adopt a portrait cover or
+          // square icon. The keyless store lookup below is a better fallback;
+          // if it also fails, ORBIT keeps the neutral missing-art state.
+        ]
+  return [
+    ...new Set(
+      alternatives.filter(
+        (url): url is string => Boolean(url) && !primary.has(url as string)
+      )
+    )
+  ]
+}
+
+function allProviderMetadataCandidates(
+  game: LibraryGame,
+  orientation: ImageOrientation
+): string[] {
+  return [
+    ...providerMetadataCandidates(game, orientation),
+    ...providerMetadataFallbackCandidates(game, orientation)
+  ]
+}
+
 function artworkFingerprint(game: LibraryGame, orientation: ImageOrientation): string {
   return createHash('sha1')
     .update(
@@ -424,7 +583,8 @@ function artworkFingerprint(game: LibraryGame, orientation: ImageOrientation): s
         name: game.name,
         installed: game.installed,
         installDir: game.installDir,
-        sources: providerMetadataCandidates(game, orientation)
+        identity: artworkIdentitySignature(game),
+        sources: allProviderMetadataCandidates(game, orientation)
       })
     )
     .digest('hex')
@@ -445,11 +605,20 @@ function needsRefresh(
   fingerprint: string
 ): boolean {
   if (!entry) return true
+  const libraryMatchSource = entry.libraryMatchSourceKey
+    ? manifestEntries[entry.libraryMatchSourceKey]
+    : undefined
   return (
     !isEntryFresh(entry) ||
     (entry.source !== 'none' && !isEntryUsable(entry)) ||
     entry.pipelineVersion !== PIPELINE_VERSION ||
-    entry.artworkFingerprint !== fingerprint
+    entry.artworkFingerprint !== fingerprint ||
+    (entry.source === 'library-match' &&
+      (!libraryMatchSource ||
+        libraryMatchSource.source === 'library-match' ||
+        !isEntryUsable(libraryMatchSource) ||
+        libraryMatchSource.pipelineVersion !== PIPELINE_VERSION ||
+        libraryMatchSource.revision !== entry.libraryMatchSourceRevision))
   )
 }
 
@@ -461,6 +630,25 @@ function transientRetryState(previous: ManifestEntry | undefined): {
   const delay = Math.min(
     TRANSIENT_RETRY_BASE_MS * 2 ** Math.max(0, failureCount - 1),
     TRANSIENT_RETRY_MAX_MS
+  )
+  return { failureCount, retryAt: Date.now() + delay }
+}
+
+function qualityUpgradeRetryState(
+  previous: ManifestEntry | undefined,
+  currentArtworkFingerprint: string
+): {
+  failureCount: number
+  retryAt: number
+} {
+  const previousFailures =
+    previous?.quality === 'low' && previous.artworkFingerprint === currentArtworkFingerprint
+      ? previous.failureCount ?? 0
+      : 0
+  const failureCount = previousFailures + 1
+  const delay = Math.min(
+    QUALITY_UPGRADE_RETRY_BASE_MS * 2 ** Math.max(0, failureCount - 1),
+    QUALITY_UPGRADE_RETRY_MAX_MS
   )
   return { failureCount, retryAt: Date.now() + delay }
 }
@@ -479,6 +667,20 @@ function remoteProviderMetadataCandidates(
   return providerMetadataCandidates(game, orientation).filter((url) => url.startsWith('https://'))
 }
 
+function localProviderMetadataFallbackCandidates(
+  game: LibraryGame,
+  orientation: ImageOrientation
+): string[] {
+  return providerMetadataFallbackCandidates(game, orientation).filter((url) => url.startsWith('file:'))
+}
+
+function remoteProviderMetadataFallbackCandidates(
+  game: LibraryGame,
+  orientation: ImageOrientation
+): string[] {
+  return providerMetadataFallbackCandidates(game, orientation).filter((url) => url.startsWith('https://'))
+}
+
 class ArtworkService extends EventEmitter {
   private queue: QueueItem[] = []
   private pending = new Map<string, QueueItem>()
@@ -488,13 +690,27 @@ class ArtworkService extends EventEmitter {
   private syncProviderByKey = new Map<string, string>()
   private syncTotalsByProvider = new Map<string, number>()
   private syncCompletedByProvider = new Map<string, number>()
+  private knownGamesById = new Map<string, LibraryGame>()
+  private knownGameIdsByProvider = new Map<string, Set<string>>()
+  private knownGamesByTitle = new Map<string, LibraryGame[]>()
+  private artworkRetryTimer: ReturnType<typeof setTimeout> | undefined
+  private artworkRetryWakeAt: number | undefined
+
+  constructor() {
+    super()
+    app.on('before-quit', () => this.clearArtworkRetryTimer())
+  }
 
   beginSyncSession(): void {
+    this.clearArtworkRetryTimer()
     this.syncKeys.clear()
     this.completedSyncKeys.clear()
     this.syncProviderByKey.clear()
     this.syncTotalsByProvider.clear()
     this.syncCompletedByProvider.clear()
+    this.knownGamesById.clear()
+    this.knownGameIdsByProvider.clear()
+    this.knownGamesByTitle.clear()
   }
 
   syncLibrary(games: Iterable<LibraryGame>): void {
@@ -510,13 +726,16 @@ class ArtworkService extends EventEmitter {
   }
 
   syncProvider(games: Iterable<LibraryGame>, provider: string): void {
-    const targets = [...games]
-      .filter((game) => game.provider === provider)
-      .flatMap((game) => [
-      { game, orientation: 'vertical' as const },
-      { game, orientation: 'horizontal' as const },
-      { game, orientation: 'icon' as const }
-    ])
+    const providerGames = [...games].filter((game) => game.provider === provider)
+    this.rememberProviderGames(providerGames, provider)
+    // Fill the library's visible covers first. Backgrounds and icons follow in
+    // later queue slices, so large libraries improve progressively instead of
+    // resolving all three slots for the first game before showing the next.
+    const targets = [
+      ...providerGames.map((game) => ({ game, orientation: 'vertical' as const })),
+      ...providerGames.map((game) => ({ game, orientation: 'horizontal' as const })),
+      ...providerGames.map((game) => ({ game, orientation: 'icon' as const }))
+    ]
     for (const { game, orientation } of targets) {
       const key = artworkKey(game.id, orientation)
       this.syncKeys.add(key)
@@ -549,7 +768,9 @@ class ArtworkService extends EventEmitter {
     const currentArtworkFingerprint = artworkFingerprint(game, orientation)
     adoptArtworkFingerprint(entry, currentArtworkFingerprint)
     if (needsRefresh(entry, currentArtworkFingerprint)) {
-      this.schedule(game, orientation)
+      // Artwork currently visible in Home/details jumps ahead of the bulk
+      // background queue so a pipeline migration is perceptible immediately.
+      this.schedule(game, orientation, false, true)
     }
     return entry && isEntryUsable(entry) ? toResolved(entry) : null
   }
@@ -563,14 +784,16 @@ class ArtworkService extends EventEmitter {
     delete manifestEntries[key]
     scheduleManifestPersist()
     this.emit('updated', { gameId: game.id, orientation, image: null } satisfies ImageUpdate)
+    this.scheduleLibraryMatchDependents(key, undefined)
     if (fileName) void unlink(join(CACHE_DIR, fileName)).catch(() => undefined)
-    this.schedule(game, orientation, true)
+    this.schedule(game, orientation, true, true)
   }
 
   private schedule(
     game: LibraryGame,
     orientation: ImageOrientation,
-    force = false
+    force = false,
+    priority = false
   ): void {
     const key = artworkKey(game.id, orientation)
     const existing = this.pending.get(key)
@@ -579,11 +802,20 @@ class ArtworkService extends EventEmitter {
         artworkFingerprint(existing.game, orientation) !== artworkFingerprint(game, orientation)
       existing.game = game
       if (changed || force) existing.generation++
+      if (priority) {
+        const queueIndex = this.queue.indexOf(existing)
+        if (queueIndex > 0) {
+          this.queue.splice(queueIndex, 1)
+          this.queue.unshift(existing)
+        }
+      }
       return
     }
     const item: QueueItem = { game, orientation, generation: 0 }
     this.pending.set(key, item)
-    if (game.metadataSource === 'orbit-store') {
+    if (priority) {
+      this.queue.unshift(item)
+    } else if (game.metadataSource === 'orbit-store') {
       const firstBackgroundItem = this.queue.findIndex(
         (queued) => queued.game.metadataSource !== 'orbit-store'
       )
@@ -622,53 +854,160 @@ class ArtworkService extends EventEmitter {
     isCurrent: () => boolean
   ): Promise<void> {
     const key = artworkKey(game.id, orientation)
+    const currentArtworkFingerprint = artworkFingerprint(game, orientation)
     const previous = manifestEntries[key]
     let transientFailure = false
-    let bestFallback =
+    let bestFallback: ManifestEntry | undefined =
       previous &&
       isEntryUsable(previous) &&
-      !(orientation !== 'icon' && previous.source === 'local-icon')
-        ? previous
+      previous.source !== 'library-match' &&
+      !(orientation !== 'icon' && previous.source === 'local-icon') &&
+      !(
+        previous.source === 'libretro' &&
+        previous.pipelineVersion < LIBRETRO_ARTWORK_ROLE_POLICY_VERSION
+      )
+        ? {
+            ...previous,
+            // Version 6 stored every cross-orientation image as "contain".
+            // Correct that presentation immediately while the worker checks
+            // whether a better exact-title asset is available.
+            contain:
+              previous.pipelineVersion >= LIBRETRO_ARTWORK_ROLE_POLICY_VERSION
+                ? previous.contain
+                : orientation === 'icon',
+            // Quality thresholds evolve with the pipeline. Never carry an old
+            // classification across versions just because the cached pixels
+            // remain usable as a visual fallback.
+            quality: automaticArtworkQuality(previous.width, previous.height, orientation)
+          }
         : undefined
+
+    const fallbackScore = (entry: Pick<ManifestEntry, 'width' | 'height'>): number =>
+      automaticArtworkScore(entry.width, entry.height, orientation)
+    const libretroRank = (entry: ManifestEntry): number =>
+      entry.source === 'libretro' && entry.libretroFolder
+        ? libretroArtworkFolderPriority(orientation, entry.libretroFolder)
+        : -1
+    const isBetterFallback = (candidate: ManifestEntry, current: ManifestEntry): boolean => {
+      if (candidate.source === 'libretro' && current.source === 'libretro') {
+        const candidateRank = libretroRank(candidate)
+        const currentRank = libretroRank(current)
+        if (candidateRank >= 0 && currentRank >= 0 && candidateRank !== currentRank) {
+          return candidateRank < currentRank
+        }
+        if (candidateRank >= 0 && currentRank < 0) return true
+        if (candidateRank < 0 && currentRank >= 0) return false
+      }
+      return (
+        (candidate.quality === 'high' && current.quality !== 'high') ||
+        (candidate.quality === current.quality && fallbackScore(candidate) > fallbackScore(current))
+      )
+    }
+
+    const acceptLibraryMatch = (match: LibraryArtworkMatch): boolean => {
+      if (!isCurrent()) return true
+      const { entry } = match
+      const adopted: ManifestEntry = {
+        ...entry,
+        contain: entry.contain,
+        quality: automaticArtworkQuality(entry.width, entry.height, orientation),
+        resolvedAt: Date.now(),
+        revision: nextRevision(),
+        source: 'library-match',
+        pipelineVersion: PIPELINE_VERSION,
+        metadataRevision: game.metadataRevision,
+        artworkFingerprint: currentArtworkFingerprint,
+        retryAt: undefined,
+        failureCount: undefined,
+        libraryMatchSourceKey: match.sourceKey,
+        libraryMatchSourceRevision: match.sourceRevision,
+        libretroFolder: undefined
+      }
+      if (adopted.quality === 'high') {
+        this.rememberAndEmit(key, game.id, orientation, adopted)
+        return true
+      }
+      if (!bestFallback || isBetterFallback(adopted, bestFallback)) {
+        const retry = qualityUpgradeRetryState(previous, currentArtworkFingerprint)
+        const fallback: ManifestEntry = {
+          ...adopted,
+          retryAt: retry.retryAt,
+          failureCount: retry.failureCount
+        }
+        bestFallback = fallback
+        this.rememberAndEmit(key, game.id, orientation, fallback)
+      }
+      return false
+    }
 
     const acceptValidated = async (
       validated: ValidatedImage,
-      source: ArtworkSource
+      source: ArtworkSource,
+      libretroFolder?: LibretroArtworkFolder,
+      forceFallback = false
     ): Promise<boolean> => {
       if (!isCurrent()) return true
-      const entry = await persistImage(game, orientation, validated, source)
+      const entry = await persistImage(game, orientation, validated, source, libretroFolder)
       if (!isCurrent()) return true
-      if (entry.quality === 'high') {
+      if (entry.quality === 'high' && !forceFallback) {
         this.rememberAndEmit(key, game.id, orientation, entry)
         return true
       }
-      const previousArea = bestFallback ? bestFallback.width * bestFallback.height : 0
-      const candidateArea = entry.width * entry.height
-      if (!bestFallback || bestFallback.quality === 'none' || candidateArea > previousArea) {
-        bestFallback = entry
+      if (!bestFallback || isBetterFallback(entry, bestFallback)) {
+        const retry = forceFallback
+          ? transientRetryState(previous)
+          : qualityUpgradeRetryState(previous, currentArtworkFingerprint)
+        const fallback: ManifestEntry = {
+          ...entry,
+          retryAt: retry.retryAt,
+          failureCount: retry.failureCount
+        }
+        bestFallback = fallback
         // A usable thumbnail appears immediately, while this same worker keeps
         // searching the remaining sources for a high-resolution replacement.
-        this.rememberAndEmit(key, game.id, orientation, entry)
+        this.rememberAndEmit(key, game.id, orientation, fallback)
       }
       return false
     }
 
     if (game.provider === 'steam' && game.appId) {
-      for (const localPath of localSteamCandidates(game.appId, orientation)) {
-        if (!existsSync(localPath)) continue
-        const validated = await validateLocalFile(localPath, orientation)
-        if (!validated) continue
-        if (await acceptValidated(validated, 'steam-local')) return
+      const steamAppId = game.appId
+      const tryLocalSteam = async (tier: SteamArtworkTier = 'all'): Promise<boolean> => {
+        for (const localPath of localSteamCandidates(steamAppId, orientation, tier)) {
+          if (!existsSync(localPath)) continue
+          const validated = await validateLocalFile(localPath, orientation)
+          if (!validated) continue
+          if (await acceptValidated(validated, 'steam-local')) return true
+        }
+        return false
+      }
+      const tryRemoteSteam = async (tier: SteamArtworkTier = 'all'): Promise<boolean> => {
+        for (const remoteUrl of steamCdnCandidates(steamAppId, orientation, tier)) {
+          const result = await downloadValidated(remoteUrl, orientation)
+          if (result.state === 'unavailable') {
+            transientFailure = true
+            continue
+          }
+          if (result.state === 'missing') continue
+          if (await acceptValidated(result.value, 'steam-cdn')) return true
+        }
+        return false
       }
 
-      for (const remoteUrl of steamCdnCandidates(game.appId, orientation)) {
-        const result = await downloadValidated(remoteUrl, orientation)
-        if (result.state === 'unavailable') {
-          transientFailure = true
-          continue
+      // Steam's library hero is the purpose-built, visually rich background
+      // asset. Prefer Steam's local offline copy before the current CDN copy;
+      // subdued store-page backgrounds remain a separate fallback tier.
+      if (orientation === 'horizontal') {
+        if (
+          (await tryLocalSteam('primary')) ||
+          (await tryRemoteSteam('primary')) ||
+          (await tryLocalSteam('fallback')) ||
+          (await tryRemoteSteam('fallback'))
+        ) {
+          return
         }
-        if (result.state === 'missing') continue
-        if (await acceptValidated(result.value, 'steam-cdn')) return
+      } else if ((await tryLocalSteam()) || (await tryRemoteSteam())) {
+        return
       }
     }
 
@@ -676,7 +1015,9 @@ class ArtworkService extends EventEmitter {
       try {
         const localPath = fileURLToPath(localUrl)
         if (!existsSync(localPath)) continue
-        const validated = await validateLocalFile(localPath, orientation)
+        const validated = await validateLocalFile(localPath, orientation, {
+          allowFallback: true
+        })
         if (!validated) continue
         if (await acceptValidated(validated, 'provider-metadata')) return
       } catch {
@@ -686,7 +1027,9 @@ class ArtworkService extends EventEmitter {
     }
 
     for (const remoteUrl of remoteProviderMetadataCandidates(game, orientation)) {
-      const result = await downloadValidated(remoteUrl, orientation)
+      const result = await downloadValidated(remoteUrl, orientation, {
+        allowFallback: true
+      })
       if (result.state === 'unavailable') {
         transientFailure = true
         continue
@@ -695,23 +1038,117 @@ class ArtworkService extends EventEmitter {
       if (await acceptValidated(result.value, 'provider-metadata')) return
     }
 
+    // Reuse an already cached asset only when the equal title is backed by
+    // matching release year and developer evidence. This stays local without
+    // confusing homonymous originals and reboots.
+    const sharedEntry = this.bestLibraryMatch(game, orientation)
+    if (sharedEntry && acceptLibraryMatch(sharedEntry)) return
+
+    for (const localUrl of localProviderMetadataFallbackCandidates(game, orientation)) {
+      try {
+        const localPath = fileURLToPath(localUrl)
+        if (!existsSync(localPath)) continue
+        const validated = await validateLocalFile(localPath, orientation, {
+          allowFallback: true
+        })
+        if (!validated) continue
+        if (await acceptValidated(validated, 'provider-metadata')) return
+      } catch {
+        // Cross-orientation provider candidates are opportunistic only.
+      }
+    }
+
+    for (const remoteUrl of remoteProviderMetadataFallbackCandidates(game, orientation)) {
+      const result = await downloadValidated(remoteUrl, orientation, {
+        allowFallback: true
+      })
+      if (result.state === 'unavailable') {
+        transientFailure = true
+        continue
+      }
+      if (result.state === 'missing') continue
+      if (await acceptValidated(result.value, 'provider-metadata')) return
+    }
+
+    let libretroHigherRoleUnavailable = false
+    for (const folder of libretroArtworkFolders(orientation)) {
+      const discovered = await discoverLibretroArtwork(game, folder)
+      if (discovered.state === 'unavailable') {
+        transientFailure = true
+        break
+      }
+      if (discovered.state === 'missing') continue
+      const result = await downloadValidated(discovered.value, orientation, {
+        allowFallback: true,
+        containFallback: orientation === 'vertical' && folder === 'Named_Boxarts'
+      })
+      if (result.state === 'unavailable') {
+        transientFailure = true
+        libretroHigherRoleUnavailable = true
+        continue
+      }
+      if (result.state === 'missing') continue
+      if (
+        await acceptValidated(
+          result.value,
+          'libretro',
+          folder,
+          libretroHigherRoleUnavailable
+        )
+      ) {
+        return
+      }
+      // Folder order is a semantic preference, not a pool of interchangeable
+      // pixels. Once a valid asset exists for the best available role, lower
+      // roles must not replace it merely because their aspect score is higher.
+      break
+    }
+
+    if (orientation !== 'icon') {
+      const discovered = await discoverExactStoreArtwork(game)
+      if (discovered.state === 'unavailable') {
+        transientFailure = true
+      } else if (discovered.state === 'success') {
+        for (const remoteUrl of discovered.value[orientation]) {
+          const result = await downloadValidated(remoteUrl, orientation)
+          if (result.state === 'unavailable') {
+            transientFailure = true
+            continue
+          }
+          if (result.state === 'missing') continue
+          if (await acceptValidated(result.value, 'store-fallback')) return
+        }
+      }
+    }
+
     if (orientation !== 'icon') {
       const gridDbKey = settingsStore.get('steamGridDbApiKey') || getBuiltinSteamGridDbKey()
       if (gridDbKey) {
         const steamAppId = game.provider === 'steam' ? game.appId : undefined
-        const gridResult = await fetchSteamGridDbImage(
+        const gridResult = await fetchSteamGridDbArtworkCandidates(
           steamAppId,
           gridDbKey,
-          orientation,
-          game.name
+          game.name,
+          orientation
         )
         if (gridResult.state === 'unavailable') {
           transientFailure = true
         } else if (gridResult.state === 'success') {
-          const result = await downloadValidated(gridResult.value, orientation)
-          if (result.state === 'unavailable') transientFailure = true
-          else if (result.state === 'success') {
-            if (await acceptValidated(result.value, 'steamgriddb')) return
+          // A community result can disappear independently of the search API.
+          // Try a small ranked set instead of letting one stale first asset
+          // suppress every valid alternative.
+          for (const candidate of gridResult.value.slice(0, 4)) {
+            const result = await downloadValidated(candidate.downloadUrl, orientation)
+            if (result.state === 'unavailable') {
+              transientFailure = true
+              continue
+            }
+            if (
+              result.state === 'success' &&
+              (await acceptValidated(result.value, 'steamgriddb'))
+            ) {
+              return
+            }
           }
         }
       }
@@ -722,6 +1159,11 @@ class ArtworkService extends EventEmitter {
       if (iconDataUrl) {
         const icon = nativeImage.createFromDataURL(iconDataUrl)
         const { width, height } = icon.getSize()
+        const quality = automaticArtworkQuality(width, height, orientation)
+        const retry =
+          quality === 'low'
+            ? qualityUpgradeRetryState(previous, currentArtworkFingerprint)
+            : undefined
         const entry: ManifestEntry = {
           url: iconDataUrl,
           contain: true,
@@ -730,12 +1172,12 @@ class ArtworkService extends EventEmitter {
           resolvedAt: Date.now(),
           revision: nextRevision(),
           source: 'local-icon',
-          quality: 'low',
+          quality,
           pipelineVersion: PIPELINE_VERSION,
           metadataRevision: game.metadataRevision,
-          artworkFingerprint: artworkFingerprint(game, orientation),
-          retryAt: undefined,
-          failureCount: undefined
+          artworkFingerprint: currentArtworkFingerprint,
+          retryAt: retry?.retryAt,
+          failureCount: retry?.failureCount
         }
         if (!isCurrent()) return
         this.rememberAndEmit(key, game.id, orientation, entry)
@@ -749,13 +1191,21 @@ class ArtworkService extends EventEmitter {
     // is stored only when there was no usable image at all. Provider outages use
     // a shorter exponential retry while the last good file remains available.
     if (bestFallback && isEntryUsable(bestFallback)) {
-      const retry = transientFailure ? transientRetryState(previous) : undefined
+      const retry = transientFailure
+        ? transientRetryState(previous)
+        : bestFallback.quality === 'low'
+          ? qualityUpgradeRetryState(previous, currentArtworkFingerprint)
+          : undefined
       this.rememberAndEmit(key, game.id, orientation, {
         ...bestFallback,
-        resolvedAt: transientFailure ? bestFallback.resolvedAt : Date.now(),
+        resolvedAt: Date.now(),
+        // A preserved pixel can still represent a new metadata/identity
+        // decision. Advance the revision so library-match dependents recheck
+        // their evidence even when no replacement download succeeded.
+        revision: nextRevision(),
         pipelineVersion: PIPELINE_VERSION,
         metadataRevision: game.metadataRevision,
-        artworkFingerprint: artworkFingerprint(game, orientation),
+        artworkFingerprint: currentArtworkFingerprint,
         retryAt: retry?.retryAt,
         failureCount: retry?.failureCount
       })
@@ -774,7 +1224,7 @@ class ArtworkService extends EventEmitter {
       quality: 'none',
       pipelineVersion: PIPELINE_VERSION,
       metadataRevision: game.metadataRevision,
-      artworkFingerprint: artworkFingerprint(game, orientation),
+      artworkFingerprint: currentArtworkFingerprint,
       retryAt: retry?.retryAt,
       failureCount: retry?.failureCount
     }
@@ -795,6 +1245,160 @@ class ArtworkService extends EventEmitter {
       image: entry.source === 'none' ? null : toResolved(entry)
     }
     this.emit('updated', update)
+    this.scheduleLibraryMatchDependents(key, entry.revision)
+    this.planArtworkRetryWake()
+  }
+
+  private scheduleLibraryMatchDependents(
+    sourceKey: string,
+    sourceRevision: number | undefined
+  ): void {
+    for (const game of this.knownGamesById.values()) {
+      for (const orientation of ARTWORK_ORIENTATIONS) {
+        const dependentKey = artworkKey(game.id, orientation)
+        if (dependentKey === sourceKey) continue
+        const dependent = manifestEntries[dependentKey]
+        if (
+          dependent?.source !== 'library-match' ||
+          dependent.libraryMatchSourceKey !== sourceKey ||
+          (sourceRevision !== undefined &&
+            dependent.libraryMatchSourceRevision === sourceRevision)
+        ) {
+          continue
+        }
+        this.schedule(game, orientation, true)
+      }
+    }
+  }
+
+  private rememberProviderGames(games: LibraryGame[], provider: string): void {
+    for (const id of this.knownGameIdsByProvider.get(provider) ?? []) {
+      this.knownGamesById.delete(id)
+    }
+    const nextIds = new Set<string>()
+    for (const game of games) {
+      this.knownGamesById.set(game.id, game)
+      nextIds.add(game.id)
+    }
+    this.knownGameIdsByProvider.set(provider, nextIds)
+
+    const byTitle = new Map<string, LibraryGame[]>()
+    for (const game of this.knownGamesById.values()) {
+      const title = canonicalArtworkTitle(game.name)
+      if (!title) continue
+      const matches = byTitle.get(title) ?? []
+      matches.push(game)
+      byTitle.set(title, matches)
+    }
+    this.knownGamesByTitle = byTitle
+    this.planArtworkRetryWake()
+  }
+
+  private bestLibraryMatch(
+    game: LibraryGame,
+    orientation: ImageOrientation
+  ): LibraryArtworkMatch | undefined {
+    const matches = this.knownGamesByTitle.get(canonicalArtworkTitle(game.name)) ?? []
+    let best: LibraryArtworkMatch | undefined
+    for (const match of matches) {
+      if (match.id === game.id || !shareArtworkIdentity(game, match)) continue
+      const sourceKey = artworkKey(match.id, orientation)
+      const entry = manifestEntries[sourceKey]
+      if (
+        !entry ||
+        !isEntryUsable(entry) ||
+        entry.source === 'library-match' ||
+        entry.pipelineVersion !== PIPELINE_VERSION ||
+        entry.artworkFingerprint !== artworkFingerprint(match, orientation)
+      ) {
+        continue
+      }
+      const candidate: ManifestEntry = {
+        ...entry,
+        quality: automaticArtworkQuality(entry.width, entry.height, orientation)
+      }
+      if (
+        !best ||
+        (candidate.quality === 'high' && best.entry.quality !== 'high') ||
+        (candidate.quality === best.entry.quality &&
+          automaticArtworkScore(candidate.width, candidate.height, orientation) >
+            automaticArtworkScore(best.entry.width, best.entry.height, orientation))
+      ) {
+        best = {
+          entry: candidate,
+          sourceKey,
+          sourceRevision: entry.revision
+        }
+      }
+    }
+    return best
+  }
+
+  private clearArtworkRetryTimer(): void {
+    if (this.artworkRetryTimer) clearTimeout(this.artworkRetryTimer)
+    this.artworkRetryTimer = undefined
+    this.artworkRetryWakeAt = undefined
+  }
+
+  private planArtworkRetryWake(): void {
+    let nextRetryAt: number | undefined
+    for (const game of this.knownGamesById.values()) {
+      for (const orientation of ARTWORK_ORIENTATIONS) {
+        const entry = manifestEntries[artworkKey(game.id, orientation)]
+        // `retryAt` covers quality upgrades, transient provider failures and
+        // negative entries. All of them need a wake even when no view asks for
+        // the artwork again in the meantime.
+        if (entry?.retryAt === undefined) continue
+        nextRetryAt = Math.min(nextRetryAt ?? entry.retryAt, entry.retryAt)
+      }
+    }
+    if (nextRetryAt === undefined) {
+      this.clearArtworkRetryTimer()
+      return
+    }
+    if (
+      this.artworkRetryTimer &&
+      this.artworkRetryWakeAt !== undefined &&
+      this.artworkRetryWakeAt <= nextRetryAt
+    ) {
+      return
+    }
+    this.clearArtworkRetryTimer()
+    this.artworkRetryWakeAt = nextRetryAt
+    this.artworkRetryTimer = setTimeout(
+      () => this.wakeArtworkRetries(),
+      Math.max(1_000, nextRetryAt - Date.now())
+    )
+    this.artworkRetryTimer.unref()
+  }
+
+  private wakeArtworkRetries(): void {
+    this.artworkRetryTimer = undefined
+    this.artworkRetryWakeAt = undefined
+    const now = Date.now()
+    let scheduled = false
+    for (const game of this.knownGamesById.values()) {
+      for (const orientation of ARTWORK_ORIENTATIONS) {
+        const entry = manifestEntries[artworkKey(game.id, orientation)]
+        if (entry?.retryAt === undefined || entry.retryAt > now) {
+          continue
+        }
+        this.schedule(game, orientation)
+        scheduled = true
+      }
+    }
+    if (!scheduled) {
+      this.planArtworkRetryWake()
+      return
+    }
+    // A refresh normally installs a new retry time. This bounded safety wake
+    // also recovers if a worker exits unexpectedly before persisting a result.
+    this.artworkRetryWakeAt = now + TRANSIENT_RETRY_BASE_MS
+    this.artworkRetryTimer = setTimeout(
+      () => this.wakeArtworkRetries(),
+      TRANSIENT_RETRY_BASE_MS
+    )
+    this.artworkRetryTimer.unref()
   }
 
   private markSyncComplete(key: string): void {

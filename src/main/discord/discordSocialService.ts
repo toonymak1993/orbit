@@ -3,7 +3,17 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { app, safeStorage, utilityProcess, type UtilityProcess } from 'electron'
 import Store from 'electron-store'
-import type { FriendPresence, OrbitFriend } from '@shared/ipc'
+import type {
+  DiscordChatConversation,
+  DiscordChatEvent,
+  DiscordChatHistory,
+  DiscordChatInbox,
+  DiscordChatIssue,
+  DiscordChatMessage,
+  DiscordChatSendResult,
+  FriendPresence,
+  OrbitFriend
+} from '@shared/ipc'
 import type {
   DiscordSocialIssue,
   DiscordSocialSnapshot,
@@ -19,6 +29,9 @@ const REFRESH_TIMEOUT_MS = 15_000
 const CONNECT_TIMEOUT_MS = 6 * 60_000
 const MAX_TOKEN_LENGTH = 8_192
 const MAX_DISCORD_FRIENDS = 1_000
+const MAX_CHAT_CONVERSATIONS = 500
+const MAX_MESSAGE_LENGTH = 2_000
+const MAX_CHAT_HISTORY = 200
 const WORKER_ENTRY = 'discordSocialWorker.js'
 const SDK_VERSION = '1.10.18687'
 
@@ -64,6 +77,144 @@ function sanitizedText(value: unknown, maxLength: number): string | undefined {
   if (typeof value !== 'string') return undefined
   const cleaned = value.replace(/[\u0000-\u001f\u007f]/g, '').trim()
   return cleaned ? cleaned.slice(0, maxLength) : undefined
+}
+
+function sanitizedMessageContent(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  return value
+    .replace(/\r\n?/g, '\n')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
+    .slice(0, MAX_MESSAGE_LENGTH)
+}
+
+function validDiscordId(value: unknown): value is string {
+  return typeof value === 'string' && DISCORD_APPLICATION_ID_PATTERN.test(value)
+}
+
+function sanitizedChatMessage(value: unknown): DiscordChatMessage | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const message = value as Partial<DiscordChatMessage>
+  const content = sanitizedMessageContent(message.content)
+  if (
+    !validDiscordId(message.id) ||
+    !validDiscordId(message.userId) ||
+    content === undefined ||
+    (message.direction !== 'incoming' && message.direction !== 'outgoing') ||
+    typeof message.sentAt !== 'number' ||
+    !Number.isFinite(message.sentAt) ||
+    typeof message.unsupportedContent !== 'boolean'
+  ) {
+    return null
+  }
+  const editedAt =
+    typeof message.editedAt === 'number' && Number.isFinite(message.editedAt)
+      ? message.editedAt
+      : undefined
+  return {
+    id: message.id,
+    userId: message.userId,
+    content,
+    sentAt: message.sentAt,
+    editedAt,
+    direction: message.direction,
+    unsupportedContent: message.unsupportedContent
+  }
+}
+
+function sanitizedChatHistory(value: unknown, userId: string): DiscordChatHistory | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const history = value as Partial<DiscordChatHistory>
+  const issues: DiscordChatIssue[] = [
+    'not-connected',
+    'history-unavailable',
+    'send-failed',
+    'provider-unavailable'
+  ]
+  if (
+    history.userId !== userId ||
+    (history.state !== 'ready' && history.state !== 'unavailable') ||
+    (history.issue && !issues.includes(history.issue))
+  ) {
+    return null
+  }
+  const messages = Array.isArray(history.messages)
+    ? history.messages
+        .slice(0, MAX_CHAT_HISTORY)
+        .map(sanitizedChatMessage)
+        .filter((message): message is DiscordChatMessage => message?.userId === userId)
+        .sort((left, right) => left.sentAt - right.sentAt)
+    : []
+  return {
+    state: history.state,
+    userId,
+    messages,
+    issue: history.issue
+  }
+}
+
+function sanitizedChatInbox(value: unknown): DiscordChatInbox | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const inbox = value as Partial<DiscordChatInbox>
+  const issues: DiscordChatIssue[] = [
+    'not-connected',
+    'history-unavailable',
+    'provider-unavailable'
+  ]
+  if (
+    (inbox.state !== 'ready' && inbox.state !== 'unavailable') ||
+    (inbox.issue && !issues.includes(inbox.issue))
+  ) {
+    return null
+  }
+  const conversations = Array.isArray(inbox.conversations)
+    ? inbox.conversations
+        .slice(0, MAX_CHAT_CONVERSATIONS)
+        .map((value): DiscordChatConversation | null => {
+          if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+          const conversation = value as Partial<DiscordChatConversation>
+          if (!validDiscordId(conversation.userId) || !validDiscordId(conversation.lastMessageId)) {
+            return null
+          }
+          const lastMessage = conversation.lastMessage
+            ? sanitizedChatMessage(conversation.lastMessage) ?? undefined
+            : undefined
+          if (lastMessage && lastMessage.userId !== conversation.userId) return null
+          return {
+            userId: conversation.userId,
+            lastMessageId: conversation.lastMessageId,
+            lastMessage
+          }
+        })
+        .filter(
+          (conversation): conversation is DiscordChatConversation => conversation !== null
+        )
+    : []
+  return { state: inbox.state, conversations, issue: inbox.issue }
+}
+
+function sanitizedChatSend(value: unknown, userId: string): DiscordChatSendResult | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const result = value as Partial<DiscordChatSendResult>
+  if (typeof result.ok !== 'boolean') return null
+  const message = result.message ? sanitizedChatMessage(result.message) ?? undefined : undefined
+  if (message && message.userId !== userId) return null
+  const issues: DiscordChatIssue[] = ['send-failed', 'not-connected', 'provider-unavailable']
+  if (result.issue && !issues.includes(result.issue)) return null
+  if (result.ok && !message) return null
+  return { ok: result.ok, message, issue: result.issue }
+}
+
+function sanitizedChatEvent(value: unknown): DiscordChatEvent | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const event = value as Partial<DiscordChatEvent> & { messageId?: unknown }
+  if (event.kind === 'deleted') {
+    return validDiscordId(event.messageId)
+      ? { kind: 'deleted', messageId: event.messageId }
+      : null
+  }
+  if (event.kind !== 'created' && event.kind !== 'updated') return null
+  const message = sanitizedChatMessage(event.message)
+  return message ? { kind: event.kind, message } : null
 }
 
 function sanitizedAvatarUrl(value: unknown): string | undefined {
@@ -285,6 +436,11 @@ export class DiscordSocialService extends EventEmitter {
       if (snapshot) this.publish(snapshot)
       return
     }
+    if (message.type === 'chat-message') {
+      const event = sanitizedChatEvent(message.event)
+      if (event) this.emit('chat-message', event)
+      return
+    }
     const pending = this.pending.get(message.id)
     if (!pending) return
     this.pending.delete(message.id)
@@ -364,7 +520,10 @@ export class DiscordSocialService extends EventEmitter {
   private async request(
     command: DiscordWorkerRequest['command'],
     applicationId?: string,
-    tokens?: DiscordSocialTokens
+    tokens?: DiscordSocialTokens,
+    details?: Partial<
+      Pick<DiscordWorkerRequest, 'recipientId' | 'content' | 'limit' | 'showing'>
+    >
   ): Promise<DiscordWorkerResponse> {
     await this.ensureWorker()
     if (!this.worker) {
@@ -391,7 +550,7 @@ export class DiscordSocialService extends EventEmitter {
         }, timeoutMs)
       })
     })
-    this.worker.postMessage({ type: 'request', id, command, applicationId, tokens })
+    this.worker.postMessage({ type: 'request', id, command, applicationId, tokens, ...details })
     return response
   }
 
@@ -455,6 +614,149 @@ export class DiscordSocialService extends EventEmitter {
       } catch {
         this.stopWorker()
         return this.publish(errorSnapshot('sdk-unavailable'))
+      }
+    })
+  }
+
+  getChatInbox(applicationIdInput: unknown): Promise<DiscordChatInbox> {
+    return this.runExclusive(async () => {
+      const applicationId = normalizedApplicationId(applicationIdInput)
+      if (!applicationId) {
+        return { state: 'unavailable', conversations: [], issue: 'provider-unavailable' }
+      }
+      const tokens = this.readTokens(applicationId)
+      if (!tokens) {
+        return { state: 'unavailable', conversations: [], issue: 'not-connected' }
+      }
+      try {
+        const response = await this.request('chat-inbox', applicationId, tokens)
+        if (response.clearTokens) this.clearTokens()
+        const refreshedTokens = sanitizedTokens(response.tokens)
+        if (refreshedTokens) this.saveTokens(applicationId, refreshedTokens)
+        if (!response.ok) {
+          return { state: 'unavailable', conversations: [], issue: 'provider-unavailable' }
+        }
+        return (
+          sanitizedChatInbox(response.chatInbox) ?? {
+            state: 'unavailable',
+            conversations: [],
+            issue: 'provider-unavailable'
+          }
+        )
+      } catch {
+        return { state: 'unavailable', conversations: [], issue: 'provider-unavailable' }
+      }
+    })
+  }
+
+  getChatHistory(
+    applicationIdInput: unknown,
+    userIdInput: unknown,
+    limitInput: unknown
+  ): Promise<DiscordChatHistory> {
+    return this.runExclusive(async () => {
+      const applicationId = normalizedApplicationId(applicationIdInput)
+      const userId = validDiscordId(userIdInput) ? userIdInput : ''
+      if (!applicationId || !userId) {
+        return {
+          state: 'unavailable',
+          userId,
+          messages: [],
+          issue: 'provider-unavailable'
+        }
+      }
+      const tokens = this.readTokens(applicationId)
+      if (!tokens) {
+        return { state: 'unavailable', userId, messages: [], issue: 'not-connected' }
+      }
+      const limit =
+        typeof limitInput === 'number' && Number.isFinite(limitInput)
+          ? Math.max(1, Math.min(MAX_CHAT_HISTORY, Math.trunc(limitInput)))
+          : 50
+      try {
+        const response = await this.request('chat-history', applicationId, tokens, {
+          recipientId: userId,
+          limit
+        })
+        if (response.clearTokens) this.clearTokens()
+        const refreshedTokens = sanitizedTokens(response.tokens)
+        if (refreshedTokens) this.saveTokens(applicationId, refreshedTokens)
+        if (!response.ok) {
+          return {
+            state: 'unavailable',
+            userId,
+            messages: [],
+            issue: 'provider-unavailable'
+          }
+        }
+        return (
+          sanitizedChatHistory(response.chatHistory, userId) ?? {
+            state: 'unavailable',
+            userId,
+            messages: [],
+            issue: 'provider-unavailable'
+          }
+        )
+      } catch {
+        return {
+          state: 'unavailable',
+          userId,
+          messages: [],
+          issue: 'provider-unavailable'
+        }
+      }
+    })
+  }
+
+  sendChatMessage(
+    applicationIdInput: unknown,
+    userIdInput: unknown,
+    contentInput: unknown
+  ): Promise<DiscordChatSendResult> {
+    return this.runExclusive(async () => {
+      const applicationId = normalizedApplicationId(applicationIdInput)
+      const userId = validDiscordId(userIdInput) ? userIdInput : ''
+      const content = sanitizedMessageContent(contentInput)?.trim() ?? ''
+      if (!applicationId || !userId || !content) {
+        return { ok: false, issue: 'send-failed' }
+      }
+      const tokens = this.readTokens(applicationId)
+      if (!tokens) return { ok: false, issue: 'not-connected' }
+      try {
+        const response = await this.request('chat-send', applicationId, tokens, {
+          recipientId: userId,
+          content
+        })
+        if (response.clearTokens) this.clearTokens()
+        const refreshedTokens = sanitizedTokens(response.tokens)
+        if (refreshedTokens) this.saveTokens(applicationId, refreshedTokens)
+        if (!response.ok) return { ok: false, issue: 'provider-unavailable' }
+        return (
+          sanitizedChatSend(response.chatSend, userId) ?? {
+            ok: false,
+            issue: 'provider-unavailable'
+          }
+        )
+      } catch {
+        return { ok: false, issue: 'provider-unavailable' }
+      }
+    })
+  }
+
+  setShowingChat(applicationIdInput: unknown, showingInput: unknown): Promise<void> {
+    return this.runExclusive(async () => {
+      const applicationId = normalizedApplicationId(applicationIdInput)
+      const showing = showingInput === true
+      if (!applicationId) return
+      const tokens = this.readTokens(applicationId)
+      if (!tokens || (!showing && !this.worker)) return
+      try {
+        const response = await this.request('chat-showing', applicationId, tokens, { showing })
+        if (response.clearTokens) this.clearTokens()
+        const refreshedTokens = sanitizedTokens(response.tokens)
+        if (refreshedTokens) this.saveTokens(applicationId, refreshedTokens)
+      } catch {
+        // Notification suppression is best effort and must never block the chat UI.
       }
     })
   }

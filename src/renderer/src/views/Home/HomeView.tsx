@@ -5,6 +5,9 @@ import {
   CalendarDays,
   ExternalLink,
   Heart,
+  LayoutGrid,
+  Search,
+  Shuffle,
   Sparkles,
   Timer,
   Trophy
@@ -13,6 +16,7 @@ import { useAutoFocus } from '@renderer/hooks/useAutoFocus'
 import { useLibraryStore } from '@renderer/state/libraryStore'
 import { useAuthStore } from '@renderer/state/authStore'
 import { useEpicAuthStore } from '@renderer/state/epicAuthStore'
+import { usePlayStationStore } from '@renderer/state/playstationStore'
 import { useStoreStore } from '@renderer/state/storeStore'
 import { useStoreNavigationStore } from '@renderer/state/storeNavigationStore'
 import { GameImage } from '@renderer/components/GameImage'
@@ -36,10 +40,14 @@ import { latestLibraryActivity, normalizeLibraryTimestamp } from '@shared/librar
 import { useLaunchGame } from '@renderer/hooks/useLaunchGame'
 import { formatPlaytime } from '@renderer/lib/playtime'
 import { usePreferencesStore } from '@renderer/state/preferencesStore'
+import { useLibraryFilterStore } from '@renderer/state/libraryFilterStore'
+import { useGameDetailStore } from '@renderer/state/gameDetailStore'
 import { focusElement, HOME_SHOW_BANNERS_EVENT } from '@renderer/lib/spatialNavigation'
+import { LIBRARY_SEARCH_EVENT } from '@renderer/lib/librarySearch'
 
 const HOME_ACHIEVEMENTS_DELAY_MS = 5_000
 const WISHLIST_ROTATION_MS = 15_000
+const XMODE_RECOMMENDATION_ROTATION_MS = 18_000
 
 function formatHours(minutes: number, language: 'en' | 'de'): string {
   const hours = minutes / 60
@@ -86,14 +94,17 @@ export function HomeView(): JSX.Element {
   const { games, recentGameIds, activity, loadedAt } = useLibraryStore((s) => s.snapshot)
   const account = useAuthStore((s) => s.account)
   const epicAccount = useEpicAuthStore((s) => s.account)
+  const playStationAccount = usePlayStationStore((s) => s.account)
   const storeProducts = useStoreStore((s) => s.snapshot.products)
   const setMainView = useNavigationStore((s) => s.setMainView)
+  const setLibrarySource = useLibraryFilterStore((s) => s.setSource)
   const setStorePage = useStoreNavigationStore((s) => s.setPage)
   const launchGame = useLaunchGame()
   const language = usePreferencesStore((state) => state.language)
   const homeLayout = usePreferencesStore((state) => state.homeLayout)
   const configuredShowHomeBanners = usePreferencesStore((state) => state.showHomeBanners)
   const showHomeBanners = homeLayout === 'orbit' && configuredShowHomeBanners
+  const detailGameId = useGameDetailStore((state) => state.gameId)
   const [focusedGame, setFocusedGame] = useState<LibraryGame | null>(null)
   const [focusDirection, setFocusDirection] = useState(1)
   const previousFocusedIndexRef = useRef<number | null>(null)
@@ -178,6 +189,11 @@ export function HomeView(): JSX.Element {
     active: boolean,
     source: 'focus' | 'pointer'
   ): void {
+    // Opening the detail panel deliberately moves DOM focus into the dialog. Keep
+    // Home's visual selection frozen until that dialog is gone, otherwise the
+    // card blur briefly restores the banners/backdrop behind the slide animation.
+    if (!active && useGameDetailStore.getState().gameId) return
+
     const sourceGameRef =
       source === 'focus' ? focusedHomeGameRef : hoveredHomeGameRef
 
@@ -266,15 +282,44 @@ export function HomeView(): JSX.Element {
   }, [showHomeBanners, wishlistProducts.length, wishlistSignature])
 
   const wishlistOffer = wishlistProducts[wishlistIndex % Math.max(wishlistProducts.length, 1)] ?? null
+  const xModeDeals = useMemo(() => {
+    const discountedProducts = [...storeProducts]
+      .filter(
+        (product) =>
+          product.discoverEligible !== false &&
+          (product.bestOffer?.discountPercent ?? 0) > 0 &&
+          Boolean(product.headerUrl ?? product.heroUrl ?? product.portraitUrl) &&
+          Boolean(storeProductUrl(product))
+      )
+      .sort(
+        (left, right) =>
+          (right.bestOffer?.discountPercent ?? 0) -
+            (left.bestOffer?.discountPercent ?? 0) ||
+          right.recommendationScore - left.recommendationScore
+      )
+    const candidates =
+      wishlistProducts.length >= 2
+        ? wishlistProducts
+        : [...wishlistProducts, ...discountedProducts]
+    const seen = new Set<string>()
+    return candidates.filter((product) => {
+      if (seen.has(product.id)) return false
+      seen.add(product.id)
+      return true
+    })
+  }, [storeProducts, wishlistProducts])
 
   // The information panel follows focus immediately. The full-screen artwork is
   // deliberately settled a beat later so holding the stick never starts several
   // large image decodes per second.
   useEffect(() => {
+    // Preserve the exact frame behind the modal, including when it opens during
+    // the normal 160 ms artwork debounce.
+    if (detailGameId) return undefined
     const target = focusedGame ?? featured
     const timer = setTimeout(() => setBackdropGame(target), 160)
     return () => clearTimeout(timer)
-  }, [featured?.id, focusedGame?.id])
+  }, [detailGameId, featured?.id, focusedGame?.id])
 
   function showWishlist(): void {
     setStorePage('wishlist')
@@ -299,7 +344,18 @@ export function HomeView(): JSX.Element {
     setMainView('store')
   }
 
-  if (!account && !epicAccount && games.length === 0 && loadedAt > 0) {
+  function openLibrary(search: boolean): void {
+    setLibrarySource('all')
+    setMainView('library')
+    if (!search) return
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        window.dispatchEvent(new CustomEvent(LIBRARY_SEARCH_EVENT))
+      })
+    })
+  }
+
+  if (!account && !epicAccount && !playStationAccount && games.length === 0 && loadedAt > 0) {
     return (
       <div
         ref={containerRef}
@@ -316,6 +372,28 @@ export function HomeView(): JSX.Element {
           {t('home.noAccount.cta')}
         </button>
       </div>
+    )
+  }
+
+  if (homeLayout === 'xmode') {
+    return (
+      <XModeHome
+        containerRef={containerRef}
+        installedGames={installedGames}
+        libraryGames={games}
+        backdropGame={backdropGame ?? featured}
+        deals={xModeDeals}
+        onSelectGame={activateGame}
+        onLaunchGame={(game) => launchGame(game.id)}
+        onOpenLibrary={() => openLibrary(false)}
+        onOpenSearch={() => openLibrary(true)}
+        onOpenDeal={openStoreProduct}
+        onOpenDeals={() => {
+          setStorePage(wishlistProducts.length > 0 ? 'wishlist' : 'discover')
+          setMainView('store')
+        }}
+        t={t}
+      />
     )
   }
 
@@ -523,6 +601,232 @@ export function HomeView(): JSX.Element {
         {games.length === 0 && <p className="text-sm text-muted">{t('home.libraryLoading')}</p>}
         {games.length > 0 && installedGames.length === 0 && (
           <p className="text-sm text-muted">{t('home.noInstalledGames')}</p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function nextRandomIndex(current: number, length: number): number {
+  if (length <= 1) return 0
+  return (current + 1 + Math.floor(Math.random() * (length - 1))) % length
+}
+
+function XModeHome({
+  containerRef,
+  installedGames,
+  libraryGames,
+  backdropGame,
+  deals,
+  onSelectGame,
+  onLaunchGame,
+  onOpenLibrary,
+  onOpenSearch,
+  onOpenDeal,
+  onOpenDeals,
+  t
+}: {
+  containerRef: RefObject<HTMLDivElement>
+  installedGames: LibraryGame[]
+  libraryGames: LibraryGame[]
+  backdropGame: LibraryGame | null
+  deals: StoreProduct[]
+  onSelectGame: (game: LibraryGame) => void
+  onLaunchGame: (game: LibraryGame) => void
+  onOpenLibrary: () => void
+  onOpenSearch: () => void
+  onOpenDeal: (product: StoreProduct) => void
+  onOpenDeals: () => void
+  t: TFunction
+}): JSX.Element {
+  const reduceMotion = Boolean(useReducedMotion())
+  const launcherGames = installedGames.slice(0, 6)
+  const launcherIds = useMemo(
+    () => new Set(launcherGames.map((game) => game.id)),
+    [launcherGames]
+  )
+  const remainingGames = useMemo(
+    () => libraryGames.filter((game) => !launcherIds.has(game.id)),
+    [launcherIds, libraryGames]
+  )
+  const recentlyAddedGame = useMemo(
+    () =>
+      [...libraryGames].sort(
+        (left, right) =>
+          normalizeLibraryTimestamp(right.addedAt) - normalizeLibraryTimestamp(left.addedAt) ||
+          right.updatedAt - left.updatedAt ||
+          left.name.localeCompare(right.name)
+      )[0] ?? null,
+    [libraryGames]
+  )
+  const baseRecommendationPool = installedGames.length > 0 ? installedGames : libraryGames
+  const recommendationPool =
+    recentlyAddedGame && baseRecommendationPool.length > 1
+      ? baseRecommendationPool.filter((game) => game.id !== recentlyAddedGame.id)
+      : baseRecommendationPool
+  const libraryPreviewGames = (remainingGames.length > 0 ? remainingGames : libraryGames).slice(0, 4)
+
+  return (
+    <div
+      data-home-layout="xmode"
+      data-home-stage-mode="game-focus"
+      className="home-layout xmode-home relative flex h-full flex-col overflow-hidden"
+    >
+      <div className="absolute inset-0">
+        <div className="home-backdrop-art absolute inset-0">
+          <HomeBackdrop game={backdropGame ?? recommendationPool[0] ?? null} />
+        </div>
+        <div className="xmode-backdrop-veil absolute inset-0" />
+        <div className="home-backdrop-dim absolute inset-0" />
+      </div>
+
+      <div
+        ref={containerRef}
+        className="scrollbar-none relative z-10 flex h-full flex-col overflow-y-auto px-[clamp(1.5rem,3.6vw,4.5rem)] pb-[clamp(1rem,2.5vh,2.25rem)] pt-[calc(5rem+clamp(0.25rem,1vh,0.8rem))]"
+      >
+        <button
+          data-focusable
+          data-view-entry="true"
+          type="button"
+          onClick={onOpenSearch}
+          aria-label={t('home.xmode.search')}
+          className="xmode-search group mx-auto flex h-[clamp(2.65rem,5vh,3.35rem)] w-[min(42rem,62vw)] shrink-0 items-center gap-3 rounded-full border border-white/15 bg-black/42 px-5 text-left text-sm text-white/55 shadow-[0_16px_42px_rgba(0,0,0,0.28)] outline-none backdrop-blur-2xl transition-[background-color,border-color,color] hover:border-white/30 hover:bg-black/55 hover:text-white"
+        >
+          <Search size={18} className="shrink-0 text-white/65 transition-colors group-hover:text-accent group-data-[focused=true]:text-accent" />
+          <span className="truncate">{t('home.xmode.search')}</span>
+        </button>
+
+        {launcherGames.length > 0 ? (
+          <>
+            <section className="mt-[clamp(0.8rem,2vh,1.35rem)] shrink-0">
+              <h2 className="mb-[clamp(0.45rem,1vh,0.75rem)] text-[clamp(0.9rem,1.2vw,1.1rem)] font-bold tracking-wide text-white">
+                {t('home.xmode.jumpBack')}
+              </h2>
+              <div
+                data-navigation-grid
+                data-grid-columns={launcherGames.length + 1}
+                data-grid-exit-y="true"
+                style={{
+                  gridTemplateColumns: `repeat(${launcherGames.length}, minmax(0, 1fr)) minmax(0, 1.28fr)`
+                }}
+                className="xmode-launcher-grid grid min-w-0 items-stretch"
+              >
+                {launcherGames.map((game, index) => (
+                  <motion.button
+                    key={game.id}
+                    data-focusable
+                    data-game-card="true"
+                    data-game-id={game.id}
+                    data-grid-index={index}
+                    data-xmode-launcher={game.id}
+                    type="button"
+                    onFocus={() => onSelectGame(game)}
+                    onMouseEnter={() => onSelectGame(game)}
+                    onClick={() => onLaunchGame(game)}
+                    aria-label={game.name}
+                    whileHover={reduceMotion ? undefined : { y: -3, scale: 1.018 }}
+                    whileFocus={reduceMotion ? undefined : { y: -3, scale: 1.018 }}
+                    transition={{ type: 'spring', stiffness: 410, damping: 30 }}
+                    className="xmode-game-card group relative aspect-square min-w-0 overflow-hidden rounded-[clamp(0.7rem,1.15vw,1.15rem)] border border-white/12 bg-surface-2 text-left shadow-card outline-none"
+                  >
+                    <GameImage
+                      gameId={game.id}
+                      name={game.name}
+                      orientation="vertical"
+                      fit="cover"
+                      className="h-full w-full object-cover object-top transition-transform duration-500 group-hover:scale-[1.04] group-data-[focused=true]:scale-[1.04] motion-reduce:transition-none"
+                    />
+                    <span className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/88 via-black/5 to-white/[0.06]" />
+                    <span className="pointer-events-none absolute inset-x-0 bottom-0 line-clamp-2 p-[clamp(0.45rem,0.8vw,0.75rem)] text-[clamp(0.65rem,0.82vw,0.82rem)] font-semibold leading-tight text-white drop-shadow-lg">
+                      {game.name}
+                    </span>
+                    <GameCardMenuHint
+                      size="compact"
+                      className="absolute right-2 top-2 z-20 opacity-0 transition-opacity group-hover:opacity-100 group-data-[focused=true]:opacity-100"
+                    />
+                  </motion.button>
+                ))}
+
+                <motion.button
+                  data-focusable
+                  data-grid-index={launcherGames.length}
+                  data-xmode-library="true"
+                  type="button"
+                  onClick={onOpenLibrary}
+                  aria-label={`${t('home.xmode.allGames')}, ${t('home.xmode.moreGames', { count: remainingGames.length })}`}
+                  whileHover={reduceMotion ? undefined : { y: -3, scale: 1.012 }}
+                  whileFocus={reduceMotion ? undefined : { y: -3, scale: 1.012 }}
+                  transition={{ type: 'spring', stiffness: 410, damping: 30 }}
+                  className="xmode-library-tile group relative min-w-0 overflow-hidden rounded-[clamp(0.7rem,1.15vw,1.15rem)] border border-white/12 bg-black/42 text-left shadow-card outline-none backdrop-blur-xl"
+                >
+                  <span className="absolute inset-0 grid grid-cols-2 gap-1.5 p-[clamp(0.55rem,0.9vw,0.9rem)] opacity-70 transition-transform duration-500 group-hover:scale-[1.035] group-data-[focused=true]:scale-[1.035] motion-reduce:transition-none">
+                    {libraryPreviewGames.map((game) => (
+                      <span key={game.id} className="min-h-0 overflow-hidden rounded-[0.45rem] bg-white/5">
+                        <GameImage
+                          gameId={game.id}
+                          name={game.name}
+                          orientation="vertical"
+                          fit="cover"
+                          className="h-full w-full object-cover"
+                        />
+                      </span>
+                    ))}
+                  </span>
+                  <span className="absolute inset-0 bg-gradient-to-t from-black via-black/18 to-black/5" />
+                  <span className="absolute inset-x-0 bottom-0 flex items-end justify-between gap-2 p-[clamp(0.55rem,0.9vw,0.9rem)]">
+                    <span className="min-w-0">
+                      <span className="block truncate text-[clamp(0.72rem,0.9vw,0.9rem)] font-bold text-white">
+                        {t('home.xmode.allGames')}
+                      </span>
+                      <span className="mt-0.5 block truncate text-[clamp(0.58rem,0.72vw,0.72rem)] text-white/58">
+                        {t('home.xmode.moreGames', { count: remainingGames.length })}
+                      </span>
+                    </span>
+                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-white/12 text-white">
+                      <LayoutGrid size={14} />
+                    </span>
+                  </span>
+                </motion.button>
+              </div>
+            </section>
+
+            <section className="mt-[clamp(1.4rem,3.4vh,2.4rem)] shrink-0 pb-1">
+              <h2 className="mb-[clamp(0.65rem,1.4vh,1rem)] text-[clamp(1rem,1.35vw,1.25rem)] font-bold tracking-wide text-white">
+                {t('home.xmode.featured')}
+              </h2>
+              <div
+                data-navigation-grid
+                data-grid-columns={2}
+                data-grid-exit-y="true"
+                className="xmode-feature-grid grid grid-cols-2 gap-[clamp(0.75rem,1.2vw,1.25rem)]"
+              >
+                <XModeWishlistDeals
+                  products={deals}
+                  onOpen={onOpenDeal}
+                  onOpenDeals={onOpenDeals}
+                  label={t('home.xmode.deal')}
+                  t={t}
+                />
+
+              {recommendationPool.length > 0 && (
+                <XModeLibraryRecommendations
+                  games={recommendationPool}
+                  onSelectGame={onSelectGame}
+                  onLaunchGame={onLaunchGame}
+                  onOpenLibrary={onOpenLibrary}
+                  recentGame={recentlyAddedGame}
+                  label={t('home.xmode.recommendation')}
+                  description={t('home.xmode.recommendationBody')}
+                  t={t}
+                />
+              )}
+              </div>
+            </section>
+          </>
+        ) : (
+          <div className="flex flex-1 items-center justify-center text-sm text-muted">
+            {libraryGames.length === 0 ? t('home.libraryLoading') : t('home.noInstalledGames')}
+          </div>
         )}
       </div>
     </div>
@@ -1623,20 +1927,416 @@ function FocusStat({
   )
 }
 
+function XModeLibraryRecommendations({
+  games,
+  onSelectGame,
+  onLaunchGame,
+  onOpenLibrary,
+  recentGame,
+  label,
+  description,
+  t
+}: {
+  games: LibraryGame[]
+  onSelectGame: (game: LibraryGame) => void
+  onLaunchGame: (game: LibraryGame) => void
+  onOpenLibrary: () => void
+  recentGame: LibraryGame | null
+  label: string
+  description: string
+  t: TFunction
+}): JSX.Element {
+  const reduceMotion = Boolean(useReducedMotion())
+  const progressRef = useRef<HTMLSpanElement>(null)
+  const focusedRef = useRef(false)
+  const hoveredRef = useRef(false)
+  const signature = games.map((game) => game.id).join('|')
+  const [recommendationIndex, setRecommendationIndex] = useState(() =>
+    games.length > 1 ? Math.floor(Math.random() * games.length) : 0
+  )
+
+  useEffect(() => {
+    setRecommendationIndex(games.length > 1 ? Math.floor(Math.random() * games.length) : 0)
+  }, [games.length, signature])
+
+  useEffect(() => {
+    const progress = progressRef.current
+    if (!progress) return undefined
+    progress.style.transform = 'scaleX(0)'
+    if (games.length <= 1) return undefined
+
+    let elapsedMs = 0
+    let previousTick = performance.now()
+    const timer = window.setInterval(() => {
+      const now = performance.now()
+      const deltaMs = Math.min(500, now - previousTick)
+      previousTick = now
+      if (document.hidden || focusedRef.current || hoveredRef.current) return
+
+      elapsedMs += deltaMs
+      if (elapsedMs >= XMODE_RECOMMENDATION_ROTATION_MS) {
+        elapsedMs %= XMODE_RECOMMENDATION_ROTATION_MS
+        setRecommendationIndex((current) => nextRandomIndex(current, games.length))
+      }
+      progress.style.transform = `scaleX(${elapsedMs / XMODE_RECOMMENDATION_ROTATION_MS})`
+    }, 100)
+
+    return () => window.clearInterval(timer)
+  }, [games.length, signature])
+
+  const recommendation =
+    games[recommendationIndex % Math.max(games.length, 1)] ?? recentGame ?? null
+
+  return (
+    <div
+      data-xmode-recommendation-card
+      onMouseEnter={() => {
+        hoveredRef.current = true
+      }}
+      onMouseLeave={() => {
+        hoveredRef.current = false
+      }}
+      onFocusCapture={() => {
+        focusedRef.current = true
+      }}
+      onBlurCapture={(event) => {
+        const next = event.relatedTarget
+        if (!(next instanceof Node) || !event.currentTarget.contains(next)) {
+          focusedRef.current = false
+        }
+      }}
+      className="xmode-recommendation-column grid h-full min-w-0 grid-rows-2 gap-[clamp(0.75rem,1.2vw,1.25rem)] text-left"
+    >
+      {recommendation && (
+        <motion.button
+          data-focusable
+          data-grid-index={1}
+          data-game-card="true"
+          data-game-id={recommendation.id}
+          data-xmode-recommendation-offer={recommendation.id}
+          type="button"
+          onFocus={() => onSelectGame(recommendation)}
+          onMouseEnter={() => onSelectGame(recommendation)}
+          onClick={() => onLaunchGame(recommendation)}
+          aria-label={`${label}: ${recommendation.name}`}
+          whileHover={reduceMotion ? undefined : { scale: 1.008 }}
+          whileFocus={reduceMotion ? undefined : { scale: 1.008 }}
+          transition={{ type: 'spring', stiffness: 380, damping: 30 }}
+          className="xmode-recommendation-offer group relative min-h-0 min-w-0 overflow-hidden rounded-xl2 border border-white/10 bg-black/35 text-left shadow-card outline-none"
+        >
+          <AnimatePresence initial={false} mode="wait">
+            <motion.span
+              key={recommendation.id}
+              initial={reduceMotion ? { opacity: 1 } : { opacity: 0, x: 28 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={reduceMotion ? { opacity: 0 } : { opacity: 0, x: -28 }}
+              transition={{ duration: reduceMotion ? 0 : 0.34, ease: [0.22, 1, 0.36, 1] }}
+              className="absolute inset-0"
+            >
+              <GameImage
+                gameId={recommendation.id}
+                name={recommendation.name}
+                orientation="horizontal"
+                fit="cover"
+                className="h-full w-full object-cover transition-transform duration-700 group-hover:scale-[1.035] group-data-[focused=true]:scale-[1.035] motion-reduce:transition-none"
+              />
+              <span className="absolute inset-0 bg-gradient-to-r from-black/88 via-black/34 to-black/8" />
+              <span className="absolute inset-0 bg-gradient-to-t from-black/82 via-transparent to-black/28" />
+              <span className="xmode-recommendation-info absolute inset-x-0 bottom-0 z-10 flex items-end justify-between gap-3 p-[clamp(1rem,1.7vw,1.5rem)]">
+                <span className="min-w-0 flex-1">
+                  <span className="line-clamp-2 text-[clamp(1.05rem,1.55vw,1.45rem)] font-bold leading-tight text-white drop-shadow-lg">
+                    {recommendation.name}
+                  </span>
+                  <span className="xmode-recommendation-meta mt-1.5 block truncate text-[10px] font-semibold uppercase tracking-wider text-white/58">
+                    {recommendation.provider} · {formatPlaytime(recommendation, t) ?? t('details.notPlayed')}
+                  </span>
+                </span>
+                <GameCardMenuHint size="compact" className="shrink-0" />
+              </span>
+            </motion.span>
+          </AnimatePresence>
+
+          <span className="pointer-events-none absolute left-[clamp(1rem,1.7vw,1.5rem)] top-[clamp(0.85rem,1.5vw,1.25rem)] z-20 min-w-0 rounded-lg bg-black/38 px-2.5 py-2 backdrop-blur-md">
+            <span className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.18em] text-accent">
+              <Shuffle size={12} />
+              {label}
+            </span>
+            <span className="xmode-recommendation-description mt-1 block truncate text-[10px] text-white/58">
+              {description}
+            </span>
+          </span>
+
+          {games.length > 1 && (
+            <span className="pointer-events-none absolute inset-x-[clamp(1rem,1.7vw,1.5rem)] bottom-2 z-30 h-1 overflow-hidden rounded-full bg-white/20 shadow-sm">
+              <span
+                ref={progressRef}
+                className="block h-full origin-left scale-x-0 rounded-full bg-white/90"
+              />
+            </span>
+          )}
+        </motion.button>
+      )}
+
+      {recentGame && (
+        <motion.button
+          data-focusable
+          data-grid-index={3}
+          data-game-card="true"
+          data-game-id={recentGame.id}
+          data-xmode-recently-added={recentGame.id}
+          type="button"
+          onFocus={() => onSelectGame(recentGame)}
+          onMouseEnter={() => onSelectGame(recentGame)}
+          onClick={() => (recentGame.installed ? onLaunchGame(recentGame) : onOpenLibrary())}
+          aria-label={`${t('home.xmode.recentlyAdded')}: ${recentGame.name}`}
+          whileHover={reduceMotion ? undefined : { scale: 1.008 }}
+          whileFocus={reduceMotion ? undefined : { scale: 1.008 }}
+          transition={{ type: 'spring', stiffness: 380, damping: 30 }}
+          className="xmode-recently-added-tile group relative min-h-0 min-w-0 overflow-hidden rounded-xl2 border border-white/10 bg-black/35 text-left shadow-card outline-none"
+        >
+          <GameImage
+            gameId={recentGame.id}
+            name={recentGame.name}
+            orientation="horizontal"
+            fit="cover"
+            className="h-full w-full object-cover transition-transform duration-700 group-hover:scale-[1.035] group-data-[focused=true]:scale-[1.035] motion-reduce:transition-none"
+          />
+          <span className="absolute inset-0 bg-gradient-to-r from-black/88 via-black/32 to-black/8" />
+          <span className="absolute inset-0 bg-gradient-to-t from-black/84 via-transparent to-black/28" />
+          <span className="pointer-events-none absolute left-[clamp(1rem,1.7vw,1.5rem)] top-[clamp(0.85rem,1.5vw,1.25rem)] z-20 rounded-lg bg-black/38 px-2.5 py-2 backdrop-blur-md">
+            <span className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.18em] text-accent">
+              <CalendarDays size={12} />
+              {t('home.xmode.recentlyAdded')}
+            </span>
+          </span>
+          <span className="xmode-recently-added-info absolute inset-x-0 bottom-0 z-10 flex items-end justify-between gap-3 p-[clamp(1rem,1.7vw,1.5rem)]">
+            <span className="min-w-0 flex-1">
+              <span className="line-clamp-2 text-[clamp(1.05rem,1.55vw,1.45rem)] font-bold leading-tight text-white drop-shadow-lg">
+                {recentGame.name}
+              </span>
+              <span className="mt-1.5 block truncate text-[10px] font-semibold uppercase tracking-wider text-white/58">
+                {recentGame.provider} · {t('home.xmode.recentlyAddedBody')}
+              </span>
+            </span>
+            {recentGame.installed ? (
+              <GameCardMenuHint size="compact" className="shrink-0" />
+            ) : (
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-white/14 text-white backdrop-blur-md">
+                <LayoutGrid size={14} />
+              </span>
+            )}
+          </span>
+        </motion.button>
+      )}
+    </div>
+  )
+}
+
+function XModeWishlistDeals({
+  products,
+  onOpen,
+  onOpenDeals,
+  label,
+  t
+}: {
+  products: StoreProduct[]
+  onOpen: (product: StoreProduct) => void
+  onOpenDeals: () => void
+  label: string
+  t: TFunction
+}): JSX.Element {
+  const reduceMotion = Boolean(useReducedMotion())
+  const progressRef = useRef<HTMLDivElement>(null)
+  const focusedRef = useRef(false)
+  const hoveredRef = useRef(false)
+  const signature = products.map((product) => product.id).join('|')
+  const pageCount = Math.max(1, Math.ceil(products.length / 2))
+  const [pageIndex, setPageIndex] = useState(0)
+
+  useEffect(() => setPageIndex(0), [signature])
+
+  useEffect(() => {
+    const progress = progressRef.current
+    if (!progress) return undefined
+    progress.style.transform = 'scaleX(0)'
+    if (pageCount <= 1) return undefined
+
+    let elapsedMs = 0
+    let previousTick = performance.now()
+    const timer = window.setInterval(() => {
+      const now = performance.now()
+      const deltaMs = Math.min(500, now - previousTick)
+      previousTick = now
+      if (document.hidden || focusedRef.current || hoveredRef.current) return
+
+      elapsedMs += deltaMs
+      if (elapsedMs >= WISHLIST_ROTATION_MS) {
+        elapsedMs %= WISHLIST_ROTATION_MS
+        setPageIndex((current) => (current + 1) % pageCount)
+      }
+      progress.style.transform = `scaleX(${elapsedMs / WISHLIST_ROTATION_MS})`
+    }, 100)
+
+    return () => window.clearInterval(timer)
+  }, [pageCount, signature])
+
+  const normalizedPageIndex = pageIndex % pageCount
+  const pairStart = products.length > 0 ? (normalizedPageIndex * 2) % products.length : 0
+  const visibleProducts =
+    products.length === 0
+      ? []
+      : products.length === 1
+      ? [products[0]]
+      : [products[pairStart], products[(pairStart + 1) % products.length]]
+
+  if (visibleProducts.length === 0) {
+    return (
+      <motion.button
+        data-focusable
+        data-grid-index={0}
+        type="button"
+        onClick={onOpenDeals}
+        whileHover={reduceMotion ? undefined : { scale: 1.008 }}
+        whileFocus={reduceMotion ? undefined : { scale: 1.008 }}
+        transition={{ type: 'spring', stiffness: 380, damping: 30 }}
+        className="group relative h-full min-h-0 min-w-0 overflow-hidden rounded-xl2 border border-white/10 bg-black/38 p-[clamp(1.25rem,2vw,2rem)] text-left shadow-card outline-none backdrop-blur-xl"
+      >
+        <span className="absolute inset-0 bg-[radial-gradient(circle_at_18%_18%,rgb(var(--color-accent)/0.28),transparent_42%),linear-gradient(145deg,transparent,rgb(var(--color-accent-2)/0.16))]" />
+        <span className="relative flex h-full flex-col justify-end">
+          <Heart size={26} className="mb-auto text-accent" />
+          <span className="text-[clamp(1.2rem,2vw,1.8rem)] font-bold text-white">
+            {t('home.xmode.dealEmpty')}
+          </span>
+          <span className="mt-1.5 max-w-lg text-sm leading-relaxed text-white/60">
+            {t('home.xmode.dealEmptyBody')}
+          </span>
+        </span>
+      </motion.button>
+    )
+  }
+
+  return (
+    <div
+      data-xmode-wishlist-card
+      onMouseEnter={() => {
+        hoveredRef.current = true
+      }}
+      onMouseLeave={() => {
+        hoveredRef.current = false
+      }}
+      onFocusCapture={() => {
+        focusedRef.current = true
+      }}
+      onBlurCapture={(event) => {
+        const next = event.relatedTarget
+        if (!(next instanceof Node) || !event.currentTarget.contains(next)) {
+          focusedRef.current = false
+        }
+      }}
+      className="xmode-wishlist-stack relative h-full min-w-0 text-left"
+    >
+      <AnimatePresence initial={false} mode="wait">
+        <motion.div
+          key={visibleProducts.map((product) => product.id).join(':')}
+          initial={reduceMotion ? { opacity: 1 } : { opacity: 0, x: 28 }}
+          animate={{ opacity: 1, x: 0 }}
+          exit={reduceMotion ? { opacity: 0 } : { opacity: 0, x: -28 }}
+          transition={{ duration: reduceMotion ? 0 : 0.34, ease: [0.22, 1, 0.36, 1] }}
+          style={{
+            gridTemplateRows: `repeat(${visibleProducts.length}, minmax(0, 1fr))`
+          }}
+          className="absolute inset-0 grid gap-[clamp(0.75rem,1.2vw,1.25rem)]"
+        >
+          {visibleProducts.map((product, index) => {
+            const offer = product.bestOffer
+            return (
+              <motion.button
+                key={`${product.id}:${index}`}
+                data-focusable
+                data-grid-index={index * 2}
+                data-home-wishlist-offer={product.id}
+                type="button"
+                onClick={() => onOpen(product)}
+                aria-label={`${label}: ${product.name}, ${offer?.formattedPrice ?? t('store.checkPrice')}`}
+                whileHover={reduceMotion ? undefined : { scale: 1.012 }}
+                whileFocus={reduceMotion ? undefined : { scale: 1.012 }}
+                transition={{ type: 'spring', stiffness: 380, damping: 30 }}
+                className="xmode-wishlist-offer group relative min-h-0 min-w-0 overflow-hidden rounded-xl2 border border-white/10 bg-black/35 text-left shadow-card outline-none"
+              >
+                <WishlistArtwork product={product} />
+                <span className="absolute inset-0 bg-gradient-to-t from-black/94 via-black/20 to-black/30" />
+                <span className="absolute inset-0 bg-gradient-to-r from-black/72 via-black/18 to-transparent" />
+                <span className="xmode-deal-header pointer-events-none absolute inset-x-0 top-0 z-20 flex items-center justify-between gap-3 p-[clamp(0.65rem,1vw,0.9rem)]">
+                  <span className="flex items-center gap-2 text-[9px] font-bold uppercase tracking-[0.17em] text-accent">
+                    <Heart size={11} fill="currentColor" />
+                    {label}
+                  </span>
+                  {index === 0 && pageCount > 1 && (
+                    <span className="rounded-full bg-black/45 px-2 py-1 text-[9px] font-semibold text-white/65 backdrop-blur-md">
+                      {normalizedPageIndex + 1}/{pageCount}
+                    </span>
+                  )}
+                </span>
+                <span className="xmode-deal-info absolute inset-x-0 bottom-0 z-10 flex items-end justify-between gap-3 p-[clamp(0.7rem,1.2vw,1.05rem)]">
+                  <span className="min-w-0 flex-1">
+                    {(offer?.discountPercent ?? 0) > 0 && (
+                      <span className="xmode-deal-discount mb-1 inline-flex rounded-md bg-emerald-400 px-1.5 py-0.5 text-[9px] font-black text-black">
+                        -{offer?.discountPercent}%
+                      </span>
+                    )}
+                    <span className="line-clamp-2 text-[clamp(1rem,1.45vw,1.35rem)] font-bold leading-tight text-white drop-shadow-lg">
+                      {product.name}
+                    </span>
+                    <span className="xmode-deal-price mt-1.5 flex min-w-0 items-end gap-2">
+                      <span className="min-w-0">
+                        <span className="xmode-deal-source block truncate text-[9px] uppercase tracking-wider text-white/45">
+                          {offer?.sourceLabel ?? t('store.bestPrice')}
+                        </span>
+                        <span className="mt-0.5 block text-[clamp(1rem,1.4vw,1.3rem)] font-black text-white">
+                          {offer?.formattedPrice ?? t('store.checkPrice')}
+                        </span>
+                      </span>
+                    </span>
+                  </span>
+                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent text-black shadow-lg">
+                    <ExternalLink size={13} />
+                  </span>
+                </span>
+              </motion.button>
+            )
+          })}
+        </motion.div>
+      </AnimatePresence>
+
+      {pageCount > 1 && (
+        <div className="pointer-events-none absolute bottom-3 left-1/2 z-30 h-1 w-[clamp(6rem,16vw,12rem)] -translate-x-1/2 overflow-hidden rounded-full bg-white/20 shadow-sm">
+          <div
+            ref={progressRef}
+            className="h-full origin-left scale-x-0 rounded-full bg-white/90"
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
 function WishlistOfferBanner({
   product,
   index,
   total,
   onOpen,
+  eyebrow,
   t
 }: {
   product: StoreProduct
   index: number
   total: number
   onOpen: () => void
+  eyebrow?: string
   t: ReturnType<typeof useT>
 }): JSX.Element {
   const offer = product.bestOffer
+  const label = eyebrow ?? t('home.wishlistOffer')
   const progressRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -1656,7 +2356,7 @@ function WishlistOfferBanner({
       data-focusable
       data-home-wishlist-offer={product.id}
       onClick={onOpen}
-      aria-label={`${t('home.wishlistOffer')}: ${product.name}, ${offer?.formattedPrice ?? t('store.checkPrice')}`}
+      aria-label={`${label}: ${product.name}, ${offer?.formattedPrice ?? t('store.checkPrice')}`}
       whileHover={{ scale: 1.012 }}
       whileFocus={{ scale: 1.012 }}
       transition={{ type: 'spring', stiffness: 360, damping: 30 }}
@@ -1678,11 +2378,13 @@ function WishlistOfferBanner({
             <div className="flex items-start justify-between gap-3">
               <p className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.18em] text-accent">
                 <Heart size={12} fill="currentColor" />
-                {t('home.wishlistOffer')}
+                {label}
               </p>
-              <span className="rounded-full bg-black/35 px-2 py-1 text-[10px] text-white/60">
-                {index + 1}/{total}
-              </span>
+              {total > 1 && (
+                <span className="rounded-full bg-black/35 px-2 py-1 text-[10px] text-white/60">
+                  {index + 1}/{total}
+                </span>
+              )}
             </div>
 
             <div>

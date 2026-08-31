@@ -13,13 +13,11 @@ import type {
   LauncherDownloadSnapshot
 } from '@shared/ipc'
 import {
-  clampLauncherProgress,
   orderedLauncherDownloads,
   shouldApplyLauncherDownloadSnapshot
 } from '@shared/launcherDownloads'
 import { useT } from '@renderer/i18n/useT'
 import type { TranslationKey } from '@renderer/i18n/translations'
-import { usePreferencesStore } from '@renderer/state/preferencesStore'
 
 const EMPTY_SNAPSHOT: LauncherDownloadSnapshot = {
   revision: -1,
@@ -35,19 +33,6 @@ const PHASE_KEYS: Record<LauncherDownloadPhase, TranslationKey> = {
   paused: 'downloads.phase.paused',
   completed: 'downloads.phase.completed',
   error: 'downloads.phase.error'
-}
-
-function formatTransferRate(bytesPerSecond: number, language: 'en' | 'de'): string {
-  const units = ['B', 'KB', 'MB', 'GB'] as const
-  let value = bytesPerSecond
-  let unitIndex = 0
-  while (value >= 1_000 && unitIndex < units.length - 1) {
-    value /= 1_000
-    unitIndex++
-  }
-  return `${new Intl.NumberFormat(language, {
-    maximumFractionDigits: value >= 10 || unitIndex === 0 ? 0 : 1
-  }).format(value)} ${units[unitIndex]}/s`
 }
 
 function PhaseIcon({
@@ -70,7 +55,6 @@ export function DownloadActivityIsland(): JSX.Element {
   const [snapshot, setSnapshot] = useState<LauncherDownloadSnapshot>(EMPTY_SNAPSHOT)
   const latestRevision = useRef(EMPTY_SNAPSHOT.revision)
   const reduceMotion = Boolean(useReducedMotion())
-  const language = usePreferencesStore((state) => state.language)
   const t = useT()
 
   useEffect(() => {
@@ -96,21 +80,16 @@ export function DownloadActivityIsland(): JSX.Element {
     [snapshot.activities]
   )
   const primary = activities[0]
-  const progress = clampLauncherProgress(primary?.progress)
-  const percentage = progress === undefined ? undefined : Math.round(progress * 100)
   const phaseLabel = primary
     ? primary.confidence === 'heuristic' && primary.phase === 'downloading'
       ? t('downloads.phase.detected')
       : t(PHASE_KEYS[primary.phase])
     : ''
-  const rate =
-    primary?.bytesPerSecond && primary.bytesPerSecond > 0
-      ? formatTransferRate(primary.bytesPerSecond, language)
-      : undefined
-  const progressLabel =
-    percentage !== undefined
-      ? `${primary?.confidence === 'exact' ? '' : '≈'}${percentage}%`
-      : rate ?? phaseLabel
+  const isActive =
+    primary !== undefined &&
+    primary.phase !== 'paused' &&
+    primary.phase !== 'completed' &&
+    primary.phase !== 'error'
   const liveStatus = primary
     ? `${primary.title}: ${phaseLabel}${
         activities.length > 1
@@ -134,18 +113,43 @@ export function DownloadActivityIsland(): JSX.Element {
         {primary && (
           <motion.section
             key="launcher-download-island"
-            initial={reduceMotion ? false : { height: 0, opacity: 0, y: -7 }}
-            animate={{ height: 32, opacity: 1, y: 0 }}
-            exit={reduceMotion ? { opacity: 0 } : { height: 0, opacity: 0, y: -5 }}
-            transition={{ duration: reduceMotion ? 0 : 0.28, ease: [0.22, 1, 0.36, 1] }}
-            aria-label={t('downloads.aria')}
-            className="glass pointer-events-none relative -mt-1 w-[22rem] max-w-[42vw] overflow-hidden rounded-b-2xl rounded-t-lg border-x border-b border-white/[0.09] shadow-[0_12px_32px_rgba(0,0,0,0.26)]"
+            initial={reduceMotion ? false : { maxWidth: 0, opacity: 0, scale: 0.78 }}
+            animate={{ maxWidth: 352, opacity: 1, scale: 1 }}
+            exit={
+              reduceMotion
+                ? { maxWidth: 0, opacity: 0 }
+                : { maxWidth: 0, opacity: 0, scale: 0.82 }
+            }
+            transition={
+              reduceMotion
+                ? { duration: 0 }
+                : {
+                    maxWidth: { type: 'spring', stiffness: 360, damping: 31, mass: 0.82 },
+                    opacity: { duration: 0.18 },
+                    scale: { type: 'spring', stiffness: 420, damping: 27, mass: 0.72 }
+                  }
+            }
+            aria-hidden="true"
+            className="pointer-events-none relative flex h-9 w-[min(22rem,36vw)] shrink-0 origin-center items-center overflow-hidden rounded-full"
           >
-            <div className="flex h-[29px] min-w-0 items-center gap-2 px-3 text-[11px]" aria-hidden="true">
-              <span className={`flex shrink-0 ${accentClass}`}>
+            <div className="relative flex h-8 w-full min-w-[11rem] items-center gap-2 overflow-hidden rounded-full bg-white/[0.065] px-3 text-[11px] shadow-[inset_0_0_0_1px_rgba(255,255,255,0.045)]">
+              <span
+                className={`relative flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-black/15 ${accentClass}`}
+              >
+                {primary.phase !== 'paused' && primary.phase !== 'error' && (
+                  <motion.span
+                    className="absolute inset-0 rounded-full border border-current/25"
+                    animate={
+                      reduceMotion
+                        ? undefined
+                        : { scale: [0.82, 1.3], opacity: [0.5, 0] }
+                    }
+                    transition={{ duration: 1.35, repeat: Infinity, ease: 'easeOut' }}
+                  />
+                )}
                 <PhaseIcon activity={primary} reduceMotion={reduceMotion} />
               </span>
-              <span className="shrink-0 font-semibold uppercase tracking-[0.12em] text-muted/80">
+              <span className="hidden shrink-0 font-semibold uppercase tracking-[0.12em] text-muted/80 min-[900px]:inline">
                 {primary.provider}
               </span>
               <span
@@ -159,54 +163,20 @@ export function DownloadActivityIsland(): JSX.Element {
                   +{activities.length - 1}
                 </span>
               )}
-              <span className={`shrink-0 font-semibold tabular-nums ${accentClass}`}>
-                {progressLabel}
+              <span
+                className={`flex h-5 w-5 shrink-0 items-center justify-center ${accentClass}`}
+                aria-label={phaseLabel}
+              >
+                {isActive ? (
+                  <LoaderCircle
+                    size={16}
+                    strokeWidth={2.4}
+                    className={reduceMotion ? '' : 'animate-spin'}
+                  />
+                ) : (
+                  <PhaseIcon activity={primary} reduceMotion={reduceMotion} />
+                )}
               </span>
-            </div>
-
-            <div
-              role="progressbar"
-              aria-label={`${primary.title}: ${phaseLabel}`}
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={percentage}
-              aria-valuetext={
-                percentage !== undefined && primary.confidence !== 'exact'
-                  ? `${phaseLabel}, ≈${percentage}%`
-                  : undefined
-              }
-              className="absolute inset-x-3 bottom-0 h-0.5 overflow-hidden rounded-full bg-white/10"
-            >
-              {progress !== undefined ? (
-                <motion.span
-                  className={`block h-full w-full origin-left rounded-full ${
-                    primary.phase === 'error' ? 'bg-amber-300' : 'bg-accent'
-                  }`}
-                  initial={false}
-                  animate={{ scaleX: progress }}
-                  transition={{
-                    duration: reduceMotion ? 0 : 0.35,
-                    ease: [0.22, 1, 0.36, 1]
-                  }}
-                />
-              ) : (
-                <motion.span
-                  className={`block h-full w-1/3 rounded-full ${
-                    primary.phase === 'paused' ? 'bg-muted/60' : 'bg-accent'
-                  }`}
-                  initial={false}
-                  animate={
-                    reduceMotion || primary.phase === 'paused'
-                      ? { x: '100%' }
-                      : { x: ['-110%', '310%'] }
-                  }
-                  transition={
-                    reduceMotion || primary.phase === 'paused'
-                      ? { duration: 0 }
-                      : { duration: 1.35, repeat: Infinity, ease: 'easeInOut' }
-                  }
-                />
-              )}
             </div>
           </motion.section>
         )}

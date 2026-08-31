@@ -18,10 +18,10 @@
 
 ORBIT is an Electron-based Windows launcher designed for handhelds, TVs and desktop PCs. It combines a focused game library with a living home screen, store offers and upcoming releases — all built around controller and keyboard navigation.
 
-- Steam, Epic Games, Xbox / Microsoft Store and custom local games
+- Steam, Epic Games, GOG, Xbox / Microsoft Store, PlayStation, EA app, Ubisoft Connect, retro systems and custom local games
 - Console-style spatial navigation with visible focus and gamepad support
-- Three Home layouts, including CoreSense recommendations and optional 3D card depth
-- Friends Hub with Steam, Epic and optional Discord presence
+- Four Home layouts, including the Xbox-inspired XMODE, CoreSense recommendations and optional 3D card depth
+- Friends Hub with Steam, Epic and optional Discord presence, conversations and notifications
 - Favorites, custom collections and adjustable 4–8-column library layouts
 - Live Steam, Epic Games and Xbox download/update activity
 - Release calendar, wishlist offers and regional store prices
@@ -46,6 +46,12 @@ ORBIT `0.1.1` is the current stable release. Download **`ORBIT-XboxMode-Setup-0.
 Run the setup from the Windows account that should own ORBIT and approve the administrator prompt. After installation, Windows opens **Settings > Gaming > Xbox mode** so ORBIT can be selected as the home app.
 
 > ORBIT currently uses a self-signed `CN=ORBIT Development` certificate. Windows can therefore show an unknown-publisher or SmartScreen warning. The setup trusts only the embedded public certificate in `LocalMachine\TrustedPeople`; it never installs a private key or adds the certificate to a Root store. Verify the SHA-256 hash and certificate thumbprint published in the release notes before installing.
+
+### Public beta
+
+ORBIT `0.1.2-beta.1` is available for community testing as a GitHub prerelease. Beta testers should download only **`ORBIT-Beta-XboxMode-Setup-0.1.2-beta.1-x64.exe`** from the [0.1.2 Beta 1 release](https://github.com/toonymak1993/orbit/releases/tag/v0.1.2-beta.1). It is the complete English all-in-one setup and follows the beta update channel; stable installations remain on the stable channel.
+
+This beta adds PlayStation, GOG, EA app, Ubisoft Connect and retro libraries, a controller-friendly Applications hub, Discord conversations, XMODE, one-click ORBIT Horizon desktop and lock-screen personalization, broader controller support and extensive Library, artwork, achievement and launch improvements. See the complete [0.1.2 Beta 1 testing notes](docs/releases/0.1.2-beta.1.md) before installing.
 
 ### Requirements
 
@@ -86,7 +92,7 @@ Create a production build with `npm run build`. Windows installer and Xbox Mode 
 
 ## Project status
 
-ORBIT `0.1.1` is the current stable public release. Integrations and packaging will continue to evolve as the launcher is tested across more PCs, handhelds and game libraries.
+ORBIT `0.1.1` is the current stable public release, with `0.1.2-beta.1` available separately for community testing. Integrations and packaging will continue to evolve as the launcher is tested across more PCs, handhelds and game libraries.
 
 ORBIT is an independent project and is not affiliated with Valve, Epic Games, Microsoft, Xbox or the publishers shown in screenshots.
 

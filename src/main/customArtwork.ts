@@ -8,6 +8,7 @@ import type { ImageOrientation, ResolvedImage } from '@shared/ipc'
 import { settingsStore } from './settingsStore'
 import { fetchWithElectronNet } from './networkFetch'
 import { isSteamGridDbAssetUrl } from './steamGridDb'
+import { isPublicSteamArtworkUrl } from './publicArtworkSearchPolicy'
 
 const CACHE_DIR = join(app.getPath('userData'), 'artwork-v2')
 const MAX_SOURCE_BYTES = 25 * 1024 * 1024
@@ -150,9 +151,9 @@ async function readResponseLimited(response: Response): Promise<Buffer> {
   const declaredSize = Number(response.headers.get('content-length'))
   if (Number.isFinite(declaredSize) && declaredSize > MAX_SOURCE_BYTES) {
     await response.body?.cancel().catch(() => undefined)
-    throw new Error('SteamGridDB artwork is too large')
+    throw new Error('Remote artwork is too large')
   }
-  if (!response.body) throw new Error('SteamGridDB artwork returned no data')
+  if (!response.body) throw new Error('Remote artwork returned no data')
 
   const reader = response.body.getReader()
   const chunks: Buffer[] = []
@@ -164,7 +165,7 @@ async function readResponseLimited(response: Response): Promise<Buffer> {
       totalBytes += value.byteLength
       if (totalBytes > MAX_SOURCE_BYTES) {
         await reader.cancel().catch(() => undefined)
-        throw new Error('SteamGridDB artwork is too large')
+        throw new Error('Remote artwork is too large')
       }
       chunks.push(Buffer.from(value))
     }
@@ -270,30 +271,58 @@ class CustomArtworkService {
     sourceUrl: string,
     orientation: Exclude<CustomArtworkOrientation, 'icon'> = 'vertical'
   ): Promise<ResolvedImage> {
-    if (!isSteamGridDbAssetUrl(sourceUrl)) {
-      throw new Error('SteamGridDB returned an unsupported artwork URL')
-    }
+    return this.applyRemote(
+      gameId,
+      sourceUrl,
+      orientation,
+      isSteamGridDbAssetUrl,
+      'SteamGridDB artwork'
+    )
+  }
+
+  async applyPublicSteam(
+    gameId: string,
+    sourceUrl: string,
+    orientation: Exclude<CustomArtworkOrientation, 'icon'> = 'vertical'
+  ): Promise<ResolvedImage> {
+    return this.applyRemote(
+      gameId,
+      sourceUrl,
+      orientation,
+      isPublicSteamArtworkUrl,
+      'Steam Store artwork'
+    )
+  }
+
+  private async applyRemote(
+    gameId: string,
+    sourceUrl: string,
+    orientation: Exclude<CustomArtworkOrientation, 'icon'>,
+    isAllowedUrl: (value: string) => boolean,
+    context: string
+  ): Promise<ResolvedImage> {
+    if (!isAllowedUrl(sourceUrl)) throw new Error(`${context} has an unsupported URL`)
     const response = await fetchWithElectronNet(sourceUrl, {
       signal: AbortSignal.timeout(REMOTE_TIMEOUT_MS)
     })
-    if (response.url && !isSteamGridDbAssetUrl(response.url)) {
+    if (response.url && !isAllowedUrl(response.url)) {
       await response.body?.cancel().catch(() => undefined)
-      throw new Error('SteamGridDB artwork redirected to an unsupported URL')
+      throw new Error(`${context} redirected to an unsupported URL`)
     }
     if (!response.ok) {
       await response.body?.cancel().catch(() => undefined)
-      throw new Error(`SteamGridDB artwork download failed (${response.status})`)
+      throw new Error(`${context} download failed (${response.status})`)
     }
     const contentType = response.headers.get('content-type')?.toLowerCase()
     if (contentType && !contentType.startsWith('image/')) {
       await response.body?.cancel().catch(() => undefined)
-      throw new Error('SteamGridDB returned a non-image response')
+      throw new Error(`${context} returned a non-image response`)
     }
     const source = await readResponseLimited(response)
     return this.persistArtwork(
       gameId,
       orientation,
-      prepareArtwork(source, 'SteamGridDB artwork', orientation)
+      prepareArtwork(source, context, orientation)
     )
   }
 

@@ -22,10 +22,29 @@ $installerPath = Join-Path $releaseDir "$installerPrefix-$displayVersion-x64.exe
 $applicationPath = Join-Path $releaseDir 'win-unpacked\ORBIT.exe'
 $packagedManifestPath = Join-Path $releaseDir 'win-unpacked\resources\release-manifest.json'
 $certificateMetadataPath = Join-Path $repoRoot '.certificates\orbit-development.json'
+$legalDocumentNames = @('LICENSE', 'LICENSE_EXCEPTION.md', 'THIRD_PARTY_NOTICES.md')
+$packagedLegalDocumentPaths = @($legalDocumentNames | ForEach-Object {
+  Join-Path $releaseDir "win-unpacked\resources\$_"
+})
 
-foreach ($requiredPath in @($installerPath, $applicationPath, $packagedManifestPath, $certificateMetadataPath)) {
+foreach ($requiredPath in @(
+  $installerPath,
+  $applicationPath,
+  $packagedManifestPath,
+  $certificateMetadataPath
+) + @($legalDocumentNames | ForEach-Object { Join-Path $repoRoot $_ }) + $packagedLegalDocumentPaths) {
   if (!(Test-Path -LiteralPath $requiredPath)) {
     throw "Missing release artifact: $requiredPath"
+  }
+}
+
+foreach ($legalDocumentName in $legalDocumentNames) {
+  $sourcePath = Join-Path $repoRoot $legalDocumentName
+  $packagedPath = Join-Path $releaseDir "win-unpacked\resources\$legalDocumentName"
+  $sourceHash = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash
+  $packagedHash = (Get-FileHash -LiteralPath $packagedPath -Algorithm SHA256).Hash
+  if ($sourceHash -cne $packagedHash) {
+    throw "Packaged legal document does not match the repository source: $legalDocumentName"
   }
 }
 

@@ -1,8 +1,19 @@
 export type NavDirection = 'up' | 'down' | 'left' | 'right'
 export const HOME_SHOW_BANNERS_EVENT = 'orbit:home-show-banners'
 
+function getActiveFocusScope(): HTMLElement | null {
+  const scopes = Array.from(
+    document.querySelectorAll<HTMLElement>('[data-focus-scope="active"]')
+  )
+  return (
+    scopes
+      .reverse()
+      .find((scope) => scope.offsetParent !== null && !scope.closest('[inert]')) ?? null
+  )
+}
+
 export function getFocusableElements(): HTMLElement[] {
-  const activeScope = document.querySelector<HTMLElement>('[data-focus-scope="active"]')
+  const activeScope = getActiveFocusScope()
   const root: ParentNode = activeScope ?? document
   return Array.from(
     root.querySelectorAll<HTMLElement>('[data-focusable]:not([data-disabled="true"])')
@@ -18,6 +29,9 @@ export function findNextFocus(
   current: HTMLElement,
   direction: NavDirection
 ): HTMLElement | null {
+  const applicationTarget = findApplicationTarget(current, direction)
+  if (applicationTarget !== undefined) return applicationTarget
+
   const coreSenseTarget = findCoreSenseTarget(current, direction)
   if (coreSenseTarget) return coreSenseTarget
 
@@ -47,6 +61,97 @@ export function findNextFocus(
   }
 
   return findNearestCandidate(current, direction, getFocusableElements())
+}
+
+interface ApplicationNavigationItem {
+  element: HTMLElement
+  rect: DOMRect
+  centerX: number
+  centerY: number
+}
+
+interface ApplicationNavigationRow {
+  centerY: number
+  items: ApplicationNavigationItem[]
+}
+
+/**
+ * Applications is a vertically scrolling console shelf. Its cards form a
+ * deliberate matrix, so navigation must not leak into the floating top bar or
+ * skip an incomplete row just because another card is closer geometrically.
+ */
+function findApplicationTarget(
+  current: HTMLElement,
+  direction: NavDirection
+): HTMLElement | null | undefined {
+  const pane = document.querySelector<HTMLElement>('[data-view-pane="applications"]:not([inert])')
+  if (!pane || pane.getAttribute('aria-hidden') === 'true') return undefined
+
+  const items = getFocusableElements()
+    .filter(
+      (candidate) =>
+        pane.contains(candidate) && candidate.hasAttribute('data-application-nav-item')
+    )
+    .map((element): ApplicationNavigationItem => {
+      const rect = element.getBoundingClientRect()
+      return {
+        element,
+        rect,
+        centerX: centerX(rect),
+        centerY: centerY(rect)
+      }
+    })
+
+  if (direction === 'down' && current.closest('[data-top-nav]')) {
+    return (
+      items.find((item) => item.element.dataset.applicationLastFocus === 'true')?.element ??
+      items.find((item) => item.element.dataset.viewEntry === 'true')?.element ??
+      items[0]?.element ??
+      null
+    )
+  }
+  if (!current.hasAttribute('data-application-nav-item')) return undefined
+
+  const rows = applicationNavigationRows(items)
+  const rowIndex = rows.findIndex((row) => row.items.some((item) => item.element === current))
+  if (rowIndex < 0) return null
+  const row = rows[rowIndex]
+  const itemIndex = row.items.findIndex((item) => item.element === current)
+  if (itemIndex < 0) return null
+
+  if (direction === 'left' || direction === 'right') {
+    return row.items[itemIndex + (direction === 'right' ? 1 : -1)]?.element ?? null
+  }
+
+  const targetRow = rows[rowIndex + (direction === 'down' ? 1 : -1)]
+  if (!targetRow) return null
+  const currentX = row.items[itemIndex].centerX
+  return [...targetRow.items].sort(
+    (left, right) =>
+      Math.abs(left.centerX - currentX) - Math.abs(right.centerX - currentX) ||
+      left.centerX - right.centerX
+  )[0]?.element ?? null
+}
+
+function applicationNavigationRows(
+  items: ApplicationNavigationItem[]
+): ApplicationNavigationRow[] {
+  const rows: ApplicationNavigationRow[] = []
+  const sortedItems = [...items].sort(
+    (left, right) => left.centerY - right.centerY || left.centerX - right.centerX
+  )
+  for (const item of sortedItems) {
+    const row = rows.at(-1)
+    const tolerance = Math.max(10, item.rect.height * 0.32)
+    if (!row || Math.abs(row.centerY - item.centerY) > tolerance) {
+      rows.push({ centerY: item.centerY, items: [item] })
+      continue
+    }
+    row.items.push(item)
+    row.centerY = row.items.reduce((sum, candidate) => sum + candidate.centerY, 0) / row.items.length
+  }
+  for (const row of rows) row.items.sort((left, right) => left.centerX - right.centerX)
+  return rows
 }
 
 /**
@@ -269,14 +374,23 @@ function centerY(rect: NavigationRect): number {
   return (rect.top + rect.bottom) / 2
 }
 
-export function focusElement(el: HTMLElement | null): void {
+export function focusElement(
+  el: HTMLElement | null,
+  options: { ensureVisible?: boolean } = {}
+): void {
   if (!el) return
   document
     .querySelectorAll('[data-focused="true"]')
     .forEach((n) => n.removeAttribute('data-focused'))
   el.setAttribute('data-focused', 'true')
+  if (el.hasAttribute('data-application-nav-item')) {
+    document
+      .querySelectorAll('[data-application-last-focus="true"]')
+      .forEach((node) => node.removeAttribute('data-application-last-focus'))
+    el.setAttribute('data-application-last-focus', 'true')
+  }
   el.focus({ preventScroll: true })
-  ensureFocusedElementVisible(el)
+  if (options.ensureVisible !== false) ensureFocusedElementVisible(el)
 }
 
 interface ScrollAnimation {
@@ -392,7 +506,7 @@ function animateScrollTo(element: HTMLElement, targetTop: number, targetLeft: nu
 }
 
 export function focusFirstIn(container: ParentNode = document): void {
-  const activeScope = document.querySelector<HTMLElement>('[data-focus-scope="active"]')
+  const activeScope = getActiveFocusScope()
   const root = activeScope && container === document ? activeScope : container
   const el = root.querySelector<HTMLElement>('[data-focusable]:not([data-disabled="true"])')
   focusElement(el)

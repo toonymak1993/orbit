@@ -7,8 +7,12 @@ import type {
   LibrarySessionRecord,
   LibrarySnapshot,
   LocalGameBackupResult,
-  LocalGameConfig
+  LocalGameConfig,
+  RetroAchievementMatch,
+  RetroGameConfig,
+  RetroSystemId
 } from '@shared/ipc'
+import { RETRO_SYSTEMS } from '@shared/retroSystems'
 import { latestLibraryActivity, normalizeLibraryTimestamp } from '@shared/libraryTime'
 import { summarizeLibraryActivity } from '@shared/libraryActivity'
 import {
@@ -16,14 +20,16 @@ import {
   projectVisibleLibraryRecords,
   shouldPruneProviderRecord
 } from '@shared/libraryProjection'
+import { isAutomaticLibraryTitleAllowed } from '@shared/libraryContentPolicy'
 import type { LocalGameRecordInput } from '../customLibrary'
+import type { RetroGameRecordInput } from '../retro/retroLibrary'
 import {
   playtimeSecondsFrom,
   reconcileProviderPlaytime,
   validPlaytimeSeconds
 } from './playtimeTracking'
 
-const DATABASE_VERSION = 7
+const DATABASE_VERSION = 8
 const DEFAULT_PROFILE_ID = 'orbit-default'
 const STEAM_PROVIDER = 'steam' as const
 const SESSION_RETENTION_MS = 366 * 24 * 60 * 60 * 1_000
@@ -36,6 +42,8 @@ const KNOWN_PROVIDERS = new Set<GameProvider>([
   'epic',
   'gog',
   'xbox',
+  'playstation',
+  'retro',
   'ea',
   'ubisoft',
   'local'
@@ -213,6 +221,10 @@ function hasUsableName(name: unknown): name is string {
   return isUsableLibraryName(name)
 }
 
+function hasAllowedProviderName(provider: GameProvider, name: unknown): name is string {
+  return hasUsableName(name) && isAutomaticLibraryTitleAllowed(provider, name)
+}
+
 function validLocalLaunchArguments(value: unknown): value is string[] {
   if (!Array.isArray(value) || value.length > MAX_LOCAL_LAUNCH_ARGUMENTS) return false
   let totalLength = 0
@@ -267,6 +279,65 @@ function sanitizeLocalConfig(value: unknown): LocalGameConfig | undefined {
   }
 }
 
+const RETRO_SYSTEM_IDS = new Set<RetroSystemId>(RETRO_SYSTEMS.map((system) => system.id))
+const RETRO_ACHIEVEMENT_MATCHES = new Set<RetroAchievementMatch>([
+  'matched',
+  'unmatched',
+  'unavailable',
+  'not-configured',
+  'unsupported'
+])
+
+function optionalText(value: unknown, maximumLength = 4096): string | undefined {
+  return typeof value === 'string' && value.trim() && value.trim().length <= maximumLength
+    ? value.trim()
+    : undefined
+}
+
+function sanitizeRetroConfig(value: unknown): RetroGameConfig | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const candidate = value as Partial<RetroGameConfig>
+  const romPath = optionalText(candidate.romPath, 32_768)
+  const sourceDirectory = optionalText(candidate.sourceDirectory, 32_768)
+  const systemName = optionalText(candidate.systemName, 120)
+  if (
+    !romPath ||
+    !sourceDirectory ||
+    !systemName ||
+    !candidate.systemId ||
+    !RETRO_SYSTEM_IDS.has(candidate.systemId) ||
+    !candidate.retroAchievementsMatch ||
+    !RETRO_ACHIEVEMENT_MATCHES.has(candidate.retroAchievementsMatch)
+  ) {
+    return undefined
+  }
+  const achievementGameId = Number(candidate.retroAchievementsGameId)
+  return {
+    romPath,
+    sourceDirectory,
+    systemId: candidate.systemId,
+    systemName,
+    emulatorId: optionalText(candidate.emulatorId, 80),
+    emulatorName: optionalText(candidate.emulatorName, 120),
+    emulatorPath: optionalText(candidate.emulatorPath, 32_768),
+    corePath: optionalText(candidate.corePath, 32_768),
+    launchArguments:
+      validLocalLaunchArguments(candidate.launchArguments) && candidate.launchArguments.length > 0
+        ? [...candidate.launchArguments]
+        : undefined,
+    retroAchievementsHash:
+      typeof candidate.retroAchievementsHash === 'string' &&
+      /^[a-f\d]{32}$/i.test(candidate.retroAchievementsHash)
+        ? candidate.retroAchievementsHash.toLocaleLowerCase('en-US')
+        : undefined,
+    retroAchievementsGameId:
+      Number.isInteger(achievementGameId) && achievementGameId > 0
+        ? achievementGameId
+        : undefined,
+    retroAchievementsMatch: candidate.retroAchievementsMatch
+  }
+}
+
 function migrateMetadata(candidate: StoredGameCandidate): GameMetadata {
   const legacy: GameMetadata = {
     summary: candidate.shortDescription,
@@ -296,8 +367,9 @@ function emptyAccount(): AccountLibrary {
 /**
  * Persistent, provider-neutral repository. Identity follows Playnite's rule:
  * library plugin/provider + provider game ID. Every import is an idempotent
- * upsert. Public snapshots preserve every durable provider identity; matching
- * titles are not proof that two licenses or editions are the same record.
+ * upsert. Storage preserves every durable provider identity; public snapshots
+ * suppress confirmed auxiliary content and provider-local exact-title aliases.
+ * Cross-provider licenses and differently named editions remain independent.
  */
 export class GameRepository {
   private profileOpen = false
@@ -369,6 +441,7 @@ export class GameRepository {
     return {
       games,
       providerGames,
+      excludedGames: [],
       recentGameIds,
       loadedAt: this.account.loadedAt,
       isLoadingMetadata: this.metadataLoadingProviders.size > 0,
@@ -424,6 +497,10 @@ export class GameRepository {
       if (!validProviderGameId(installed.providerGameId) || !hasUsableName(installed.name)) continue
       const rawProviderId = installed.providerGameId.trim()
       const id = providerGameId(provider, rawProviderId)
+      if (!hasAllowedProviderName(provider, installed.name)) {
+        delete this.account.games[id]
+        continue
+      }
       const existing = this.account.games[id]
       const currentMetadata = existing?.metadata ?? {}
       const nextMetadata = mergeDefinedMetadata(currentMetadata, installed.metadata ?? {})
@@ -563,6 +640,10 @@ export class GameRepository {
       const nextMetadata = mergeDefinedMetadata(currentMetadata, owned.metadata ?? {})
       const metadataChanged = !metadataEquals(currentMetadata, nextMetadata)
       const name = hasUsableName(owned.name) ? owned.name.trim() : (existing?.name ?? '')
+      if (hasUsableName(name) && !hasAllowedProviderName(provider, name)) {
+        delete this.account.games[id]
+        continue
+      }
       const playtime = reconcileProviderPlaytime(existing, playtimeSecondsFrom(owned))
       seen.add(id)
       this.account.games[id] = {
@@ -617,6 +698,13 @@ export class GameRepository {
     const now = Date.now()
     const name = hasUsableName(delta.name) ? delta.name.trim() : existing?.name
     if (!hasUsableName(name)) return false
+    if (!hasAllowedProviderName(provider, name)) {
+      if (!existing) return false
+      delete this.account.games[id]
+      this.rebuildRecentIds()
+      this.commit(now)
+      return true
+    }
 
     const currentMetadata = existing?.metadata ?? {}
     const nextMetadata = mergeDefinedMetadata(currentMetadata, delta.metadata)
@@ -661,6 +749,18 @@ export class GameRepository {
     if (!game) return false
     if (game.installed) game.owned = false
     else delete this.account.games[id]
+    this.rebuildRecentIds()
+    this.commit(Date.now())
+    return true
+  }
+
+  /** Removes content positively classified by its provider as a non-game. */
+  removeProviderContent(provider: GameProvider, rawProviderId: string): boolean {
+    this.ensureOpen()
+    if (!validProviderGameId(rawProviderId)) return false
+    const id = providerGameId(provider, rawProviderId.trim())
+    if (!this.account.games[id]) return false
+    delete this.account.games[id]
     this.rebuildRecentIds()
     this.commit(Date.now())
     return true
@@ -933,6 +1033,112 @@ export class GameRepository {
     return true
   }
 
+  updateRetroGameLaunchArguments(gameId: string, launchArguments: readonly string[]): boolean {
+    this.ensureOpen()
+    const game = this.account.games[gameId]
+    if (!game || game.provider !== 'retro' || !game.retro) return false
+
+    const now = Date.now()
+    game.retro = {
+      ...game.retro,
+      launchArguments: validatedLocalLaunchArguments(launchArguments)
+    }
+    game.updatedAt = now
+    this.commit(now)
+    return true
+  }
+
+  applyRetroLibraryDelta(
+    records: readonly RetroGameRecordInput[],
+    authoritativeRoots: readonly string[],
+    unavailableRoots: readonly string[]
+  ): void {
+    this.ensureOpen()
+    const now = Date.now()
+    const seen = new Set<string>()
+    const authoritative = new Set(
+      authoritativeRoots.map((root) => root.replace(/\\/g, '/').toLocaleLowerCase('en-US'))
+    )
+    const unavailable = new Set(
+      unavailableRoots.map((root) => root.replace(/\\/g, '/').toLocaleLowerCase('en-US'))
+    )
+
+    for (const input of records) {
+      if (!validProviderGameId(input.providerGameId) || !hasUsableName(input.name)) continue
+      const retro = sanitizeRetroConfig(input.retro)
+      if (!retro) continue
+      const id = providerGameId('retro', input.providerGameId.trim())
+      seen.add(id)
+      const existing = this.account.games[id]
+      const currentMetadata = existing?.metadata ?? {}
+      const metadata = mergeDefinedMetadata(currentMetadata, input.metadata)
+      const metadataChanged = !metadataEquals(currentMetadata, metadata)
+      const keepLaunchArguments =
+        existing?.provider === 'retro' &&
+        existing.retro?.emulatorId === retro.emulatorId &&
+        existing.retro?.emulatorPath === retro.emulatorPath
+          ? existing.retro?.launchArguments
+          : undefined
+      this.account.games[id] = {
+        ...existing,
+        id,
+        provider: 'retro',
+        providerGameId: input.providerGameId.trim(),
+        appId: undefined,
+        name: input.name.trim(),
+        metadata,
+        metadataRevision: (existing?.metadataRevision ?? 0) + (metadataChanged ? 1 : 0),
+        metadataUpdatedAt: metadataChanged ? now : existing?.metadataUpdatedAt,
+        metadataSource: retro.retroAchievementsGameId
+          ? 'retroachievements'
+          : 'orbit-retro-library',
+        installed: true,
+        installDir: input.installDir,
+        local: undefined,
+        retro: { ...retro, launchArguments: keepLaunchArguments },
+        owned: true,
+        ownershipSource: retro.sourceDirectory,
+        addedAt: existing?.addedAt ?? now,
+        updatedAt: now,
+        lastSeenInstalledAt: now
+      }
+    }
+
+    for (const [id, game] of Object.entries(this.account.games)) {
+      if (game.provider !== 'retro' || !game.retro) continue
+      const root = game.retro.sourceDirectory.replace(/\\/g, '/').toLocaleLowerCase('en-US')
+      if (authoritative.has(root) && !seen.has(id)) {
+        delete this.account.games[id]
+      } else if (unavailable.has(root) && game.installed) {
+        game.installed = false
+        game.updatedAt = now
+      }
+    }
+    this.rebuildRecentIds()
+    this.commit(now)
+  }
+
+  removeRetroSource(sourceDirectory: string): boolean {
+    this.ensureOpen()
+    const normalized = sourceDirectory.replace(/\\/g, '/').toLocaleLowerCase('en-US')
+    let changed = false
+    for (const [id, game] of Object.entries(this.account.games)) {
+      const source = game.retro?.sourceDirectory
+      if (
+        game.provider === 'retro' &&
+        source?.replace(/\\/g, '/').toLocaleLowerCase('en-US') === normalized
+      ) {
+        delete this.account.games[id]
+        changed = true
+      }
+    }
+    if (changed) {
+      this.rebuildRecentIds()
+      this.commit(Date.now())
+    }
+    return changed
+  }
+
   removeLocalGame(gameId: string): boolean {
     this.ensureOpen()
     const game = this.account.games[gameId]
@@ -984,8 +1190,8 @@ export class GameRepository {
     installableCount: number
   } {
     this.ensureOpen()
-    const games = Object.values(this.account.games).filter(
-      (game) => game.provider === provider && hasUsableName(game.name) && (game.owned || game.installed)
+    const games = projectVisibleLibraryRecords(
+      Object.values(this.account.games).filter((game) => game.provider === provider)
     )
     return {
       gameCount: games.length,
@@ -1021,6 +1227,8 @@ export class GameRepository {
       const appIdValue = Number(candidate.appId ?? (provider === STEAM_PROVIDER ? rawProviderId : NaN))
       const appId = Number.isInteger(appIdValue) && appIdValue > 0 ? appIdValue : undefined
       if (provider === STEAM_PROVIDER && !appId) continue
+      const name = typeof candidate.name === 'string' ? candidate.name.trim() : ''
+      if (hasUsableName(name) && !hasAllowedProviderName(provider, name)) continue
       const id = providerGameId(provider, rawProviderId)
       const existing = clean.games[id]
       if (existing && existing.updatedAt > (candidate.updatedAt ?? 0)) continue
@@ -1035,7 +1243,7 @@ export class GameRepository {
       const playtimeSeconds = playtimeSecondsFrom(candidate)
       const inferredProviderPlaytimeSeconds =
         validPlaytimeSeconds(candidate.providerPlaytimeSeconds) ??
-        (provider === 'steam' || provider === 'epic'
+        (provider === 'steam' || provider === 'epic' || provider === 'playstation'
           ? playtimeSeconds
           : undefined)
       clean.games[id] = {
@@ -1044,7 +1252,7 @@ export class GameRepository {
         provider,
         providerGameId: rawProviderId,
         appId,
-        name: typeof candidate.name === 'string' ? candidate.name.trim() : '',
+        name,
         metadata: migratedMetadata,
         metadataRevision:
           candidate.metadataRevision ?? (Object.keys(migratedMetadata).length > 0 ? 1 : 0),
@@ -1058,6 +1266,7 @@ export class GameRepository {
         installed: Boolean(candidate.installed),
         updateAvailable: Boolean(candidate.installed && candidate.updateAvailable),
         local: provider === 'local' ? sanitizeLocalConfig(candidate.local) : undefined,
+        retro: provider === 'retro' ? sanitizeRetroConfig(candidate.retro) : undefined,
         owned: Boolean(candidate.owned),
         ownershipSource:
           typeof candidate.ownershipSource === 'string' && candidate.ownershipSource.trim()

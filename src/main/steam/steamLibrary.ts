@@ -8,6 +8,7 @@ import type {
   LibrarySnapshot
 } from '@shared/ipc'
 import { canPruneSteamOwnedRecords, decideSteamSyncHealth } from '@shared/steamSyncPolicy'
+import { isConfirmedNonGameSteamAppType } from '@shared/libraryContentPolicy'
 import type { SteamAuthManager } from './steamAuth'
 import { settingsStore } from '../settingsStore'
 import { gameRepository } from '../library/gameRepository'
@@ -106,7 +107,11 @@ export class SteamLibraryService extends EventEmitter implements LibraryProvider
     steamMetadataService.on('updated', ({ metadata, allowCreate }: MetadataUpdate) => {
       const wasPending = this.pendingMetadataIds.has(metadata.appId)
       if (metadata.type !== 'game') {
+        const removed =
+          isConfirmedNonGameSteamAppType(metadata.type) &&
+          gameRepository.removeProviderContent('steam', String(metadata.appId))
         if (wasPending) this.resolvePendingMetadata(metadata.appId)
+        else if (removed) this.emitSnapshot()
         return
       }
       const changed = gameRepository.applyMetadataDelta(
@@ -443,6 +448,11 @@ export class SteamLibraryService extends EventEmitter implements LibraryProvider
     gameRepository.applyProviderActivityDelta('steam', localActivity)
     if (dynamicSourceAvailable) gameRepository.setRecentSteamAppIds(dynamicRecentIds)
 
+    // Revalidate retained records as well. This lets cached provider metadata
+    // purge DLC/tools left behind by an older or partial client-list sync.
+    for (const game of this.getSnapshot().providerGames) {
+      if (game.provider === 'steam' && game.appId) addMetadataTarget(game.appId, false)
+    }
     let metadataTargets: MetadataSyncTarget[] = [...metadataByAppId].map(
       ([appId, allowCreate]) => ({ appId, allowCreate })
     )

@@ -32,6 +32,24 @@ const getRelationships = library.func('Discord_Client_GetRelationships', 'void',
   koffi.pointer(handle),
   koffi.out(koffi.pointer(span))
 ])
+// Resolve the DM inbox exports as part of the pinned runtime contract. The
+// callback itself requires an authenticated Discord session.
+library.func('Discord_Client_GetUserMessageSummaries', 'void', [
+  koffi.pointer(handle),
+  'void *',
+  'void *',
+  'void *'
+])
+const messageSummary = koffi.struct('Orbit_Discord_VerifyMessageSummary', {
+  opaque: 'void *'
+})
+library.func('Discord_UserMessageSummary_UserId', 'uint64_t', [
+  koffi.pointer(messageSummary)
+])
+library.func('Discord_UserMessageSummary_LastMessageId', 'uint64_t', [
+  koffi.pointer(messageSummary)
+])
+library.func('Discord_UserMessageSummary_Drop', 'void', [koffi.pointer(messageSummary)])
 const free = library.func('Discord_Free', 'void', ['void *'])
 const major = library.func('Discord_Client_GetVersionMajor', 'int32_t', [])
 const minor = library.func('Discord_Client_GetVersionMinor', 'int32_t', [])

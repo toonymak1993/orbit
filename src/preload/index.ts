@@ -3,12 +3,21 @@ import { electronAPI } from '@electron-toolkit/preload'
 import {
   IPC,
   type AppControlAction,
+  type ApplicationLaunchResult,
   type AppUpdateSnapshot,
+  type ArtworkSearchOptions,
   type CustomGameCommitInput,
   type CustomGameDraft,
   type CustomGameImportSource,
   type CustomGameLaunchArgumentsInput,
   type CustomGameSaveSource,
+  type CustomApplicationCommitInput,
+  type CustomApplicationDraft,
+  type CustomApplicationUpdateInput,
+  type DiscordChatEvent,
+  type DiscordChatHistory,
+  type DiscordChatInbox,
+  type DiscordChatSendResult,
   type EpicLoginStatus,
   type FriendsProvider,
   type FriendsSnapshot,
@@ -20,14 +29,33 @@ import {
   type ImageUpdate,
   type LibrarySnapshot,
   type LibraryStats,
+  type MediaKeyboardOpenPayload,
+  type MediaKeyboardShortcut,
+  type MediaKeyboardUpdatePayload,
+  type MediaOverlayHintPayload,
   type LauncherDownloadSnapshot,
   type LocalGameBackupResult,
   type OrbitBackgroundServiceAction,
   type OrbitBackgroundServiceStatus,
+  type OrbitApplicationSnapshot,
   type OrbitSettings,
+  type OrbitWallpaperApplyResult,
+  type PlayStationAccount,
+  type PlayStationLoginStatus,
+  type PlayStationRemotePlayStatus,
   type ResolvedImage,
+  type RetroEmulatorDownloadInput,
+  type RetroEmulatorDownloadResult,
+  type RetroEmulatorInstallInput,
+  type RetroEmulatorInstallProgress,
+  type RetroEmulatorInstallResult,
+  type RetroAchievementsCredentialStatus,
+  type RetroLibraryResult,
+  type RetroLibraryStatus,
+  type RetroGameLaunchArgumentsInput,
+  type RetroSystemDirectoryResult,
+  type RetroSystemId,
   type SteamAccount,
-  type SteamGridDbArtworkOptions,
   type SteamLoginStatus,
   type StoreRegionId,
   type StoreSearchResponse,
@@ -48,6 +76,75 @@ const orbitApi = {
   profileAvatar: {
     getCustom: (): Promise<string | null> => ipcRenderer.invoke(IPC.profileAvatarGetCustom),
     selectCustom: (): Promise<string | null> => ipcRenderer.invoke(IPC.profileAvatarSelectCustom)
+  },
+  retroAchievements: {
+    credentials: {
+      get: (): Promise<RetroAchievementsCredentialStatus> =>
+        ipcRenderer.invoke(IPC.retroAchievementsCredentialGet),
+      set: (apiKey: string): Promise<RetroAchievementsCredentialStatus> =>
+        ipcRenderer.invoke(IPC.retroAchievementsCredentialSet, apiKey),
+      clear: (): Promise<RetroAchievementsCredentialStatus> =>
+        ipcRenderer.invoke(IPC.retroAchievementsCredentialClear)
+    }
+  },
+  startupVideo: {
+    get: (): Promise<string | null> => ipcRenderer.invoke(IPC.startupVideoGet),
+    select: (): Promise<string | null> => ipcRenderer.invoke(IPC.startupVideoSelect)
+  },
+  applications: {
+    get: (): Promise<OrbitApplicationSnapshot> => ipcRenderer.invoke(IPC.applicationsGet),
+    refresh: (): Promise<OrbitApplicationSnapshot> =>
+      ipcRenderer.invoke(IPC.applicationsRefresh),
+    launch: (applicationId: string): Promise<ApplicationLaunchResult> =>
+      ipcRenderer.invoke(IPC.applicationsLaunch, applicationId),
+    custom: {
+      select: (): Promise<CustomApplicationDraft | null> =>
+        ipcRenderer.invoke(IPC.customApplicationSelect),
+      commit: (input: CustomApplicationCommitInput): Promise<OrbitApplicationSnapshot> =>
+        ipcRenderer.invoke(IPC.customApplicationCommit, input),
+      update: (input: CustomApplicationUpdateInput): Promise<OrbitApplicationSnapshot> =>
+        ipcRenderer.invoke(IPC.customApplicationUpdate, input),
+      remove: (applicationId: string): Promise<OrbitApplicationSnapshot> =>
+        ipcRenderer.invoke(IPC.customApplicationRemove, applicationId),
+      cancel: (draftId: string): Promise<void> =>
+        ipcRenderer.invoke(IPC.customApplicationCancel, draftId)
+    }
+  },
+  mediaKeyboard: {
+    onOpen: (callback: (payload: MediaKeyboardOpenPayload) => void): (() => void) => {
+      const listener = (
+        _e: Electron.IpcRendererEvent,
+        payload: MediaKeyboardOpenPayload
+      ): void => callback(payload)
+      ipcRenderer.on(IPC.mediaKeyboardOpen, listener)
+      return () => ipcRenderer.removeListener(IPC.mediaKeyboardOpen, listener)
+    },
+    onShortcut: (callback: (shortcut: MediaKeyboardShortcut) => void): (() => void) => {
+      const listener = (
+        _e: Electron.IpcRendererEvent,
+        shortcut: MediaKeyboardShortcut
+      ): void => callback(shortcut)
+      ipcRenderer.on(IPC.mediaKeyboardShortcut, listener)
+      return () => ipcRenderer.removeListener(IPC.mediaKeyboardShortcut, listener)
+    },
+    onHintOpen: (callback: (payload: MediaOverlayHintPayload) => void): (() => void) => {
+      const listener = (
+        _e: Electron.IpcRendererEvent,
+        payload: MediaOverlayHintPayload
+      ): void => callback(payload)
+      ipcRenderer.on(IPC.mediaOverlayHintOpen, listener)
+      return () => ipcRenderer.removeListener(IPC.mediaOverlayHintOpen, listener)
+    },
+    onHintDismiss: (callback: (hintId: string) => void): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, hintId: string): void => callback(hintId)
+      ipcRenderer.on(IPC.mediaOverlayHintDismiss, listener)
+      return () => ipcRenderer.removeListener(IPC.mediaOverlayHintDismiss, listener)
+    },
+    update: (payload: MediaKeyboardUpdatePayload): void =>
+      ipcRenderer.send(IPC.mediaKeyboardUpdate, payload),
+    complete: (payload: MediaKeyboardUpdatePayload): void =>
+      ipcRenderer.send(IPC.mediaKeyboardComplete, payload),
+    close: (requestId: string): void => ipcRenderer.send(IPC.mediaKeyboardClose, requestId)
   },
   backgroundService: {
     getStatus: (): Promise<OrbitBackgroundServiceStatus> =>
@@ -103,6 +200,23 @@ const orbitApi = {
       return () => ipcRenderer.removeListener(IPC.epicLoginStatus, listener)
     }
   },
+  playstation: {
+    getAccount: (): Promise<PlayStationAccount | null> =>
+      ipcRenderer.invoke(IPC.playstationGetAccount),
+    startLogin: (): Promise<void> => ipcRenderer.invoke(IPC.playstationLoginStart),
+    cancelLogin: (): Promise<void> => ipcRenderer.invoke(IPC.playstationLoginCancel),
+    logout: (): Promise<void> => ipcRenderer.invoke(IPC.playstationLogout),
+    getRemotePlayStatus: (): Promise<PlayStationRemotePlayStatus> =>
+      ipcRenderer.invoke(IPC.playstationRemotePlayGet),
+    refreshRemotePlayStatus: (): Promise<PlayStationRemotePlayStatus> =>
+      ipcRenderer.invoke(IPC.playstationRemotePlayRefresh),
+    onStatus: (callback: (status: PlayStationLoginStatus) => void): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, status: PlayStationLoginStatus): void =>
+        callback(status)
+      ipcRenderer.on(IPC.playstationLoginStatus, listener)
+      return () => ipcRenderer.removeListener(IPC.playstationLoginStatus, listener)
+    }
+  },
   friends: {
     get: (): Promise<FriendsSnapshot> => ipcRenderer.invoke(IPC.friendsGet),
     refresh: (): Promise<FriendsSnapshot> => ipcRenderer.invoke(IPC.friendsRefresh),
@@ -119,10 +233,29 @@ const orbitApi = {
       return () => ipcRenderer.removeListener(IPC.friendsUpdated, listener)
     }
   },
+  discordChat: {
+    inbox: (): Promise<DiscordChatInbox> => ipcRenderer.invoke(IPC.discordChatInbox),
+    history: (userId: string, limit = 50): Promise<DiscordChatHistory> =>
+      ipcRenderer.invoke(IPC.discordChatHistory, userId, limit),
+    send: (userId: string, content: string): Promise<DiscordChatSendResult> =>
+      ipcRenderer.invoke(IPC.discordChatSend, userId, content),
+    setVisible: (showing: boolean): Promise<void> =>
+      ipcRenderer.invoke(IPC.discordChatSetVisible, showing),
+    onMessage: (callback: (event: DiscordChatEvent) => void): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, event: DiscordChatEvent): void =>
+        callback(event)
+      ipcRenderer.on(IPC.discordChatMessage, listener)
+      return () => ipcRenderer.removeListener(IPC.discordChatMessage, listener)
+    }
+  },
   library: {
     get: (): Promise<LibrarySnapshot> => ipcRenderer.invoke(IPC.libraryGet),
     stats: (): Promise<LibraryStats> => ipcRenderer.invoke(IPC.libraryStatsGet),
     refresh: (): Promise<LibrarySnapshot> => ipcRenderer.invoke(IPC.libraryRefresh),
+    exclude: (gameId: string): Promise<LibrarySnapshot> =>
+      ipcRenderer.invoke(IPC.libraryGameExclude, gameId),
+    restore: (gameId: string): Promise<LibrarySnapshot> =>
+      ipcRenderer.invoke(IPC.libraryGameRestore, gameId),
     custom: {
       beginImport: (source: CustomGameImportSource): Promise<CustomGameDraft | null> =>
         ipcRenderer.invoke(IPC.customGameBeginImport, source),
@@ -148,6 +281,40 @@ const orbitApi = {
       openBackups: (gameId: string): Promise<void> =>
         ipcRenderer.invoke(IPC.customGameOpenBackups, gameId)
     },
+    retro: {
+      getStatus: (): Promise<RetroLibraryStatus> =>
+        ipcRenderer.invoke(IPC.retroLibraryStatusGet),
+      refresh: (): Promise<RetroLibraryResult> =>
+        ipcRenderer.invoke(IPC.retroLibraryRefresh),
+      addDirectory: (): Promise<RetroLibraryResult | null> =>
+        ipcRenderer.invoke(IPC.retroLibraryDirectoryAdd),
+      removeDirectory: (directory: string): Promise<RetroLibraryResult> =>
+        ipcRenderer.invoke(IPC.retroLibraryDirectoryRemove, directory),
+      ensureSystemDirectory: (systemId: RetroSystemId): Promise<RetroSystemDirectoryResult> =>
+        ipcRenderer.invoke(IPC.retroSystemDirectoryEnsure, systemId),
+      openSystemDirectory: (systemId: RetroSystemId): Promise<RetroSystemDirectoryResult> =>
+        ipcRenderer.invoke(IPC.retroSystemDirectoryOpen, systemId),
+      openEmulatorDownload: (
+        input: RetroEmulatorDownloadInput
+      ): Promise<RetroEmulatorDownloadResult> =>
+        ipcRenderer.invoke(IPC.retroEmulatorDownloadOpen, input),
+      installEmulator: (input: RetroEmulatorInstallInput): Promise<RetroEmulatorInstallResult> =>
+        ipcRenderer.invoke(IPC.retroEmulatorInstall, input),
+      cancelEmulatorInstall: (): Promise<boolean> =>
+        ipcRenderer.invoke(IPC.retroEmulatorInstallCancel),
+      onInstallProgress: (
+        callback: (progress: RetroEmulatorInstallProgress) => void
+      ): (() => void) => {
+        const listener = (
+          _e: Electron.IpcRendererEvent,
+          progress: RetroEmulatorInstallProgress
+        ): void => callback(progress)
+        ipcRenderer.on(IPC.retroEmulatorInstallProgress, listener)
+        return () => ipcRenderer.removeListener(IPC.retroEmulatorInstallProgress, listener)
+      },
+      setLaunchArguments: (input: RetroGameLaunchArgumentsInput): Promise<LibrarySnapshot> =>
+        ipcRenderer.invoke(IPC.retroGameSetLaunchArguments, input)
+    },
     onUpdated: (callback: (snapshot: LibrarySnapshot) => void): (() => void) => {
       const listener = (_e: Electron.IpcRendererEvent, snapshot: LibrarySnapshot): void =>
         callback(snapshot)
@@ -169,6 +336,7 @@ const orbitApi = {
   game: {
     launch: (gameId: string): Promise<void> => ipcRenderer.invoke(IPC.gameLaunch, gameId),
     cancelLaunch: (): Promise<boolean> => ipcRenderer.invoke(IPC.gameLaunchCancel),
+    stopTracking: (): Promise<boolean> => ipcRenderer.invoke(IPC.gameTrackingStop),
     getLaunchStatus: (): Promise<GameLaunchStatus> => ipcRenderer.invoke(IPC.gameLaunchGet),
     revealLauncher: (): Promise<void> => ipcRenderer.invoke(IPC.gameLaunchRevealLauncher),
     onLaunchStatus: (callback: (status: GameLaunchStatus) => void): (() => void) => {
@@ -179,25 +347,29 @@ const orbitApi = {
     },
     resolveCompletionTimes: (gameId: string): Promise<GameCompletionTimes | null> =>
       ipcRenderer.invoke(IPC.gameCompletionTimesResolve, gameId),
-    resolveAchievements: (gameId: string): Promise<GameAchievementsSnapshot | null> =>
-      ipcRenderer.invoke(IPC.gameAchievementsResolve, gameId)
+    resolveAchievements: (
+      gameId: string,
+      force = false
+    ): Promise<GameAchievementsSnapshot | null> =>
+      ipcRenderer.invoke(IPC.gameAchievementsResolve, gameId, force),
+    syncAchievements: (): Promise<void> => ipcRenderer.invoke(IPC.gameAchievementsSync)
   },
   image: {
     resolve: (gameId: string, orientation: ImageOrientation): Promise<ResolvedImage | null> =>
       ipcRenderer.invoke(IPC.imageResolve, gameId, orientation),
-    listSteamGridDb: (
+    searchArtwork: (
       gameId: string,
       orientation: Exclude<ImageOrientation, 'icon'>,
       query?: string
-    ): Promise<SteamGridDbArtworkOptions> =>
-      ipcRenderer.invoke(IPC.imageSteamGridDbList, gameId, orientation, query),
-    applySteamGridDb: (
+    ): Promise<ArtworkSearchOptions> =>
+      ipcRenderer.invoke(IPC.imageArtworkSearchList, gameId, orientation, query),
+    applySearchedArtwork: (
       gameId: string,
-      artworkId: number,
+      artworkId: string,
       orientation: Exclude<ImageOrientation, 'icon'>,
       query?: string
     ): Promise<boolean> =>
-      ipcRenderer.invoke(IPC.imageSteamGridDbApply, gameId, artworkId, orientation, query),
+      ipcRenderer.invoke(IPC.imageArtworkSearchApply, gameId, artworkId, orientation, query),
     selectCustom: (
       gameId: string,
       orientation: ImageOrientation
@@ -257,6 +429,13 @@ const orbitApi = {
     }
   },
   system: {
+    wallpaper: {
+      applyOrbit: (): Promise<OrbitWallpaperApplyResult> =>
+        ipcRenderer.invoke(IPC.systemWallpaperApply)
+    },
+    keyboard: {
+      show: (): Promise<boolean> => ipcRenderer.invoke(IPC.systemKeyboardShow)
+    },
     status: {
       get: (): Promise<SystemStatusSnapshot> => ipcRenderer.invoke(IPC.systemStatusGet),
       refresh: (): Promise<SystemStatusSnapshot> => ipcRenderer.invoke(IPC.systemStatusRefresh),

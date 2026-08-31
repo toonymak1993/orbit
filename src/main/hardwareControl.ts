@@ -1,5 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
+import { unlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   type HardwareControlButton,
   type HardwareControlStatus,
@@ -189,6 +193,14 @@ const MONITOR_SCRIPT = [
   '}'
 ].join('\n')
 
+function removeMonitorScript(scriptPath: string): void {
+  void unlink(scriptPath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== 'ENOENT') {
+      console.warn('[hardware-control] could not remove controller monitor script:', error.message)
+    }
+  })
+}
+
 function settingsSignature(settings: HardwareControlSettings): string {
   return [
     settings.hardwareControlEnabled,
@@ -199,6 +211,8 @@ function settingsSignature(settings: HardwareControlSettings): string {
 
 export class HardwareControlWatcher extends EventEmitter {
   private monitor: ChildProcessWithoutNullStreams | null = null
+  private monitorScriptPath: string | null = null
+  private monitorGeneration = 0
   private settings: HardwareControlSettings
   private signature = ''
   private disposed = false
@@ -252,24 +266,86 @@ export class HardwareControlWatcher extends EventEmitter {
   }
 
   private startMonitor(): void {
+    const generation = this.monitorGeneration
     const holdMilliseconds = Math.round(this.settings.hardwareControlHoldSeconds * 1_000)
     const button = this.settings.hardwareControlButton
-    const script =
-      button === 'playstation'
-        ? createDualSenseMonitorScript(holdMilliseconds)
-        : MONITOR_SCRIPT.replace('__BUTTON_MASK__', String(BUTTON_INPUTS[button].buttonMask))
-            .replace('__TRIGGER_SIDE__', BUTTON_INPUTS[button].trigger)
-            .replace('__HOLD_MILLISECONDS__', String(holdMilliseconds))
     this.setStatus({ state: 'starting', connectedControllers: 0 })
+
+    if (button === 'playstation') {
+      void this.startDualSenseMonitor(createDualSenseMonitorScript(holdMilliseconds), generation)
+      return
+    }
+
+    const script = MONITOR_SCRIPT.replace(
+      '__BUTTON_MASK__',
+      String(BUTTON_INPUTS[button].buttonMask)
+    )
+      .replace('__TRIGGER_SIDE__', BUTTON_INPUTS[button].trigger)
+      .replace('__HOLD_MILLISECONDS__', String(holdMilliseconds))
+    const encoded = Buffer.from(script, 'utf16le').toString('base64')
+    this.launchMonitor(
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+      generation
+    )
+  }
+
+  private async startDualSenseMonitor(script: string, generation: number): Promise<void> {
+    const scriptPath = join(
+      tmpdir(),
+      `orbit-hardware-control-${process.pid}-${randomUUID()}.ps1`
+    )
+    try {
+      await writeFile(scriptPath, script, { encoding: 'utf8', flag: 'wx', mode: 0o600 })
+    } catch (error) {
+      removeMonitorScript(scriptPath)
+      if (this.disposed || generation !== this.monitorGeneration) return
+      console.warn(
+        '[hardware-control] could not prepare DualSense controller monitor:',
+        error instanceof Error ? error.message : error
+      )
+      this.setStatus({
+        state: 'unavailable',
+        connectedControllers: 0,
+        reason: 'monitor-failed'
+      })
+      return
+    }
+
+    if (this.disposed || generation !== this.monitorGeneration) {
+      removeMonitorScript(scriptPath)
+      return
+    }
+
+    this.launchMonitor(
+      [
+        '-NoLogo',
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        scriptPath
+      ],
+      generation,
+      scriptPath
+    )
+  }
+
+  private launchMonitor(args: string[], generation: number, scriptPath?: string): void {
+    if (this.disposed || generation !== this.monitorGeneration) {
+      if (scriptPath) removeMonitorScript(scriptPath)
+      return
+    }
 
     let child: ChildProcessWithoutNullStreams
     try {
-      child = spawn(
-        'powershell.exe',
-        ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '-'],
-        { windowsHide: true }
+      child = spawn('powershell.exe', args, { windowsHide: true })
+    } catch (error) {
+      if (scriptPath) removeMonitorScript(scriptPath)
+      console.warn(
+        '[hardware-control] controller monitor failed to start:',
+        error instanceof Error ? error.message : error
       )
-    } catch {
       this.setStatus({
         state: 'unavailable',
         connectedControllers: 0,
@@ -279,6 +355,7 @@ export class HardwareControlWatcher extends EventEmitter {
     }
 
     this.monitor = child
+    this.monitorScriptPath = scriptPath ?? null
     child.stdout.setEncoding('utf8')
     let stdoutBuffer = ''
 
@@ -292,12 +369,17 @@ export class HardwareControlWatcher extends EventEmitter {
     child.stderr.setEncoding('utf8')
     child.stderr.on('data', (chunk: string) => {
       const message = chunk.trim()
-      if (message) console.warn('[hardware-control] controller monitor:', message)
+      if (message && message !== '#< CLIXML') {
+        console.warn('[hardware-control] controller monitor:', message)
+      }
     })
 
-    child.once('error', () => {
+    child.once('error', (error) => {
+      if (scriptPath) removeMonitorScript(scriptPath)
       if (this.monitor !== child) return
       this.monitor = null
+      this.monitorScriptPath = null
+      console.warn('[hardware-control] controller monitor failed to start:', error.message)
       this.setStatus({
         state: 'unavailable',
         connectedControllers: 0,
@@ -305,27 +387,31 @@ export class HardwareControlWatcher extends EventEmitter {
       })
     })
 
-    child.once('exit', () => {
+    child.once('exit', (code, signal) => {
+      if (scriptPath) removeMonitorScript(scriptPath)
       if (this.monitor !== child) return
       this.monitor = null
+      this.monitorScriptPath = null
       if (this.disposed || !this.settings.hardwareControlEnabled) return
+      console.warn(
+        `[hardware-control] controller monitor exited (code ${code ?? 'none'}, signal ${signal ?? 'none'})`
+      )
       this.setStatus({
         state: 'unavailable',
         connectedControllers: 0,
         reason: 'monitor-failed'
       })
     })
-
-    // PowerShell reads the generated monitor from stdin so the native
-    // DualSense source cannot hit Windows' command-line length limit.
-    child.stdin.on('error', () => undefined)
-    child.stdin.end(script, 'utf8')
   }
 
   private stopMonitor(): void {
+    this.monitorGeneration += 1
     const child = this.monitor
     this.monitor = null
+    const scriptPath = this.monitorScriptPath
+    this.monitorScriptPath = null
     if (child && !child.killed) child.kill()
+    if (scriptPath && !child) removeMonitorScript(scriptPath)
   }
 
   private handleMonitorLine(line: string): void {
