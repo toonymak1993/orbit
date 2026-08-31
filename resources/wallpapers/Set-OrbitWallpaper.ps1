@@ -50,6 +50,29 @@ function Wait-WindowsRuntimeOperation {
   $task.GetAwaiter().GetResult()
 }
 
+function Wait-WindowsRuntimeAction {
+  param(
+    [Parameter(Mandatory = $true)]
+    [object]$Action
+  )
+
+  $asTaskMethod = [System.WindowsRuntimeSystemExtensions].GetMethods() |
+    Where-Object {
+      $_.Name -eq 'AsTask' -and
+      -not $_.IsGenericMethodDefinition -and
+      $_.GetParameters().Count -eq 1 -and
+      $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncAction'
+    } |
+    Select-Object -First 1
+
+  if ($null -eq $asTaskMethod) {
+    throw 'Windows Runtime action bridge is unavailable.'
+  }
+
+  $task = $asTaskMethod.Invoke($null, @($Action))
+  [void]$task.GetAwaiter().GetResult()
+}
+
 try {
   $resolvedImagePath = (Resolve-Path -LiteralPath $ImagePath -ErrorAction Stop).Path
   $imageFile = Get-Item -LiteralPath $resolvedImagePath -ErrorAction Stop
@@ -57,7 +80,9 @@ try {
     throw 'The ORBIT wallpaper asset is invalid.'
   }
 
+  $null = Add-Type -AssemblyName System.Runtime.WindowsRuntime -PassThru
   $null = [Windows.Storage.StorageFile, Windows.Storage, ContentType = WindowsRuntime]
+  $null = [Windows.System.UserProfile.LockScreen, Windows.System.UserProfile, ContentType = WindowsRuntime]
   $null = [Windows.System.UserProfile.UserProfilePersonalizationSettings, Windows.System.UserProfile, ContentType = WindowsRuntime]
   $personalizationSupported = [Windows.System.UserProfile.UserProfilePersonalizationSettings]::IsSupported()
 
@@ -81,7 +106,7 @@ namespace Orbit.Windows {
 
   if ($ValidateOnly) {
     $result.desktop = 'validated'
-    $result.lockScreen = if ($personalizationSupported) { 'validated' } else { 'unsupported' }
+    $result.lockScreen = 'validated'
     Write-OrbitWallpaperResult
   }
 
@@ -95,20 +120,25 @@ namespace Orbit.Windows {
     $result.desktop = 'failed'
   }
 
-  if (-not $personalizationSupported) {
-    $result.lockScreen = 'unsupported'
-    Write-OrbitWallpaperResult
-  }
-
   try {
     $storageOperation = [Windows.Storage.StorageFile]::GetFileFromPathAsync($resolvedImagePath)
     $storageFile = Wait-WindowsRuntimeOperation $storageOperation ([Windows.Storage.StorageFile])
-    $personalization = [Windows.System.UserProfile.UserProfilePersonalizationSettings]::Current
-    $lockScreenOperation = $personalization.TrySetLockScreenImageAsync($storageFile)
-    $setLockScreen = Wait-WindowsRuntimeOperation $lockScreenOperation ([bool])
-    $result.lockScreen = if ($setLockScreen) { 'applied' } else { 'failed' }
+    $lockScreenAction = [Windows.System.UserProfile.LockScreen]::SetImageFileAsync($storageFile)
+    Wait-WindowsRuntimeAction $lockScreenAction
+    $result.lockScreen = 'applied'
   } catch {
-    $result.lockScreen = 'failed'
+    if (-not $personalizationSupported) {
+      $result.lockScreen = 'unsupported'
+    } else {
+      try {
+        $personalization = [Windows.System.UserProfile.UserProfilePersonalizationSettings]::Current
+        $lockScreenOperation = $personalization.TrySetLockScreenImageAsync($storageFile)
+        $setLockScreen = Wait-WindowsRuntimeOperation $lockScreenOperation ([bool])
+        $result.lockScreen = if ($setLockScreen) { 'applied' } else { 'failed' }
+      } catch {
+        $result.lockScreen = 'failed'
+      }
+    }
   }
 
   Write-OrbitWallpaperResult
