@@ -10,6 +10,7 @@ import {
   LogOut,
   MessageCircle,
   RefreshCw,
+  Server,
   Shield,
   UserRoundPlus,
   UsersRound,
@@ -27,6 +28,7 @@ import type {
   OrbitFriend
 } from '@shared/ipc'
 import { DiscordChatPanel } from './DiscordChatPanel'
+import { DiscordServerPanel } from './DiscordServerPanel'
 import {
   totalDiscordUnread,
   useDiscordChatStore
@@ -100,6 +102,7 @@ export function FriendsView(): JSX.Element {
   const [handoffError, setHandoffError] = useState<FriendsProvider | null>(null)
   const [chatFriend, setChatFriend] = useState<OrbitFriend | null>(null)
   const [chatOpen, setChatOpen] = useState(false)
+  const [serversOpen, setServersOpen] = useState(false)
   const requestedUserId = useDiscordChatStore((state) => state.requestedUserId)
   const consumeOpenRequest = useDiscordChatStore((state) => state.consumeOpenRequest)
   const unreadByUser = useDiscordChatStore((state) => state.unreadByUser)
@@ -117,9 +120,9 @@ export function FriendsView(): JSX.Element {
   useEffect(() => {
     const content = contentRef.current
     if (!content) return
-    if (chatOpen) content.setAttribute('inert', '')
+    if (chatOpen || serversOpen) content.setAttribute('inert', '')
     else content.removeAttribute('inert')
-  }, [chatOpen])
+  }, [chatOpen, serversOpen])
 
   useEffect(() => {
     if (!requestedUserId) return
@@ -133,7 +136,8 @@ export function FriendsView(): JSX.Element {
         providerUserId: requestedUserId,
         displayName: `Discord · ${requestedUserId.slice(-6)}`,
         presence: 'unknown' as const
-      }
+    }
+    setServersOpen(false)
     setChatFriend(requestedFriend)
     setChatOpen(true)
     consumeOpenRequest()
@@ -170,7 +174,7 @@ export function FriendsView(): JSX.Element {
     <>
       <div
         ref={contentRef}
-        aria-hidden={chatOpen ? true : undefined}
+        aria-hidden={chatOpen || serversOpen ? true : undefined}
         className="friends-view scrollbar-none h-full overflow-y-auto px-5 pb-12 pt-24 xl:px-8"
       >
         <div className="mx-auto max-w-[112rem]">
@@ -205,6 +209,7 @@ export function FriendsView(): JSX.Element {
           </header>
 
           <nav
+            data-navigation-layer="secondary"
             aria-label={t('friends.filters.label')}
             className="mt-4 flex flex-wrap items-center gap-2 rounded-[var(--radius-card)] border border-white/[0.08] bg-black/15 p-2"
           >
@@ -277,6 +282,11 @@ export function FriendsView(): JSX.Element {
                     setChatFriend(null)
                     setChatOpen(true)
                   }}
+                  onOpenServers={() => {
+                    setChatOpen(false)
+                    setChatFriend(null)
+                    setServersOpen(true)
+                  }}
                   unreadByUser={unreadByUser}
                   unreadCount={unreadCount}
                   t={t}
@@ -300,6 +310,12 @@ export function FriendsView(): JSX.Element {
             onOpenDiscord={() => openProviderSafely('discord')}
           />
         )}
+        {serversOpen && (
+          <DiscordServerPanel
+            key="discord-servers"
+            onClose={() => setServersOpen(false)}
+          />
+        )}
       </AnimatePresence>
     </>
   )
@@ -320,6 +336,7 @@ function ProviderSection({
   onRetry,
   onMessageFriend,
   onOpenInbox,
+  onOpenServers,
   unreadByUser,
   unreadCount,
   t,
@@ -339,6 +356,7 @@ function ProviderSection({
   onRetry: () => void
   onMessageFriend: (friend: OrbitFriend) => void
   onOpenInbox: () => void
+  onOpenServers: () => void
   unreadByUser: Record<string, number>
   unreadCount: number
   t: TFunction
@@ -368,6 +386,15 @@ function ProviderSection({
           <div className="ml-auto flex items-center gap-2">
             {provider === 'discord' && (
               <>
+                <button
+                  data-focusable
+                  type="button"
+                  onClick={onOpenServers}
+                  className="flex min-h-9 items-center gap-2 rounded-full border border-white/10 bg-white/[0.045] px-3 text-[10px] font-black uppercase tracking-[0.12em] text-muted transition hover:bg-white/10 hover:text-white"
+                >
+                  <Server size={13} />
+                  {t('friends.servers.title')}
+                </button>
                 <button
                   data-focusable
                   type="button"

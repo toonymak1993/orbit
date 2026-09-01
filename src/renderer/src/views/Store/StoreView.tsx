@@ -317,7 +317,10 @@ export function StoreView(): JSX.Element {
         }}
         className="store-toolbar mb-[clamp(0.75rem,1.8vh,1.15rem)] shrink-0"
       >
-        <div className="scrollbar-none flex max-w-full items-center gap-1 overflow-x-auto rounded-full border border-white/10 bg-black/25 p-1">
+        <div
+          data-navigation-layer="secondary"
+          className="scrollbar-none flex max-w-full items-center gap-1 overflow-x-auto rounded-full border border-white/10 bg-black/25 p-1"
+        >
           <ControllerButtonHint
             button="leftTrigger"
             className="mx-1 rounded-md border border-white/15 px-1.5 py-0.5 text-[10px] font-bold text-muted"

@@ -9,11 +9,11 @@
   <Identity
     Name="ORBIT.GamingHome"
     ProcessorArchitecture="x64"
-    Publisher="CN=ORBIT Development"
-    Version="0.1.2.0" />
+    Publisher="CN=Open Source Developer Luis Antonio Garcia Roque, O=Open Source Developer, L=Alfdorf, S=Baden-Württemberg, C=DE"
+    Version="0.1.2.1" />
   <Properties>
     <DisplayName>ORBIT</DisplayName>
-    <PublisherDisplayName>ORBIT Development</PublisherDisplayName>
+    <PublisherDisplayName>Open Source Developer Luis Antonio Garcia Roque</PublisherDisplayName>
     <Description>Controller-first gaming launcher and library</Description>
     <Logo>assets\StoreLogo.png</Logo>
   </Properties>

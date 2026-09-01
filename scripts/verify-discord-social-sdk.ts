@@ -40,6 +40,12 @@ library.func('Discord_Client_GetUserMessageSummaries', 'void', [
   'void *',
   'void *'
 ])
+library.func('Discord_Client_GetUserGuilds', 'void', [
+  koffi.pointer(handle),
+  'void *',
+  'void *',
+  'void *'
+])
 const messageSummary = koffi.struct('Orbit_Discord_VerifyMessageSummary', {
   opaque: 'void *'
 })
@@ -50,6 +56,15 @@ library.func('Discord_UserMessageSummary_LastMessageId', 'uint64_t', [
   koffi.pointer(messageSummary)
 ])
 library.func('Discord_UserMessageSummary_Drop', 'void', [koffi.pointer(messageSummary)])
+const guildMinimal = koffi.struct('Orbit_Discord_VerifyGuildMinimal', {
+  opaque: 'void *'
+})
+library.func('Discord_GuildMinimal_Id', 'uint64_t', [koffi.pointer(guildMinimal)])
+library.func('Discord_GuildMinimal_Name', 'void', [
+  koffi.pointer(guildMinimal),
+  'void *'
+])
+library.func('Discord_GuildMinimal_Drop', 'void', [koffi.pointer(guildMinimal)])
 const free = library.func('Discord_Free', 'void', ['void *'])
 const major = library.func('Discord_Client_GetVersionMajor', 'int32_t', [])
 const minor = library.func('Discord_Client_GetVersionMinor', 'int32_t', [])

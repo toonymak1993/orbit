@@ -18,10 +18,12 @@ SetCompressorDictSize 32
 
 !if ${IS_BETA} == 1
   !define ORBIT_SETUP_NAME "ORBIT Beta Xbox Mode"
+  !define ORBIT_APP_DISPLAY_NAME "ORBIT Beta"
   !define ORBIT_RELEASE_KIND "beta"
   !define ORBIT_CAPABILITY_KIND "community-beta"
 !else
   !define ORBIT_SETUP_NAME "ORBIT Xbox Mode"
+  !define ORBIT_APP_DISPLAY_NAME "ORBIT"
   !define ORBIT_RELEASE_KIND "release"
   !define ORBIT_CAPABILITY_KIND "Gaming Home"
 !endif
@@ -56,7 +58,7 @@ FunctionEnd
 VIProductVersion "${FILE_VERSION}"
 VIAddVersionKey /LANG=1033 "ProductName" "ORBIT Xbox Mode"
 VIAddVersionKey /LANG=1033 "FileDescription" "ORBIT Xbox Mode Setup"
-VIAddVersionKey /LANG=1033 "CompanyName" "ORBIT Development"
+  VIAddVersionKey /LANG=1033 "CompanyName" "Open Source Developer Luis Antonio Garcia Roque"
 VIAddVersionKey /LANG=1033 "FileVersion" "${FILE_VERSION}"
 VIAddVersionKey /LANG=1033 "ProductVersion" "${DISPLAY_VERSION}"
 VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright 2026 Luis Garcia"
@@ -67,9 +69,9 @@ VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright 2026 Luis Garcia"
 !define MUI_WELCOMEFINISHPAGE_BITMAP "${ORBIT_ROOT}\build\installerSidebar.bmp"
 !define MUI_ABORTWARNING
 !define MUI_WELCOMEPAGE_TITLE "ORBIT ${DISPLAY_VERSION} Xbox Mode"
-!define MUI_WELCOMEPAGE_TEXT "This setup installs the ORBIT ${ORBIT_RELEASE_KIND} as a Windows Gaming Home app.$\r$\n$\r$\nAfter administrator approval it validates the complete package contract, trusts only the bundled ORBIT self-signed certificate in Local Machine\Trusted People, enables Developer Mode for the ${ORBIT_CAPABILITY_KIND} capability, and installs the signed AppX for this Windows account."
+  !define MUI_WELCOMEPAGE_TEXT "This setup installs the ORBIT ${ORBIT_RELEASE_KIND} as a Windows Gaming Home app.$\r$\n$\r$\nAfter administrator approval it validates the complete package contract and publicly trusted Certum signature, enables Developer Mode for the ${ORBIT_CAPABILITY_KIND} capability, and installs the signed AppX for this Windows account. A legacy self-signed ORBIT package is retained so Windows does not delete its package-family-scoped data."
 !define MUI_FINISHPAGE_TITLE "ORBIT is installed for Xbox Mode"
-!define MUI_FINISHPAGE_TEXT "Windows Xbox Mode settings will open next. Under Choose home app, select ORBIT."
+!define MUI_FINISHPAGE_TEXT "Windows Xbox Mode settings will open next. Under Choose home app, select ${ORBIT_APP_DISPLAY_NAME}."
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_INSTFILES
@@ -81,7 +83,7 @@ Section "Install ORBIT Xbox Mode" SEC_MAIN
   SetDetailsPrint both
   SetOutPath "$PLUGINSDIR"
   File /oname=ORBIT.appx "${APPX_PATH}"
-  File /oname=ORBIT-Development.cer "${CERT_PATH}"
+  File /oname=ORBIT-Code-Signing.cer "${CERT_PATH}"
   File /oname=Install-OrbitXboxMode.ps1 "${INSTALL_SCRIPT_PATH}"
 
   ${If} $OrbitUpdateMode == "1"
@@ -97,9 +99,9 @@ Section "Install ORBIT Xbox Mode" SEC_MAIN
   ${EndIf}
   DetailPrint "Using 64-bit PowerShell: $OrbitPowerShell"
   ${If} $OrbitUpdateMode == "1"
-    nsExec::ExecToLog '"$OrbitPowerShell" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\Install-OrbitXboxMode.ps1" -PackagePath "$PLUGINSDIR\ORBIT.appx" -CertificatePath "$PLUGINSDIR\ORBIT-Development.cer" -UpdateOnly -Launch'
+    nsExec::ExecToLog '"$OrbitPowerShell" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\Install-OrbitXboxMode.ps1" -PackagePath "$PLUGINSDIR\ORBIT.appx" -CertificatePath "$PLUGINSDIR\ORBIT-Code-Signing.cer" -UpdateOnly -Launch'
   ${Else}
-    nsExec::ExecToLog '"$OrbitPowerShell" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\Install-OrbitXboxMode.ps1" -PackagePath "$PLUGINSDIR\ORBIT.appx" -CertificatePath "$PLUGINSDIR\ORBIT-Development.cer" -OpenSettings'
+    nsExec::ExecToLog '"$OrbitPowerShell" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$PLUGINSDIR\Install-OrbitXboxMode.ps1" -PackagePath "$PLUGINSDIR\ORBIT.appx" -CertificatePath "$PLUGINSDIR\ORBIT-Code-Signing.cer" -OpenSettings'
   ${EndIf}
   Pop $0
   ${If} $0 != 0

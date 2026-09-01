@@ -8,7 +8,7 @@ Add-Type -AssemblyName System.Drawing
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $buildDir = Join-Path $repoRoot 'build'
-$releaseMetadata = Get-Content -LiteralPath (Join-Path $repoRoot 'resources\release-manifest.json') -Raw | ConvertFrom-Json
+$releaseMetadata = Get-Content -LiteralPath (Join-Path $repoRoot 'resources\release-manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $displayVersion = [string]$releaseMetadata.displayVersion
 $releaseChannel = ([string]$releaseMetadata.channel).Trim().ToLowerInvariant()
 if ($releaseChannel -notin @('beta', 'stable')) {

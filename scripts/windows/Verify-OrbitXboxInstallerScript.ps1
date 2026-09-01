@@ -32,6 +32,22 @@ $helperAst = $ast.Find({
 }, $true)
 if (!$helperAst) { throw 'Get-OptionalRegistryProperty is missing from the Xbox Mode installer.' }
 
+$installerText = Get-Content -LiteralPath $installerScriptPath -Raw
+if ($installerText -match 'function\s+Add-ValidatedCertificateTrust|Import-Certificate') {
+  throw 'The public Certum installer must not add certificates to a Windows trust store.'
+}
+if ($installerText -match 'Remove-AppxPackage\s+-Package\s+\$legacyPackage\.PackageFullName') {
+  throw 'The installer must retain the packaged legacy AppX because PreserveApplicationData is unsupported for this migration.'
+}
+$newPackageValidation = $installerText.IndexOf('$null = Assert-InstalledOrbitPackage $installedPackage', [System.StringComparison]::Ordinal)
+$legacyRetention = $installerText.IndexOf('legacyPackageRetained = $true', [System.StringComparison]::Ordinal)
+if ($newPackageValidation -lt 0 -or $legacyRetention -lt 0 -or $legacyRetention -le $newPackageValidation) {
+  throw 'The legacy package retention contract may only be recorded after the new Certum package passes post-install validation.'
+}
+if ($installerText -notmatch [regex]::Escape('61E90C0AACBF2F407A575903FCC197F45B61706D')) {
+  throw 'The Xbox Mode installer does not pin the official Certum signer.'
+}
+
 . ([scriptblock]::Create($helperAst.Extent.Text))
 
 $missingKey = "HKCU:\Software\ORBIT-Installer-ReadOnly-Check-$([guid]::NewGuid().ToString('N'))"

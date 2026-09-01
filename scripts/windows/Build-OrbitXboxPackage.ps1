@@ -9,7 +9,7 @@ Set-StrictMode -Version Latest
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $releaseDir = Join-Path $repoRoot 'release'
 $releaseMetadataPath = Join-Path $repoRoot 'resources\release-manifest.json'
-$releaseMetadata = Get-Content -LiteralPath $releaseMetadataPath -Raw | ConvertFrom-Json
+$releaseMetadata = Get-Content -LiteralPath $releaseMetadataPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $displayVersion = [string]$releaseMetadata.displayVersion
 $releaseChannel = ([string]$releaseMetadata.channel).Trim().ToLowerInvariant()
 if ($releaseChannel -notin @('beta', 'stable')) {
@@ -17,6 +17,7 @@ if ($releaseChannel -notin @('beta', 'stable')) {
 }
 $isBeta = $releaseChannel -eq 'beta'
 $artifactPrefix = if ($isBeta) { 'ORBIT-Beta' } else { 'ORBIT' }
+$xboxDisplayName = if ($isBeta) { 'ORBIT Beta' } else { 'ORBIT' }
 $windowsFileVersion = [string]$releaseMetadata.windowsFileVersion
 $xboxPackageVersion = [version][string]$releaseMetadata.xboxPackageVersion
 $xboxMinimumWindowsVersion = [version][string]$releaseMetadata.xboxMode.minimumWindowsVersion
@@ -29,15 +30,11 @@ $oneClickInstallerFileName = "$artifactPrefix-XboxMode-Setup-$displayVersion-x64
 $appxPath = Join-Path $releaseDir $appxFileName
 $bundlePath = Join-Path $releaseDir $bundleFileName
 $oneClickInstallerPath = Join-Path $releaseDir $oneClickInstallerFileName
-$certificateDir = Join-Path $repoRoot '.certificates'
-$pfxPath = Join-Path $certificateDir 'orbit-development.pfx'
-$cerPath = Join-Path $certificateDir 'orbit-development.cer'
-$passwordPath = Join-Path $certificateDir 'orbit-development-password.xml'
-$securePassword = $null
-$passwordPointer = [IntPtr]::Zero
-$plainPassword = $null
+$signingCertificate = $null
 $node = Get-Command node.exe -ErrorAction SilentlyContinue
 if (!$node) { throw 'node.exe is required to build the ORBIT Xbox Mode package.' }
+. (Join-Path $PSScriptRoot 'OrbitSigning.ps1')
+$signingProfile = Get-OrbitSigningProfile -RepoRoot $repoRoot
 
 function Invoke-LocalNodeTool {
   param(
@@ -123,13 +120,7 @@ try {
   & (Join-Path $PSScriptRoot 'Verify-OrbitXboxInstallerScript.ps1')
   New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
   & (Join-Path $PSScriptRoot 'Generate-OrbitBranding.ps1')
-  & (Join-Path $PSScriptRoot 'New-OrbitDevCertificate.ps1')
-
-  $securePassword = Import-Clixml -LiteralPath $passwordPath
-  $passwordPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
-  $plainPassword = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($passwordPointer)
-  $env:WIN_CSC_LINK = $pfxPath
-  $env:WIN_CSC_KEY_PASSWORD = $plainPassword
+  $signingCertificate = Assert-OrbitSigningCertificateAvailable -Profile $signingProfile
 
   if (!$SkipCompile) {
     Invoke-LocalNodeTool 'node_modules\typescript\bin\tsc' @('--noEmit', '-p', 'tsconfig.node.json')
@@ -164,12 +155,23 @@ try {
   # staging copy so a package cannot accidentally ship stale identity,
   # channel, or Gaming Home registration data after the next release bump.
   $stagedManifestPath = Join-Path $stageDir 'AppxManifest.xml'
-  [xml]$stagedManifest = Get-Content -LiteralPath $stagedManifestPath -Raw
+  [xml]$stagedManifest = Get-Content -LiteralPath $stagedManifestPath -Raw -Encoding UTF8
   $manifestNamespace = [System.Xml.XmlNamespaceManager]::new($stagedManifest.NameTable)
   $manifestNamespace.AddNamespace('f', 'http://schemas.microsoft.com/appx/manifest/foundation/windows10')
+  $manifestNamespace.AddNamespace('uap', 'http://schemas.microsoft.com/appx/manifest/uap/windows10')
+  $manifestNamespace.AddNamespace('uap3', 'http://schemas.microsoft.com/appx/manifest/uap/windows10/3')
   $stagedIdentity = $stagedManifest.SelectSingleNode('/f:Package/f:Identity', $manifestNamespace)
   if (!$stagedIdentity) { throw 'The staged Xbox manifest has no package identity.' }
   $stagedIdentity.SetAttribute('Version', $xboxPackageVersion.ToString())
+  $stagedPackageDisplayName = $stagedManifest.SelectSingleNode('/f:Package/f:Properties/f:DisplayName', $manifestNamespace)
+  $stagedVisualElements = $stagedManifest.SelectSingleNode("/f:Package/f:Applications/f:Application[@Id='ORBIT']/uap:VisualElements", $manifestNamespace)
+  $stagedGamingExtension = $stagedManifest.SelectSingleNode("//uap3:AppExtension[@Name='windows.gamingApp']", $manifestNamespace)
+  if (!$stagedPackageDisplayName -or !$stagedVisualElements -or !$stagedGamingExtension) {
+    throw 'The staged Xbox manifest is missing a visible display-name contract.'
+  }
+  $stagedPackageDisplayName.InnerText = $xboxDisplayName
+  $stagedVisualElements.SetAttribute('DisplayName', $xboxDisplayName)
+  $stagedGamingExtension.SetAttribute('DisplayName', $xboxDisplayName)
   foreach ($targetFamily in $stagedManifest.SelectNodes('/f:Package/f:Dependencies/f:TargetDeviceFamily', $manifestNamespace)) {
     $targetFamily.SetAttribute('MinVersion', $xboxMinimumWindowsVersion.ToString())
   }
@@ -187,10 +189,10 @@ try {
   & $makeAppx pack /o /d $stageDir /p $appxPath
   if ($LASTEXITCODE -ne 0) { throw 'MakeAppx failed to create the Xbox Mode package.' }
 
-  & $signTool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /a /f $pfxPath /p $plainPassword /d ORBIT $appxPath
-  if ($LASTEXITCODE -ne 0) { throw 'SignTool failed to sign the Xbox Mode package.' }
+  $null = Invoke-OrbitSignFile -SignTool $signTool -Path $appxPath -Description 'ORBIT Xbox Mode' -Profile $signingProfile
 
-  Copy-Item -LiteralPath $cerPath -Destination (Join-Path $releaseDir 'ORBIT-Development.cer') -Force
+  Copy-Item -LiteralPath $signingProfile.CertificatePath -Destination (Join-Path $releaseDir 'ORBIT-Code-Signing.cer') -Force
+  Copy-Item -LiteralPath $signingProfile.MetadataPath -Destination (Join-Path $releaseDir 'code-signing.json') -Force
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Install-OrbitXboxMode.ps1') -Destination (Join-Path $releaseDir 'Install-OrbitXboxMode.ps1') -Force
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Install-OrbitXboxMode.bat') -Destination (Join-Path $releaseDir 'Install-OrbitXboxMode.bat') -Force
   Copy-Item -LiteralPath (Join-Path $repoRoot 'resources\release-manifest.json') -Destination (Join-Path $releaseDir 'release-manifest.json') -Force
@@ -204,7 +206,7 @@ try {
   & $makeNsis.FullName `
     "/DORBIT_ROOT=$repoRoot" `
     "/DAPPX_PATH=$appxPath" `
-    "/DCERT_PATH=$cerPath" `
+    "/DCERT_PATH=$($signingProfile.CertificatePath)" `
     "/DINSTALL_SCRIPT_PATH=$(Join-Path $PSScriptRoot 'Install-OrbitXboxMode.ps1')" `
     "/DDISPLAY_VERSION=$displayVersion" `
     "/DFILE_VERSION=$windowsFileVersion" `
@@ -213,15 +215,15 @@ try {
     (Join-Path $repoRoot 'build\xbox\OrbitXboxInstaller.nsi')
   if ($LASTEXITCODE -ne 0) { throw 'NSIS failed to create the one-click Xbox Mode setup.' }
 
-  & $signTool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /a /f $pfxPath /p $plainPassword /d 'ORBIT Xbox Mode Setup' $oneClickInstallerPath
-  if ($LASTEXITCODE -ne 0) { throw 'SignTool failed to sign the one-click Xbox Mode setup.' }
+  $null = Invoke-OrbitSignFile -SignTool $signTool -Path $oneClickInstallerPath -Description 'ORBIT Xbox Mode Setup' -Profile $signingProfile
 
   & (Join-Path $PSScriptRoot 'Verify-OrbitXboxPackage.ps1')
 
   New-Item -ItemType Directory -Force -Path $bundleDir | Out-Null
   foreach ($fileName in @(
     $appxFileName,
-    'ORBIT-Development.cer',
+    'ORBIT-Code-Signing.cer',
+    'code-signing.json',
     'Install-OrbitXboxMode.bat',
     'Install-OrbitXboxMode.ps1',
     'XBOX-MODE-README.txt',
@@ -236,12 +238,7 @@ try {
   Write-Host "One-click Xbox Mode setup ready: $oneClickInstallerPath"
   Write-Host "Portable test bundle ready: $bundlePath"
 } finally {
-  Remove-Item Env:WIN_CSC_LINK -ErrorAction SilentlyContinue
-  Remove-Item Env:WIN_CSC_KEY_PASSWORD -ErrorAction SilentlyContinue
-  if ($passwordPointer -ne [IntPtr]::Zero) {
-    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordPointer)
-  }
-  $plainPassword = $null
+  if ($signingCertificate) { $signingCertificate.Dispose() }
   if (Test-Path -LiteralPath $stageDir) { Remove-Item -LiteralPath $stageDir -Recurse -Force }
   if (Test-Path -LiteralPath $bundleDir) { Remove-Item -LiteralPath $bundleDir -Recurse -Force }
   Pop-Location

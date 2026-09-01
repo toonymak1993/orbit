@@ -219,7 +219,9 @@ export function useGamepadNavigation(): void {
       // Schedule from the current frame so a high-refresh display or a stalled
       // renderer can never emit several navigation steps for one repeat slot.
       nextDirectionRepeatAt[direction] = now + REPEAT_RATE_MS
-      if (moveFocus(direction)) playUiSound('navigate')
+      if (moveFocus(direction, { allowNavigationLayerTransition: false })) {
+        playUiSound('navigate')
+      }
     }
 
     function releaseDirection(direction: NavDirection): void {
@@ -400,7 +402,13 @@ export function useGamepadNavigation(): void {
           if (!claimed && triggerBack()) playUiSound('back')
         } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
           e.preventDefault()
-          if (moveFocus(e.key === 'ArrowUp' ? 'up' : 'down')) playUiSound('navigate')
+          if (
+            moveFocus(e.key === 'ArrowUp' ? 'up' : 'down', {
+              allowNavigationLayerTransition: !e.repeat
+            })
+          ) {
+            playUiSound('navigate')
+          }
         }
         return
       }
@@ -420,7 +428,9 @@ export function useGamepadNavigation(): void {
       }
       if (map[e.key]) {
         e.preventDefault()
-        if (moveFocus(map[e.key])) playUiSound('navigate')
+        if (moveFocus(map[e.key], { allowNavigationLayerTransition: !e.repeat })) {
+          playUiSound('navigate')
+        }
         return
       }
       if (e.key === 'Enter' || e.key === ' ') {

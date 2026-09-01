@@ -8,7 +8,9 @@ Import-Module (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsof
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $releaseDir = Join-Path $repoRoot 'release'
-$releaseMetadata = Get-Content -LiteralPath (Join-Path $repoRoot 'resources\release-manifest.json') -Raw | ConvertFrom-Json
+. (Join-Path $PSScriptRoot 'OrbitSigning.ps1')
+$signingProfile = Get-OrbitSigningProfile -RepoRoot $repoRoot
+$releaseMetadata = Get-Content -LiteralPath (Join-Path $repoRoot 'resources\release-manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $displayVersion = [string]$releaseMetadata.displayVersion
 $packageVersion = [string]$releaseMetadata.packageVersion
 $releaseChannel = ([string]$releaseMetadata.channel).Trim().ToLowerInvariant()
@@ -21,7 +23,8 @@ $releaseSequence = [int]$releaseMetadata.releaseSequence
 $installerPath = Join-Path $releaseDir "$installerPrefix-$displayVersion-x64.exe"
 $applicationPath = Join-Path $releaseDir 'win-unpacked\ORBIT.exe'
 $packagedManifestPath = Join-Path $releaseDir 'win-unpacked\resources\release-manifest.json'
-$certificateMetadataPath = Join-Path $repoRoot '.certificates\orbit-development.json'
+$releaseCertificatePath = Join-Path $releaseDir 'ORBIT-Code-Signing.cer'
+$releaseSigningMetadataPath = Join-Path $releaseDir 'code-signing.json'
 $legalDocumentNames = @('LICENSE', 'LICENSE_EXCEPTION.md', 'THIRD_PARTY_NOTICES.md')
 $packagedLegalDocumentPaths = @($legalDocumentNames | ForEach-Object {
   Join-Path $releaseDir "win-unpacked\resources\$_"
@@ -31,7 +34,8 @@ foreach ($requiredPath in @(
   $installerPath,
   $applicationPath,
   $packagedManifestPath,
-  $certificateMetadataPath
+  $releaseCertificatePath,
+  $releaseSigningMetadataPath
 ) + @($legalDocumentNames | ForEach-Object { Join-Path $repoRoot $_ }) + $packagedLegalDocumentPaths) {
   if (!(Test-Path -LiteralPath $requiredPath)) {
     throw "Missing release artifact: $requiredPath"
@@ -48,26 +52,22 @@ foreach ($legalDocumentName in $legalDocumentNames) {
   }
 }
 
-$certificateMetadata = Get-Content -LiteralPath $certificateMetadataPath -Raw | ConvertFrom-Json
+$releaseCertificateHash = (Get-FileHash -LiteralPath $releaseCertificatePath -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($releaseCertificateHash -cne $signingProfile.CertificateSha256) {
+  throw 'The copied public release certificate does not match the pinned Certum certificate.'
+}
+$releaseSigningMetadataHash = (Get-FileHash -LiteralPath $releaseSigningMetadataPath -Algorithm SHA256).Hash
+$sourceSigningMetadataHash = (Get-FileHash -LiteralPath $signingProfile.MetadataPath -Algorithm SHA256).Hash
+if ($releaseSigningMetadataHash -cne $sourceSigningMetadataHash) {
+  throw 'The copied signing metadata does not match the repository source.'
+}
 $packagedManifest = Get-Content -LiteralPath $packagedManifestPath -Raw | ConvertFrom-Json
 if ($packagedManifest.displayVersion -ne $displayVersion) {
   throw "Packaged manifest contains unexpected display version: $($packagedManifest.displayVersion)"
 }
 
 $verifiedFiles = foreach ($path in @($installerPath, $applicationPath)) {
-  $signature = Get-AuthenticodeSignature -FilePath $path
-  $isDevelopmentTrustPending =
-    $signature.Status -eq 'UnknownError' -and
-    $signature.StatusMessage -match 'Stammzertifikat|root certificate|untrusted root'
-  if ($signature.Status -ne 'Valid' -and !$isDevelopmentTrustPending) {
-    throw "Invalid Authenticode signature for $path ($($signature.Status): $($signature.StatusMessage))"
-  }
-  if (!$signature.TimeStamperCertificate) {
-    throw "The Authenticode signature has no trusted timestamp: $path"
-  }
-  if ($signature.SignerCertificate.Thumbprint -ne $certificateMetadata.thumbprint) {
-    throw "Unexpected signer for $path"
-  }
+  $signature = Assert-OrbitSignedFile -Path $path -Profile $signingProfile
 
   $file = Get-Item -LiteralPath $path
   if ($file.VersionInfo.FileVersion -notlike "$windowsFileVersion*") {
@@ -80,7 +80,7 @@ $verifiedFiles = foreach ($path in @($installerPath, $applicationPath)) {
     sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
     fileVersion = $file.VersionInfo.FileVersion
     productVersion = $file.VersionInfo.ProductVersion
-    signatureStatus = if ($isDevelopmentTrustPending) { 'SignedDevelopmentTrustPending' } else { $signature.Status.ToString() }
+    signatureStatus = $signature.Status.ToString()
     trustStatus = $signature.Status.ToString()
     signer = $signature.SignerCertificate.Subject
     signerThumbprint = $signature.SignerCertificate.Thumbprint

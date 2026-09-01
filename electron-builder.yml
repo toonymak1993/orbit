@@ -1,7 +1,7 @@
 appId: com.orbit.launcher
 productName: ORBIT
-buildVersion: 0.1.2.0
-artifactName: ORBIT-Beta-Setup-0.1.2-beta.1-${arch}.${ext}
+buildVersion: 0.1.2.1
+artifactName: ORBIT-Beta-Setup-0.1.2-beta.2-${arch}.${ext}
 copyright: Copyright © 2026 Luis Garcia
 forceCodeSigning: true
 
@@ -49,10 +49,11 @@ win:
   requestedExecutionLevel: asInvoker
   legalTrademarks: ORBIT is a gaming launcher project.
   signtoolOptions:
-    publisherName: ORBIT Development
+    certificateSha1: 61E90C0AACBF2F407A575903FCC197F45B61706D
+    publisherName: "CN=Open Source Developer Luis Antonio Garcia Roque, O=Open Source Developer, L=Alfdorf, S=Baden-Württemberg, C=DE"
     signingHashAlgorithms:
       - sha256
-    rfc3161TimeStampServer: http://timestamp.digicert.com
+    rfc3161TimeStampServer: http://time.certum.pl
 
 nsis:
   oneClick: false
@@ -68,7 +69,7 @@ nsis:
   runAfterFinish: true
   packElevateHelper: false
   differentialPackage: true
-  uninstallDisplayName: ORBIT Beta 0.1.2-beta.1
+  uninstallDisplayName: ORBIT Beta 0.1.2-beta.2
   installerIcon: build/installerIcon.ico
   uninstallerIcon: build/uninstallerIcon.ico
   installerHeader: build/installerHeader.bmp

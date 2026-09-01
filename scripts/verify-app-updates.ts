@@ -69,6 +69,8 @@ const manifest = JSON.parse(
 ) as Record<string, any>
 assert.equal(manifest.updateMode, 'github-release')
 assert.equal(manifest.automaticUpdatesEnabled, true)
+assert.equal(manifest.xboxMode.automaticLegacyRemoval, false)
+assert.equal(manifest.xboxMode.legacyPackageRetentionRequired, true)
 assert.match(manifest.updates.owner, /^[a-zA-Z0-9-]+$/)
 assert.match(manifest.updates.repository, /^[a-zA-Z0-9._-]+$/)
 assert.ok(manifest.updates.signerThumbprints.length > 0)
@@ -79,16 +81,22 @@ const installerScript = readFileSync(
 )
 assert.match(installerScript, /\[switch\]\$UpdateOnly/)
 assert.match(installerScript, /!\$ValidateOnly -and !\$UpdateOnly -and !\$isAdministrator/)
-assert.match(installerScript, /Update-only mode will not change machine certificate trust/)
+assert.doesNotMatch(installerScript, /Add-ValidatedCertificateTrust|Import-Certificate/)
+assert.doesNotMatch(installerScript, /Remove-AppxPackage -Package \$legacyPackage\.PackageFullName/)
+assert.match(installerScript, /legacyPackageRetained = \$true/)
+assert.match(installerScript, /61E90C0AACBF2F407A575903FCC197F45B61706D/)
 assert.match(installerScript, /Update-only mode will not change machine policy/)
 
 const xboxBootstrapper = readFileSync(resolve(root, 'build/xbox/OrbitXboxInstaller.nsi'), 'utf8')
 assert.match(xboxBootstrapper, /\/ORBIT-UPDATE=/)
 assert.match(xboxBootstrapper, /-UpdateOnly -Launch/)
+assert.doesNotMatch(xboxBootstrapper, /Local Machine\\Trusted People|ORBIT-Development\.cer/)
 
 const builderConfig = readFileSync(resolve(root, 'electron-builder.yml'), 'utf8')
 assert.match(builderConfig, /provider: github/)
 assert.match(builderConfig, /owner: toonymak1993/)
+assert.match(builderConfig, /certificateSha1:\s*61E90C0AACBF2F407A575903FCC197F45B61706D/)
+assert.match(builderConfig, /rfc3161TimeStampServer:\s*http:\/\/time\.certum\.pl/)
 assert.doesNotMatch(builderConfig, /differentialPackage:\s*false/)
 
 const appUpdateService = readFileSync(resolve(root, 'src/main/appUpdateService.ts'), 'utf8')

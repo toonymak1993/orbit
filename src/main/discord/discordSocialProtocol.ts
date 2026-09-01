@@ -3,6 +3,7 @@ import type {
   DiscordChatHistory,
   DiscordChatInbox,
   DiscordChatSendResult,
+  DiscordServerList,
   OrbitFriend
 } from '@shared/ipc'
 
@@ -42,6 +43,7 @@ export type DiscordWorkerCommand =
   | 'chat-history'
   | 'chat-send'
   | 'chat-showing'
+  | 'servers'
   | 'dispose'
 
 export interface DiscordWorkerRequest {
@@ -68,6 +70,7 @@ export interface DiscordWorkerResponse {
   chatInbox?: DiscordChatInbox
   chatHistory?: DiscordChatHistory
   chatSend?: DiscordChatSendResult
+  servers?: DiscordServerList
 }
 
 export interface DiscordWorkerUpdatedEvent {

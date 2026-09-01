@@ -18,6 +18,7 @@ import {
   type DiscordChatHistory,
   type DiscordChatInbox,
   type DiscordChatSendResult,
+  type DiscordServerList,
   type EpicLoginStatus,
   type FriendsProvider,
   type FriendsSnapshot,
@@ -247,6 +248,11 @@ const orbitApi = {
       ipcRenderer.on(IPC.discordChatMessage, listener)
       return () => ipcRenderer.removeListener(IPC.discordChatMessage, listener)
     }
+  },
+  discordServers: {
+    list: (): Promise<DiscordServerList> => ipcRenderer.invoke(IPC.discordServersList),
+    open: (serverId: string): Promise<void> =>
+      ipcRenderer.invoke(IPC.discordServerOpen, serverId)
   },
   library: {
     get: (): Promise<LibrarySnapshot> => ipcRenderer.invoke(IPC.libraryGet),

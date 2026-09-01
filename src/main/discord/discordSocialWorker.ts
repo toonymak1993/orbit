@@ -7,6 +7,8 @@ import type {
   DiscordChatInbox,
   DiscordChatMessage,
   DiscordChatSendResult,
+  DiscordServer,
+  DiscordServerList,
   FriendPresence,
   OrbitFriend
 } from '@shared/ipc'
@@ -25,6 +27,7 @@ const READY_STATUS = 3
 const FRIEND_RELATIONSHIP = 1
 const BEARER_TOKEN = 1
 const MAX_DISCORD_FRIENDS = 1_000
+const MAX_DISCORD_SERVERS = 500
 const MAX_CHAT_CONVERSATIONS = 500
 const MAX_CHAT_HISTORY = 200
 const MAX_MESSAGE_LENGTH = 2_000
@@ -139,6 +142,8 @@ class DiscordNativeBindings {
   readonly MessageSpan: TypeObject
   readonly UserMessageSummary: TypeObject
   readonly UserMessageSummarySpan: TypeObject
+  readonly GuildMinimal: TypeObject
+  readonly GuildMinimalSpan: TypeObject
   readonly AdditionalContent: TypeObject
   readonly UserHandle: TypeObject
   readonly Activity: TypeObject
@@ -151,6 +156,7 @@ class DiscordNativeBindings {
   readonly messageResultCallbackType: TypeObject
   readonly messageSpanCallbackType: TypeObject
   readonly userMessageSummarySpanCallbackType: TypeObject
+  readonly guildMinimalSpanCallbackType: TypeObject
   readonly messageDeletedCallbackType: TypeObject
 
   readonly allocNative: NativeFunction
@@ -183,6 +189,7 @@ class DiscordNativeBindings {
   readonly clientGetCurrentUserV2: NativeFunction
   readonly clientGetMessageHandle: NativeFunction
   readonly clientGetUserMessageSummaries: NativeFunction
+  readonly clientGetUserGuilds: NativeFunction
   readonly clientGetUserMessagesWithLimit: NativeFunction
   readonly clientSendUserMessage: NativeFunction
   readonly clientSetMessageCreatedCallback: NativeFunction
@@ -219,6 +226,9 @@ class DiscordNativeBindings {
   readonly userMessageSummaryUserId: NativeFunction
   readonly userMessageSummaryLastMessageId: NativeFunction
   readonly userMessageSummaryDrop: NativeFunction
+  readonly guildMinimalId: NativeFunction
+  readonly guildMinimalName: NativeFunction
+  readonly guildMinimalDrop: NativeFunction
   readonly additionalContentDrop: NativeFunction
   readonly userId: NativeFunction
   readonly userDisplayName: NativeFunction
@@ -258,6 +268,11 @@ class DiscordNativeBindings {
     this.UserMessageSummary = handle('Orbit_Discord_UserMessageSummary')
     this.UserMessageSummarySpan = koffi.struct('Orbit_Discord_UserMessageSummarySpan', {
       ptr: koffi.pointer(this.UserMessageSummary),
+      size: 'size_t'
+    })
+    this.GuildMinimal = handle('Orbit_Discord_GuildMinimal')
+    this.GuildMinimalSpan = koffi.struct('Orbit_Discord_GuildMinimalSpan', {
+      ptr: koffi.pointer(this.GuildMinimal),
       size: 'size_t'
     })
     this.AdditionalContent = handle('Orbit_Discord_AdditionalContent')
@@ -307,6 +322,11 @@ class DiscordNativeBindings {
       'Orbit_Discord_UserMessageSummarySpanCallback',
       'void',
       [resultPointer, this.UserMessageSummarySpan, 'void *']
+    )
+    this.guildMinimalSpanCallbackType = koffi.proto(
+      'Orbit_Discord_GuildMinimalSpanCallback',
+      'void',
+      [resultPointer, this.GuildMinimalSpan, 'void *']
     )
     this.messageDeletedCallbackType = koffi.proto(
       'Orbit_Discord_MessageDeletedCallback',
@@ -430,6 +450,12 @@ class DiscordNativeBindings {
         'void *'
       ]
     )
+    this.clientGetUserGuilds = fn('Discord_Client_GetUserGuilds', 'void', [
+      pointer(this.Client),
+      pointer(this.guildMinimalSpanCallbackType),
+      'void *',
+      'void *'
+    ])
     this.clientGetUserMessagesWithLimit = fn(
       'Discord_Client_GetUserMessagesWithLimit',
       'void',
@@ -559,6 +585,16 @@ class DiscordNativeBindings {
     )
     this.userMessageSummaryDrop = fn('Discord_UserMessageSummary_Drop', 'void', [
       pointer(this.UserMessageSummary)
+    ])
+    this.guildMinimalId = fn('Discord_GuildMinimal_Id', 'uint64_t', [
+      pointer(this.GuildMinimal)
+    ])
+    this.guildMinimalName = fn('Discord_GuildMinimal_Name', 'void', [
+      pointer(this.GuildMinimal),
+      koffi.out(pointer(this.DiscordString))
+    ])
+    this.guildMinimalDrop = fn('Discord_GuildMinimal_Drop', 'void', [
+      pointer(this.GuildMinimal)
     ])
     this.additionalContentDrop = fn('Discord_AdditionalContent_Drop', 'void', [
       pointer(this.AdditionalContent)
@@ -1212,6 +1248,75 @@ class DiscordSocialEngine extends EventEmitter {
     }
   }
 
+  async getServers(
+    applicationId: string,
+    tokens?: DiscordSocialTokens
+  ): Promise<DiscordServerList> {
+    try {
+      await this.ensureChatReady(applicationId, tokens)
+    } catch {
+      return { state: 'unavailable', servers: [], issue: 'not-connected' }
+    }
+    if (!this.client) throw new Error('Discord client is not initialized')
+    try {
+      const servers = await timeoutAfter(
+        new Promise<DiscordServer[]>((resolve, reject) => {
+          let callbackPointer = 0n
+          callbackPointer = this.register(
+            (result: unknown, span: NativeSpan): void => {
+              const count = Math.min(Number(span.size) || 0, MAX_DISCORD_SERVERS)
+              try {
+                this.assertSuccessful(result)
+                if (!span.ptr || count === 0) {
+                  resolve([])
+                  return
+                }
+                const handles = koffi.decode(
+                  span.ptr,
+                  this.native.GuildMinimal,
+                  count
+                ) as NativeHandle[]
+                const decoded: DiscordServer[] = []
+                const seen = new Set<string>()
+                for (const handle of handles) {
+                  try {
+                    const id = String(this.native.guildMinimalId(handle))
+                    if (!/^\d{17,20}$/u.test(id) || seen.has(id)) continue
+                    const name = cleanText(
+                      this.outputString((output) => this.native.guildMinimalName(handle, output)),
+                      `Discord ${id.slice(-6)}`
+                    )
+                    seen.add(id)
+                    decoded.push({ id, name })
+                  } finally {
+                    this.native.guildMinimalDrop(handle)
+                  }
+                }
+                resolve(decoded.sort((left, right) => left.name.localeCompare(right.name)))
+              } catch (error) {
+                reject(error)
+              } finally {
+                if (span.ptr) this.native.freeNative(span.ptr)
+                queueMicrotask(() => this.unregister(callbackPointer))
+              }
+            },
+            this.native.guildMinimalSpanCallbackType
+          )
+          try {
+            this.native.clientGetUserGuilds(this.client, callbackPointer, null, null)
+          } catch (error) {
+            this.unregister(callbackPointer)
+            reject(error)
+          }
+        }),
+        REQUEST_TIMEOUT_MS
+      )
+      return { state: 'ready', servers }
+    } catch {
+      return { state: 'unavailable', servers: [], issue: 'provider-unavailable' }
+    }
+  }
+
   async getChatInbox(
     applicationId: string,
     tokens?: DiscordSocialTokens
@@ -1613,6 +1718,19 @@ parentPort?.on('message', (event) => {
     }
     if (!request.applicationId || !/^\d{17,20}$/.test(request.applicationId)) {
       errorResponse(request, 'authentication-failed')
+      return
+    }
+    if (request.command === 'servers') {
+      const servers = await engine.getServers(request.applicationId, request.tokens)
+      const tokens = engine.tokens()
+      send({
+        type: 'response',
+        id: request.id,
+        ok: true,
+        servers,
+        tokens,
+        clearTokens: !tokens
+      })
       return
     }
     if (request.command === 'chat-inbox') {

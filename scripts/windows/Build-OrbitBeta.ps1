@@ -6,7 +6,10 @@ Set-StrictMode -Version Latest
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $releaseDir = Join-Path $repoRoot 'release'
-$releaseMetadata = Get-Content -LiteralPath (Join-Path $repoRoot 'resources\release-manifest.json') -Raw | ConvertFrom-Json
+. (Join-Path $PSScriptRoot 'OrbitSigning.ps1')
+$signingProfile = Get-OrbitSigningProfile -RepoRoot $repoRoot
+$certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($signingProfile.CertificatePath)
+$releaseMetadata = Get-Content -LiteralPath (Join-Path $repoRoot 'resources\release-manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $displayVersion = [string]$releaseMetadata.displayVersion
 $bundleName = "ORBIT-Beta-$displayVersion-x64"
 $bundleDir = Join-Path $releaseDir $bundleName
@@ -25,7 +28,6 @@ Push-Location $repoRoot
 try {
   & (Join-Path $PSScriptRoot 'Build-OrbitInstaller.ps1')
   & (Join-Path $PSScriptRoot 'Build-OrbitXboxPackage.ps1') -SkipCompile
-  $certificateMetadata = Get-Content -LiteralPath (Join-Path $repoRoot '.certificates\orbit-development.json') -Raw | ConvertFrom-Json
 
   Assert-ReleaseChildPath $bundleDir
   Assert-ReleaseChildPath $bundlePath
@@ -40,8 +42,8 @@ try {
     $standardInstaller,
     $xboxInstaller,
     $xboxPackage,
-    'ORBIT-Development.cer',
-    'Install-OrbitDevelopmentCertificate.ps1',
+    'ORBIT-Code-Signing.cer',
+    'code-signing.json',
     'Install-OrbitXboxMode.bat',
     'Install-OrbitXboxMode.ps1',
     'release-manifest.json',
@@ -57,30 +59,30 @@ try {
     Copy-Item -LiteralPath $source -Destination $bundleDir -Force
   }
 
-  $certificateThumbprint = [string]$certificateMetadata.thumbprint
+  $certificateThumbprint = $signingProfile.Thumbprint
   @"
 ORBIT $displayVersion - Community Beta
 
 IMPORTANT
-This beta is signed with a self-signed ORBIT certificate because no commercial publisher certificate is used yet.
-Before trusting the certificate, compare its SHA-1 thumbprint with the value published by the ORBIT project:
+This beta is signed with the publicly trusted Certum Open Source Code Signing certificate.
+Compare its SHA-1 thumbprint with the value published by the ORBIT project:
 
   $certificateThumbprint
 
 Never install a beta whose certificate has a different thumbprint. The ZIP contains only the public CER file;
-the private signing key is never distributed.
+the cloud private key, SimplySign token and PIN are never distributed.
 
 NORMAL WINDOWS INSTALLATION
-1. Right-click Install-OrbitDevelopmentCertificate.ps1 and run it with PowerShell as administrator.
-2. Run $standardInstaller.
+1. Run $standardInstaller. No certificate trust-store change is required.
 
 XBOX MODE
 1. Run $xboxInstaller from the Windows account that should own ORBIT and approve its administrator prompt.
 2. Before changing Windows, setup validates the certificate, signature, package identity, Gaming Home contract,
    registration metadata, packaged release metadata, and supported Windows baseline.
-3. Setup trusts the same ORBIT certificate, enables Developer Mode for the beta capability, installs the signed
-   AppX for that account, verifies registration, and opens Xbox Mode settings.
-4. Under Settings > Gaming > Xbox mode > Choose home app, select ORBIT.
+3. Setup verifies public Certum trust, enables Developer Mode for the beta capability, installs the signed AppX,
+   and verifies registration. It retains a legacy self-signed package because its data belongs to a different
+   Windows package family; confirm your data in Beta 2 before removing the old package yourself.
+4. Under Settings > Gaming > Xbox mode > Choose home app, select ORBIT Beta.
 5. Optionally enable startup into Xbox Mode.
 
 Windows 11 version 24H2 (build 26100.0) or newer is required. Availability depends on Microsoft's supported
@@ -94,9 +96,15 @@ Diagnostics after Xbox installation attempts (success or failure):
   C:\ProgramData\ORBIT\Logs\xbox-mode-diagnostics.json
 
 Integrity hashes are listed in BETA-SHA256SUMS.txt.
+
+ONE-TIME BETA 1 MIGRATION
+Beta 1 pins the previous self-signed signer and cannot accept this release through automatic update. Download and
+run the all-in-one setup manually once, then select ORBIT Beta in Xbox Mode settings. The legacy ORBIT package
+and development certificate remain installed to avoid deleting package-family-scoped data. Future Certum-signed
+betas can update normally.
 "@ | Set-Content -LiteralPath (Join-Path $bundleDir 'BETA-README.txt') -Encoding UTF8
 
-  $hashTargets = @($standardInstaller, $xboxInstaller, $xboxPackage, 'ORBIT-Development.cer')
+  $hashTargets = @($standardInstaller, $xboxInstaller, $xboxPackage, 'ORBIT-Code-Signing.cer')
   $artifacts = foreach ($fileName in $hashTargets) {
     $path = Join-Path $bundleDir $fileName
     $file = Get-Item -LiteralPath $path
@@ -118,9 +126,9 @@ Integrity hashes are listed in BETA-SHA256SUMS.txt.
     windowsFileVersion = [string]$releaseMetadata.windowsFileVersion
     xboxPackageVersion = [string]$releaseMetadata.xboxPackageVersion
     releaseSequence = [int]$releaseMetadata.releaseSequence
-    certificateSubject = [string]$certificateMetadata.subject
+    certificateSubject = $signingProfile.Subject
     certificateThumbprint = $certificateThumbprint
-    certificateNotAfter = [string]$certificateMetadata.notAfter
+    certificateNotAfter = $certificate.NotAfter.ToUniversalTime().ToString('o')
     generatedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
     artifacts = $artifacts
   } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $bundleDir 'beta-distribution-manifest.json') -Encoding UTF8
@@ -128,5 +136,6 @@ Integrity hashes are listed in BETA-SHA256SUMS.txt.
   Compress-Archive -Path (Join-Path $bundleDir '*') -DestinationPath $bundlePath -CompressionLevel Optimal
   Write-Host "ORBIT community beta ready: $bundlePath"
 } finally {
+  if ($certificate) { $certificate.Dispose() }
   Pop-Location
 }
