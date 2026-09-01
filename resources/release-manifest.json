@@ -19,9 +19,15 @@
     "startupDelaySeconds": 12,
     "checkIntervalHours": 6,
     "autoDownload": true,
-    "signerThumbprints": ["D1D2DE6B5C77C880DFEA5184245722C67F941189"]
+    "signerThumbprints": ["61E90C0AACBF2F407A575903FCC197F45B61706D"]
   },
-  "publisher": "ORBIT Development",
+  "publisher": "Open Source Developer Luis Antonio Garcia Roque",
+  "signingCertificate": {
+    "provider": "Certum SimplySign",
+    "subject": "CN=Open Source Developer Luis Antonio Garcia Roque, O=Open Source Developer, L=Alfdorf, S=Baden-Württemberg, C=DE",
+    "thumbprint": "61E90C0AACBF2F407A575903FCC197F45B61706D",
+    "publiclyTrusted": true
+  },
   "minimumWindowsVersion": "10.0.22000.0",
   "xboxMode": {
     "enabled": true,
@@ -29,6 +35,8 @@
     "packageIdentity": "ORBIT.GamingHome",
     "applicationId": "ORBIT",
     "appExtension": "windows.gamingApp",
-    "customCapability": "Microsoft.appCategory.gamingHome_8wekyb3d8bbwe"
+    "customCapability": "Microsoft.appCategory.gamingHome_8wekyb3d8bbwe",
+    "legacyPublisher": "CN=ORBIT Development",
+    "manualPublisherMigrationRequired": true
   }
 }

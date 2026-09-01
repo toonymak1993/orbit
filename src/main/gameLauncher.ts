@@ -4,6 +4,7 @@ import { win32 as path } from 'node:path'
 import { shell } from 'electron'
 import type { LibraryGame } from '@shared/ipc'
 import { retroLaunchArguments } from '@shared/retroSystems'
+import { launcherDownloadMonitor } from './downloads/launcherDownloadMonitor'
 import { prepareRetroFullscreen } from './retro/retroLaunchPreparation'
 import { playStationRemotePlayService } from './playstation/remotePlay'
 import { getSteamAppsDirectories, getSteamInstallPath } from './steam/steamInstall'
@@ -11,6 +12,10 @@ import {
   steamDirectInstallArguments,
   waitForSteamInstallStart
 } from './steam/steamInstallRequest'
+import {
+  normalizeXboxProductId,
+  requestXboxProductInstall
+} from './xbox/xboxInstallRequest'
 
 export interface GameLaunchReceipt {
   /** Present only when ORBIT spawned the configured game executable itself. */
@@ -40,12 +45,6 @@ function xboxApplicationId(value: string): string {
   if (!id || id.length > 512 || !/^[a-z0-9_.-]+![a-z0-9_.-]+$/i.test(id)) {
     throw new Error('Invalid Xbox application identifier')
   }
-  return id
-}
-
-function xboxProductId(value: string): string {
-  const id = value.trim().toUpperCase()
-  if (!/^[A-Z0-9]{12}$/.test(id)) throw new Error('Invalid Xbox product identifier')
   return id
 }
 
@@ -221,9 +220,15 @@ export async function launchGame(game: LibraryGame): Promise<GameLaunchReceipt> 
       }
     }
 
-    // Xbox-app product links show the install action and handle Game Pass,
-    // Microsoft Store, EA and Ubisoft hand-offs themselves.
-    const productId = xboxProductId(game.providerGameId)
+    const productId = normalizeXboxProductId(game.providerGameId)
+    if ((await requestXboxProductInstall(productId)) === 'queued') {
+      launcherDownloadMonitor.announceXboxInstallRequest(game, productId)
+      return {}
+    }
+
+    // The Xbox app remains the supported fallback when Windows cannot queue
+    // the product directly (for example because a license or drive choice is
+    // required, or ORBIT is running without packaged app capabilities).
     await shell.openExternal(`msxbox://game/?productId=${productId}`)
     return {}
   }

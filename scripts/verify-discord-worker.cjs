@@ -30,6 +30,7 @@ app.whenReady().then(() => {
   let refreshed = false
   let chatContract = false
   let inboxContract = false
+  let serverContract = false
 
   child.stderr?.on('data', (chunk) => fail(`Discord utility worker stderr: ${chunk}`))
   child.on('message', (message) => {
@@ -60,6 +61,12 @@ app.whenReady().then(() => {
         command: 'chat-inbox',
         applicationId: '1526906410359848990'
       })
+      child.postMessage({
+        type: 'request',
+        id: 6,
+        command: 'servers',
+        applicationId: '1526906410359848990'
+      })
       return
     }
     if (message?.type !== 'response') return
@@ -83,7 +90,14 @@ app.whenReady().then(() => {
         message.chatInbox?.conversations?.length === 0 &&
         message.clearTokens === true
     }
-    if (ready && probed && refreshed && chatContract && inboxContract) {
+    if (message.id === 6) {
+      serverContract =
+        message.ok === true &&
+        message.servers?.state === 'unavailable' &&
+        message.servers?.servers?.length === 0 &&
+        message.clearTokens === true
+    }
+    if (ready && probed && refreshed && chatContract && inboxContract && serverContract) {
       child.postMessage({ type: 'request', id: 3, command: 'dispose' })
     }
     if (message.id === 3 && message.ok === true) {

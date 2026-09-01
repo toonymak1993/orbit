@@ -32,6 +32,25 @@ $helperAst = $ast.Find({
 }, $true)
 if (!$helperAst) { throw 'Get-OptionalRegistryProperty is missing from the Xbox Mode installer.' }
 
+$installerText = Get-Content -LiteralPath $installerScriptPath -Raw
+if ($installerText -match 'function\s+Add-ValidatedCertificateTrust|Import-Certificate') {
+  throw 'The public Certum installer must not add certificates to a Windows trust store.'
+}
+if ($installerText -notmatch 'Remove-AppxPackage\s+-Package\s+\$legacyPackage\.PackageFullName\s+-PreserveApplicationData') {
+  throw 'The legacy AppX publisher migration must preserve application data.'
+}
+$newPackageValidation = $installerText.IndexOf('$null = Assert-InstalledOrbitPackage $installedPackage', [System.StringComparison]::Ordinal)
+$legacyRemoval = $installerText.IndexOf('Remove-AppxPackage -Package $legacyPackage.PackageFullName', [System.StringComparison]::Ordinal)
+if ($newPackageValidation -lt 0 -or $legacyRemoval -lt 0 -or $legacyRemoval -le $newPackageValidation) {
+  throw 'The legacy package may only be removed after the new Certum package passes post-install validation.'
+}
+if ($installerText -notmatch [regex]::Escape('if ($packageDeploymentCompleted -and !$existingPackage -and !$legacyRemovalStarted)')) {
+  throw 'The validated Certum package must not be rolled back after legacy package removal begins.'
+}
+if ($installerText -notmatch [regex]::Escape('61E90C0AACBF2F407A575903FCC197F45B61706D')) {
+  throw 'The Xbox Mode installer does not pin the official Certum signer.'
+}
+
 . ([scriptblock]::Create($helperAst.Extent.Text))
 
 $missingKey = "HKCU:\Software\ORBIT-Installer-ReadOnly-Check-$([guid]::NewGuid().ToString('N'))"

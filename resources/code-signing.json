@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "provider": "Certum SimplySign",
+  "storeLocation": "CurrentUser",
+  "storeName": "My",
+  "thumbprint": "61E90C0AACBF2F407A575903FCC197F45B61706D",
+  "subject": "CN=Open Source Developer Luis Antonio Garcia Roque, O=Open Source Developer, L=Alfdorf, S=Baden-Württemberg, C=DE",
+  "commonName": "Open Source Developer Luis Antonio Garcia Roque",
+  "issuer": "CN=Certum Code Signing 2021 CA, O=Asseco Data Systems S.A., C=PL",
+  "certificateFile": "resources/certificates/orbit-code-signing.cer",
+  "certificateSha256": "dc1a81c4d1ae11b1de0c615de5d44e9ed157cf239cfc2b5a984908973daee630",
+  "timestampServer": "http://time.certum.pl",
+  "legacy": {
+    "publisher": "CN=ORBIT Development",
+    "thumbprint": "D1D2DE6B5C77C880DFEA5184245722C67F941189",
+    "trustedPeopleStore": "LocalMachine\\TrustedPeople"
+  }
+}

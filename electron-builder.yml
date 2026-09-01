@@ -49,10 +49,11 @@ win:
   requestedExecutionLevel: asInvoker
   legalTrademarks: ORBIT is a gaming launcher project.
   signtoolOptions:
-    publisherName: ORBIT Development
+    certificateSha1: 61E90C0AACBF2F407A575903FCC197F45B61706D
+    publisherName: "CN=Open Source Developer Luis Antonio Garcia Roque, O=Open Source Developer, L=Alfdorf, S=Baden-Württemberg, C=DE"
     signingHashAlgorithms:
       - sha256
-    rfc3161TimeStampServer: http://timestamp.digicert.com
+    rfc3161TimeStampServer: http://time.certum.pl
 
 nsis:
   oneClick: false

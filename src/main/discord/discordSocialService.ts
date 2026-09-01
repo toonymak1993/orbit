@@ -11,6 +11,9 @@ import type {
   DiscordChatIssue,
   DiscordChatMessage,
   DiscordChatSendResult,
+  DiscordServer,
+  DiscordServerIssue,
+  DiscordServerList,
   FriendPresence,
   OrbitFriend
 } from '@shared/ipc'
@@ -29,6 +32,7 @@ const REFRESH_TIMEOUT_MS = 15_000
 const CONNECT_TIMEOUT_MS = 6 * 60_000
 const MAX_TOKEN_LENGTH = 8_192
 const MAX_DISCORD_FRIENDS = 1_000
+const MAX_DISCORD_SERVERS = 500
 const MAX_CHAT_CONVERSATIONS = 500
 const MAX_MESSAGE_LENGTH = 2_000
 const MAX_CHAT_HISTORY = 200
@@ -215,6 +219,33 @@ function sanitizedChatEvent(value: unknown): DiscordChatEvent | null {
   if (event.kind !== 'created' && event.kind !== 'updated') return null
   const message = sanitizedChatMessage(event.message)
   return message ? { kind: event.kind, message } : null
+}
+
+function sanitizedServerList(value: unknown): DiscordServerList | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const list = value as Partial<DiscordServerList>
+  const issues: DiscordServerIssue[] = ['not-connected', 'provider-unavailable']
+  if (
+    (list.state !== 'ready' && list.state !== 'unavailable') ||
+    (list.issue && !issues.includes(list.issue))
+  ) {
+    return null
+  }
+  const seen = new Set<string>()
+  const servers = Array.isArray(list.servers)
+    ? list.servers
+        .slice(0, MAX_DISCORD_SERVERS)
+        .map((value): DiscordServer | null => {
+          if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+          const server = value as Partial<DiscordServer>
+          const name = sanitizedText(server.name, 100)
+          if (!validDiscordId(server.id) || !name || seen.has(server.id)) return null
+          seen.add(server.id)
+          return { id: server.id, name }
+        })
+        .filter((server): server is DiscordServer => server !== null)
+    : []
+  return { state: list.state, servers, issue: list.issue }
 }
 
 function sanitizedAvatarUrl(value: unknown): string | undefined {
@@ -645,6 +676,35 @@ export class DiscordSocialService extends EventEmitter {
         )
       } catch {
         return { state: 'unavailable', conversations: [], issue: 'provider-unavailable' }
+      }
+    })
+  }
+
+  getServers(applicationIdInput: unknown): Promise<DiscordServerList> {
+    return this.runExclusive(async () => {
+      const applicationId = normalizedApplicationId(applicationIdInput)
+      if (!applicationId) {
+        return { state: 'unavailable', servers: [], issue: 'provider-unavailable' }
+      }
+      const tokens = this.readTokens(applicationId)
+      if (!tokens) return { state: 'unavailable', servers: [], issue: 'not-connected' }
+      try {
+        const response = await this.request('servers', applicationId, tokens)
+        if (response.clearTokens) this.clearTokens()
+        const refreshedTokens = sanitizedTokens(response.tokens)
+        if (refreshedTokens) this.saveTokens(applicationId, refreshedTokens)
+        if (!response.ok) {
+          return { state: 'unavailable', servers: [], issue: 'provider-unavailable' }
+        }
+        return (
+          sanitizedServerList(response.servers) ?? {
+            state: 'unavailable',
+            servers: [],
+            issue: 'provider-unavailable'
+          }
+        )
+      } catch {
+        return { state: 'unavailable', servers: [], issue: 'provider-unavailable' }
       }
     })
   }

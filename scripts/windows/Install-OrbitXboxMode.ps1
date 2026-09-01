@@ -20,7 +20,11 @@ Set-StrictMode -Version Latest
 
 $expectedPackageIdentity = 'ORBIT.GamingHome'
 $expectedApplicationId = 'ORBIT'
-$expectedPublisher = 'CN=ORBIT Development'
+$expectedPublisher = 'CN=Open Source Developer Luis Antonio Garcia Roque, O=Open Source Developer, L=Alfdorf, S=Baden-Württemberg, C=DE'
+$expectedIssuer = 'CN=Certum Code Signing 2021 CA, O=Asseco Data Systems S.A., C=PL'
+$expectedSignerThumbprint = '61E90C0AACBF2F407A575903FCC197F45B61706D'
+$legacyPublisher = 'CN=ORBIT Development'
+$legacySignerThumbprint = 'D1D2DE6B5C77C880DFEA5184245722C67F941189'
 $expectedGamingExtension = 'windows.gamingApp'
 $expectedGamingCapability = 'Microsoft.appCategory.gamingHome_8wekyb3d8bbwe'
 $minimumXboxModeVersion = [version]'10.0.26100.0'
@@ -249,7 +253,11 @@ function Assert-OrbitCertificate {
   param([System.Security.Cryptography.X509Certificates.X509Certificate2]$Certificate)
 
   $now = Get-Date
-  if ($Certificate.Subject -ne $expectedPublisher -or $Certificate.Issuer -ne $expectedPublisher) {
+  if (
+    $Certificate.Subject -ne $expectedPublisher -or
+    $Certificate.Issuer -ne $expectedIssuer -or
+    $Certificate.Thumbprint -ne $expectedSignerThumbprint
+  ) {
     throw "Unexpected certificate identity: $($Certificate.Subject)"
   }
   if ($Certificate.HasPrivateKey) { throw 'The public installer must not contain an ORBIT private key.' }
@@ -289,38 +297,28 @@ function Assert-PackageSignature {
   if (!$signature.SignerCertificate -or $signature.SignerCertificate.Thumbprint -ne $Certificate.Thumbprint) {
     throw 'The AppX package is not signed by the supplied ORBIT certificate.'
   }
-  if ($signature.Status -notin @('Valid', 'UnknownError', 'NotTrusted')) {
+  if ($signature.Status -ne 'Valid') {
     throw "The AppX signature is invalid: $($signature.Status) - $($signature.StatusMessage)"
-  }
-  if ($RequireTrusted -and $signature.Status -ne 'Valid') {
-    throw "Windows does not trust the AppX signature after certificate import: $($signature.Status) - $($signature.StatusMessage)"
   }
   return $signature
 }
 
-function Add-ValidatedCertificateTrust {
-  param([System.Security.Cryptography.X509Certificates.X509Certificate2]$Certificate)
+function Get-OrbitPackageByPublisher {
+  param([Parameter(Mandatory = $true)][string]$Publisher)
 
-  $store = [System.Security.Cryptography.X509Certificates.X509Store]::new(
-    [System.Security.Cryptography.X509Certificates.StoreName]::TrustedPeople,
-    [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine
-  )
-  try {
-    $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-    # Add the already validated in-memory certificate. Re-reading the CER path
-    # here would create a swap window between validation and machine trust.
-    $store.Add($Certificate)
-  } finally {
-    $store.Close()
-  }
+  return @(
+    Get-AppxPackage -Name $expectedPackageIdentity -ErrorAction SilentlyContinue |
+      Where-Object { $_.Publisher -eq $Publisher } |
+      Sort-Object Version -Descending
+  ) | Select-Object -First 1
 }
 
 function Get-InstalledOrbitPackage {
-  return @(
-    Get-AppxPackage -Name $expectedPackageIdentity -ErrorAction SilentlyContinue |
-      Where-Object { $_.Publisher -eq $expectedPublisher } |
-      Sort-Object Version -Descending
-  ) | Select-Object -First 1
+  return Get-OrbitPackageByPublisher -Publisher $expectedPublisher
+}
+
+function Get-LegacyOrbitPackage {
+  return Get-OrbitPackageByPublisher -Publisher $legacyPublisher
 }
 
 function Assert-InstalledOrbitPackage {
@@ -368,7 +366,7 @@ function Write-InstallDiagnostics {
 }
 
 if ([string]::IsNullOrWhiteSpace($PackagePath)) { $PackagePath = Get-DefaultXboxPackagePath }
-if ([string]::IsNullOrWhiteSpace($CertificatePath)) { $CertificatePath = Join-Path $PSScriptRoot 'ORBIT-Development.cer' }
+if ([string]::IsNullOrWhiteSpace($CertificatePath)) { $CertificatePath = Join-Path $PSScriptRoot 'ORBIT-Code-Signing.cer' }
 
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [Security.Principal.WindowsPrincipal]::new($identity)
@@ -393,7 +391,7 @@ if (!$ValidateOnly -and !$UpdateOnly -and !$isAdministrator) {
 }
 
 $diagnostics = [ordered]@{
-  schemaVersion = 2
+  schemaVersion = 3
   generatedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
   installerLanguage = [System.Threading.Thread]::CurrentThread.CurrentUICulture.Name
   mode = if ($UpdateOnly) { 'update' } elseif ($ValidateOnly) { 'validation' } else { 'install' }
@@ -401,15 +399,16 @@ $diagnostics = [ordered]@{
   phase = 'initialization'
 }
 $certificate = $null
-$certificateAdded = $false
 $developerModeChanged = $false
 $developerModePropertyExisted = $false
 $developerModeOriginalValue = $null
 $packageDeploymentCompleted = $false
 $packageRollbackCompleted = $false
 $developerModeRollbackCompleted = $false
-$certificateRollbackCompleted = $false
 $existingPackage = $null
+$legacyPackage = $null
+$legacyMigrationCompleted = $false
+$legacyRemovalStarted = $false
 
 try {
   if (!$ValidateOnly -and ![string]::IsNullOrWhiteSpace($InvokingUserSid) -and $InvokingUserSid -ne $currentUserSid) {
@@ -455,7 +454,7 @@ try {
     version = $packageContract.Version.ToString()
     architecture = $packageContract.Architecture
     minimumWindowsVersion = $packageContract.MinimumWindowsVersion.ToString()
-    signatureStatusBeforeTrust = $signature.Status.ToString()
+    signatureStatus = $signature.Status.ToString()
     signerThumbprint = $certificate.Thumbprint
     certificateSha256 = $certificateHash
     certificateNotAfterUtc = $certificate.NotAfter.ToUniversalTime().ToString('o')
@@ -488,6 +487,7 @@ try {
   }
 
   $existingPackage = Get-InstalledOrbitPackage
+  $legacyPackage = Get-LegacyOrbitPackage
   if ($UpdateOnly -and !$existingPackage) {
     throw 'ORBIT Xbox Mode is not installed for this Windows account. The update-only installer refuses to create a new installation.'
   }
@@ -510,20 +510,17 @@ try {
       packageFamilyName = $existingPackage.PackageFamilyName
     }
   } else { $null }
+  $diagnostics.legacyInstallation = if ($legacyPackage) {
+    [ordered]@{
+      version = $legacyPackage.Version.ToString()
+      packageFamilyName = $legacyPackage.PackageFamilyName
+      publisher = $legacyPackage.Publisher
+    }
+  } else { $null }
 
   $diagnostics.phase = 'machine-preparation'
-  $trustedCertificatePath = "Cert:\LocalMachine\TrustedPeople\$($certificate.Thumbprint)"
-  $certificateWasTrusted = Test-Path -LiteralPath $trustedCertificatePath
-  if ($UpdateOnly -and !$certificateWasTrusted) {
-    throw 'The installed ORBIT signing certificate is no longer trusted. Update-only mode will not change machine certificate trust.'
-  }
-  if (!$UpdateOnly -and !$certificateWasTrusted) {
-    Write-Host "Trusting the exact ORBIT signing certificate in LocalMachine\TrustedPeople: $($certificate.Thumbprint)"
-    Add-ValidatedCertificateTrust $certificate
-    $certificateAdded = $true
-  }
   $trustedSignature = Assert-PackageSignature $resolvedPackage $certificate -RequireTrusted
-  $diagnostics.package.signatureStatusAfterTrust = $trustedSignature.Status.ToString()
+  $diagnostics.package.publicTrustStatus = $trustedSignature.Status.ToString()
 
   $developerModeKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock'
   $developerModeState = Get-ItemProperty -LiteralPath $developerModeKey -ErrorAction SilentlyContinue
@@ -570,6 +567,37 @@ try {
     configuredGamingHome = $currentGamingHome
     orbitIsConfiguredGamingHome = $currentGamingHome -eq $orbitAumid
   }
+
+  if ($legacyPackage) {
+    $diagnostics.phase = 'legacy-publisher-migration'
+    Write-Host "Removing the legacy self-signed ORBIT Xbox Mode package after the new Certum package passed validation..."
+    # From this point forward the validated replacement is the recovery path. Even if
+    # Windows reports an ambiguous removal failure, never roll the new package back too.
+    $legacyRemovalStarted = $true
+    Remove-AppxPackage -Package $legacyPackage.PackageFullName -PreserveApplicationData -Confirm:$false
+    if (Get-LegacyOrbitPackage) { throw 'The legacy ORBIT Xbox Mode package is still registered after migration.' }
+    $legacyMigrationCompleted = $true
+    $diagnostics.legacyMigration = [ordered]@{
+      completed = $true
+      preservedApplicationData = $true
+      previousPackageFamilyName = $legacyPackage.PackageFamilyName
+    }
+
+    $legacyTrustedCertificatePath = "Cert:\LocalMachine\TrustedPeople\$legacySignerThumbprint"
+    if (Test-Path -LiteralPath $legacyTrustedCertificatePath) {
+      try {
+        Remove-Item -LiteralPath $legacyTrustedCertificatePath -Force
+        $diagnostics.legacyMigration.removedLegacyTrustedPublisher = !(Test-Path -LiteralPath $legacyTrustedCertificatePath)
+      } catch {
+        $diagnostics.legacyMigration.removedLegacyTrustedPublisher = $false
+        $diagnostics.legacyMigration.trustCleanupWarning = $_.Exception.Message
+        Write-Warning 'The new Certum package is installed, but the old ORBIT Development certificate could not be removed from TrustedPeople.'
+      }
+    } else {
+      $diagnostics.legacyMigration.removedLegacyTrustedPublisher = $false
+    }
+  }
+
   $diagnostics.result = 'success'
   $diagnostics.phase = 'complete'
   $diagnostics.completedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
@@ -607,7 +635,7 @@ try {
   if (!$ValidateOnly) {
     $diagnostics.phase = 'rollback'
     $canRestoreMachinePreparation = !$packageDeploymentCompleted
-    if ($packageDeploymentCompleted -and !$existingPackage) {
+    if ($packageDeploymentCompleted -and !$existingPackage -and !$legacyRemovalStarted) {
       try {
         $newPackage = Get-InstalledOrbitPackage
         if ($newPackage) { Remove-AppxPackage -Package $newPackage.PackageFullName -Confirm:$false }
@@ -633,21 +661,15 @@ try {
       }
     }
 
-    if ($canRestoreMachinePreparation -and $certificateAdded -and $certificate) {
-      try {
-        $trustedCertificatePath = "Cert:\LocalMachine\TrustedPeople\$($certificate.Thumbprint)"
-        if (Test-Path -LiteralPath $trustedCertificatePath) { Remove-Item -LiteralPath $trustedCertificatePath -Force }
-        if (Test-Path -LiteralPath $trustedCertificatePath) { throw 'The newly trusted certificate is still present after rollback.' }
-        $certificateRollbackCompleted = $true
-      } catch {
-        $diagnostics.rollbackCertificateError = $_.Exception.Message
-      }
+    $legacyPackageStillRegistered = $false
+    if ($legacyPackage) {
+      try { $legacyPackageStillRegistered = $null -ne (Get-LegacyOrbitPackage) } catch {}
     }
-
     $diagnostics.rollback = [ordered]@{
       packageRemovedAfterFailedFirstInstall = $packageRollbackCompleted
+      validatedReplacementPreservedAfterLegacyRemovalStarted = $legacyRemovalStarted -and !$packageRollbackCompleted
       developerModeRestored = $developerModeRollbackCompleted
-      certificateTrustRestored = $certificateRollbackCompleted
+      legacyPackagePreserved = $legacyPackageStillRegistered
     }
     $diagnostics.phase = 'failed'
     try { Write-InstallDiagnostics $diagnostics } catch { Write-Warning "Installation diagnostics could not be written: $($_.Exception.Message)" }

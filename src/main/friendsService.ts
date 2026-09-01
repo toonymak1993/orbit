@@ -7,6 +7,7 @@ import type {
   DiscordChatHistory,
   DiscordChatInbox,
   DiscordChatSendResult,
+  DiscordServerList,
   FriendPresence,
   EpicAccount,
   FriendsProvider,
@@ -683,6 +684,21 @@ export class FriendsService extends EventEmitter {
 
   getDiscordChatInbox(): Promise<DiscordChatInbox> {
     return discordSocialService.getChatInbox(ORBIT_DISCORD_APPLICATION_ID)
+  }
+
+  getDiscordServers(): Promise<DiscordServerList> {
+    return discordSocialService.getServers(ORBIT_DISCORD_APPLICATION_ID)
+  }
+
+  async openDiscordServer(serverId: unknown): Promise<void> {
+    if (typeof serverId !== 'string' || !/^\d{17,20}$/u.test(serverId)) {
+      throw new Error('Invalid Discord server')
+    }
+    try {
+      await shell.openExternal(`discord://-/channels/${serverId}`)
+    } catch {
+      await shell.openExternal(`https://discord.com/channels/${serverId}`)
+    }
   }
 
   sendDiscordChatMessage(userId: unknown, content: unknown): Promise<DiscordChatSendResult> {

@@ -250,6 +250,47 @@ function findNearestCandidate(
   direction: NavDirection,
   candidates: HTMLElement[]
 ): HTMLElement | null {
+  if (direction === 'up' || direction === 'down') {
+    const currentLayer = verticalNavigationLayer(current)
+    const sameLayerTarget = findBestDirectionalCandidate(
+      current,
+      direction,
+      candidates.filter((candidate) => verticalNavigationLayer(candidate) === currentLayer)
+    )
+
+    // Page content owns vertical movement until its real edge is reached. Only
+    // then may focus climb into the LT/RT tabs and finally into the top bar.
+    if (currentLayer === CONTENT_NAVIGATION_LAYER && sameLayerTarget) {
+      return sameLayerTarget
+    }
+
+    const transitionLayer = nextVerticalNavigationLayer(currentLayer, direction, candidates)
+    if (transitionLayer !== null) {
+      const layerCandidates = candidates.filter(
+        (candidate) => verticalNavigationLayer(candidate) === transitionLayer
+      )
+      if (transitionLayer === TOP_NAVIGATION_LAYER) {
+        return getPreferredTopNavEntry() ??
+          findBestDirectionalCandidate(current, direction, layerCandidates)
+      }
+      if (transitionLayer === SECONDARY_NAVIGATION_LAYER) {
+        return getPreferredSecondaryNavEntry(layerCandidates) ??
+          findBestDirectionalCandidate(current, direction, layerCandidates)
+      }
+      return findBestDirectionalCandidate(current, direction, layerCandidates)
+    }
+
+    return sameLayerTarget
+  }
+
+  return findBestDirectionalCandidate(current, direction, candidates)
+}
+
+function findBestDirectionalCandidate(
+  current: HTMLElement,
+  direction: NavDirection,
+  candidates: HTMLElement[]
+): HTMLElement | null {
   const currentRect = current.getBoundingClientRect()
   let best: HTMLElement | null = null
   let bestScore = Infinity
@@ -264,11 +305,48 @@ function findNearestCandidate(
     }
   }
 
-  if (direction === 'up' && best?.closest('[data-top-nav]') && !current.closest('[data-top-nav]')) {
-    return getPreferredTopNavEntry() ?? best
+  return best
+}
+
+const TOP_NAVIGATION_LAYER = 0
+const SECONDARY_NAVIGATION_LAYER = 1
+const CONTENT_NAVIGATION_LAYER = 2
+
+function verticalNavigationLayer(element: HTMLElement): number {
+  if (element.closest('[data-top-nav]')) return TOP_NAVIGATION_LAYER
+  if (element.closest('[data-navigation-layer="secondary"]')) {
+    return SECONDARY_NAVIGATION_LAYER
+  }
+  return CONTENT_NAVIGATION_LAYER
+}
+
+function nextVerticalNavigationLayer(
+  currentLayer: number,
+  direction: Extract<NavDirection, 'up' | 'down'>,
+  candidates: HTMLElement[]
+): number | null {
+  const availableLayers = new Set(candidates.map(verticalNavigationLayer))
+  if (direction === 'up') {
+    for (let layer = currentLayer - 1; layer >= TOP_NAVIGATION_LAYER; layer -= 1) {
+      if (availableLayers.has(layer)) return layer
+    }
+    return null
   }
 
-  return best
+  for (let layer = currentLayer + 1; layer <= CONTENT_NAVIGATION_LAYER; layer += 1) {
+    if (availableLayers.has(layer)) return layer
+  }
+  return null
+}
+
+function getPreferredSecondaryNavEntry(candidates: HTMLElement[]): HTMLElement | null {
+  return (
+    candidates.find((candidate) => candidate.getAttribute('aria-current') === 'page') ??
+    candidates.find((candidate) => candidate.getAttribute('aria-pressed') === 'true') ??
+    candidates.find((candidate) => candidate.dataset.searchFocusFallback === 'true') ??
+    candidates[0] ??
+    null
+  )
 }
 
 /**
@@ -512,7 +590,10 @@ export function focusFirstIn(container: ParentNode = document): void {
   focusElement(el)
 }
 
-export function moveFocus(direction: NavDirection): boolean {
+export function moveFocus(
+  direction: NavDirection,
+  options: { allowNavigationLayerTransition?: boolean } = {}
+): boolean {
   const current = document.activeElement as HTMLElement | null
   if (!current || !current.hasAttribute('data-focusable')) {
     const previous = document.activeElement
@@ -529,6 +610,12 @@ export function moveFocus(direction: NavDirection): boolean {
   }
   const next = findNextFocus(current, direction)
   if (!next) return false
+  if (
+    options.allowNavigationLayerTransition === false &&
+    verticalNavigationLayer(current) !== verticalNavigationLayer(next)
+  ) {
+    return false
+  }
   focusElement(next)
   return true
 }

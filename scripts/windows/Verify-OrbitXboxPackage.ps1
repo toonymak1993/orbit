@@ -8,6 +8,8 @@ Import-Module (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsof
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $releaseDir = Join-Path $repoRoot 'release'
+. (Join-Path $PSScriptRoot 'OrbitSigning.ps1')
+$signingProfile = Get-OrbitSigningProfile -RepoRoot $repoRoot
 $releaseMetadata = Get-Content -LiteralPath (Join-Path $repoRoot 'resources\release-manifest.json') -Raw | ConvertFrom-Json
 $displayVersion = [string]$releaseMetadata.displayVersion
 $packageVersion = [string]$releaseMetadata.packageVersion
@@ -23,10 +25,10 @@ $xboxMinimumWindowsVersion = [version][string]$releaseMetadata.xboxMode.minimumW
 $releaseSequence = [int]$releaseMetadata.releaseSequence
 $packagePath = Join-Path $releaseDir "$artifactPrefix-XboxMode-$displayVersion-x64.appx"
 $installerPath = Join-Path $releaseDir "$artifactPrefix-XboxMode-Setup-$displayVersion-x64.exe"
-$certificatePath = Join-Path $releaseDir 'ORBIT-Development.cer'
+$certificatePath = Join-Path $releaseDir 'ORBIT-Code-Signing.cer'
+$signingMetadataPath = Join-Path $releaseDir 'code-signing.json'
 $installScriptPath = Join-Path $releaseDir 'Install-OrbitXboxMode.ps1'
 $installBatchPath = Join-Path $releaseDir 'Install-OrbitXboxMode.bat'
-$certificateMetadataPath = Join-Path $repoRoot '.certificates\orbit-development.json'
 $inspectionDir = Join-Path $releaseDir '_orbit-xbox-inspection'
 $readmePath = Join-Path $releaseDir 'XBOX-MODE-README.txt'
 $installerDefinitionPath = Join-Path $repoRoot 'build\xbox\OrbitXboxInstaller.nsi'
@@ -36,9 +38,9 @@ $certificate = $null
 if (!(Test-Path -LiteralPath $packagePath)) { throw "Missing Xbox Mode package: $packagePath" }
 if (!(Test-Path -LiteralPath $installerPath)) { throw "Missing one-click Xbox Mode setup: $installerPath" }
 if (!(Test-Path -LiteralPath $certificatePath)) { throw "Missing public Xbox Mode certificate: $certificatePath" }
+if (!(Test-Path -LiteralPath $signingMetadataPath)) { throw "Missing public signing metadata: $signingMetadataPath" }
 if (!(Test-Path -LiteralPath $installScriptPath)) { throw "Missing fallback Xbox Mode installer: $installScriptPath" }
 if (!(Test-Path -LiteralPath $installBatchPath)) { throw "Missing fallback Xbox Mode launcher: $installBatchPath" }
-if (!(Test-Path -LiteralPath $certificateMetadataPath)) { throw "Missing certificate metadata: $certificateMetadataPath" }
 if (!(Test-Path -LiteralPath $installerDefinitionPath)) { throw "Missing Xbox Mode installer definition: $installerDefinitionPath" }
 
 $installerDefinition = Get-Content -LiteralPath $installerDefinitionPath -Raw
@@ -53,6 +55,12 @@ if ($installerLanguages.Count -ne 1 -or $installerLanguages[0] -cne 'English') {
 if ($installerDefinition -notmatch '(?m)^\s*File\s+/oname=ORBIT\.appx\s+"\$\{APPX_PATH\}"\s*$') {
   throw 'The Xbox Mode installer must embed the verified AppX package.'
 }
+if ($installerDefinition -notmatch '(?m)^\s*File\s+/oname=ORBIT-Code-Signing\.cer\s+"\$\{CERT_PATH\}"\s*$') {
+  throw 'The Xbox Mode installer must embed the pinned public Certum certificate.'
+}
+if ($installerDefinition -match 'Local Machine\\Trusted People|ORBIT-Development\.cer') {
+  throw 'The public Xbox Mode installer still contains legacy self-signed trust instructions.'
+}
 
 $resolvedRelease = [System.IO.Path]::GetFullPath($releaseDir).TrimEnd('\') + '\'
 $resolvedInspection = [System.IO.Path]::GetFullPath($inspectionDir)
@@ -62,39 +70,24 @@ if (!$resolvedInspection.StartsWith($resolvedRelease, [System.StringComparison]:
 if (Test-Path -LiteralPath $inspectionDir) { Remove-Item -LiteralPath $inspectionDir -Recurse -Force }
 
 try {
-  $certificateMetadata = Get-Content -LiteralPath $certificateMetadataPath -Raw | ConvertFrom-Json
   $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certificatePath)
   if (
-    $certificate.Subject -ne 'CN=ORBIT Development' -or
-    $certificate.Issuer -ne 'CN=ORBIT Development' -or
+    $certificate.Subject -ne $signingProfile.Subject -or
+    $certificate.Issuer -ne $signingProfile.Issuer -or
     $certificate.HasPrivateKey -or
-    $certificate.Thumbprint -ne $certificateMetadata.thumbprint -or
+    $certificate.Thumbprint -ne $signingProfile.Thumbprint -or
+    (Get-FileHash -LiteralPath $certificatePath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $signingProfile.CertificateSha256 -or
     $certificate.NotAfter -le (Get-Date).AddDays(30)
   ) {
     throw 'The public ORBIT certificate failed its identity, lifetime, or private-key checks.'
   }
-
-  $signature = Get-AuthenticodeSignature -FilePath $packagePath
-  if (!$signature.SignerCertificate -or $signature.SignerCertificate.Thumbprint -ne $certificateMetadata.thumbprint) {
-    throw 'The package signer does not match the ORBIT development certificate.'
-  }
-  if ($signature.Status -ne 'Valid') {
-    throw "Invalid AppX signature: $($signature.Status) - $($signature.StatusMessage)"
-  }
-  if (!$signature.TimeStamperCertificate) {
-    throw 'The AppX signature has no trusted timestamp.'
+  if ((Get-FileHash -LiteralPath $signingMetadataPath -Algorithm SHA256).Hash -cne (Get-FileHash -LiteralPath $signingProfile.MetadataPath -Algorithm SHA256).Hash) {
+    throw 'The copied public signing metadata does not match the repository source.'
   }
 
-  $installerSignature = Get-AuthenticodeSignature -FilePath $installerPath
-  if (!$installerSignature.SignerCertificate -or $installerSignature.SignerCertificate.Thumbprint -ne $certificateMetadata.thumbprint) {
-    throw 'The one-click setup signer does not match the ORBIT development certificate.'
-  }
-  if ($installerSignature.Status -ne 'Valid') {
-    throw "Invalid setup signature: $($installerSignature.Status) - $($installerSignature.StatusMessage)"
-  }
-  if (!$installerSignature.TimeStamperCertificate) {
-    throw 'The one-click setup signature has no trusted timestamp.'
-  }
+  $signature = Assert-OrbitSignedFile -Path $packagePath -Profile $signingProfile
+
+  $installerSignature = Assert-OrbitSignedFile -Path $installerPath -Profile $signingProfile
 
   $makeAppx = Get-ChildItem (Join-Path $repoRoot '.tools\windows-sdk-buildtools') -Recurse -Filter makeappx.exe -ErrorAction Stop |
     Where-Object { $_.FullName -match '\\x64\\' } |
@@ -115,7 +108,7 @@ try {
   $packageIdentity = $manifest.SelectSingleNode('/f:Package/f:Identity', $namespaceManager)
   if (
     $packageIdentity.Name -ne 'ORBIT.GamingHome' -or
-    $packageIdentity.Publisher -ne 'CN=ORBIT Development' -or
+    $packageIdentity.Publisher -ne $signingProfile.Subject -or
     $packageIdentity.ProcessorArchitecture -ne 'x64' -or
     $packageIdentity.Version -ne $xboxPackageVersion
   ) {
@@ -168,6 +161,9 @@ try {
     }
   }
 
+  $packagedApplicationPath = Join-Path $inspectionDir 'app\ORBIT.exe'
+  $packagedApplicationSignature = Assert-OrbitSignedFile -Path $packagedApplicationPath -Profile $signingProfile
+
   $packagedRelease = Get-Content -LiteralPath (Join-Path $inspectionDir 'app\resources\release-manifest.json') -Raw | ConvertFrom-Json
   if (
     $packagedRelease.displayVersion -ne $displayVersion -or
@@ -178,7 +174,11 @@ try {
     $packagedRelease.xboxMode.packageIdentity -ne 'ORBIT.GamingHome' -or
     $packagedRelease.xboxMode.applicationId -ne 'ORBIT' -or
     $packagedRelease.xboxMode.appExtension -ne 'windows.gamingApp' -or
-    $packagedRelease.xboxMode.customCapability -ne 'Microsoft.appCategory.gamingHome_8wekyb3d8bbwe'
+    $packagedRelease.xboxMode.customCapability -ne 'Microsoft.appCategory.gamingHome_8wekyb3d8bbwe' -or
+    $packagedRelease.signingCertificate.thumbprint -ne $signingProfile.Thumbprint -or
+    $packagedRelease.signingCertificate.subject -ne $signingProfile.Subject -or
+    @($packagedRelease.updates.signerThumbprints).Count -ne 1 -or
+    @($packagedRelease.updates.signerThumbprints)[0] -ne $signingProfile.Thumbprint
   ) {
     throw "The packaged release manifest does not describe Xbox Mode $releaseLabel $displayVersion."
   }
@@ -252,6 +252,16 @@ try {
         timestampSigner = $installerSignature.TimeStamperCertificate.Subject
       },
       [ordered]@{
+        role = 'packaged-application'
+        file = 'ORBIT.exe'
+        size = (Get-Item -LiteralPath $packagedApplicationPath).Length
+        sha256 = (Get-FileHash -LiteralPath $packagedApplicationPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        signatureStatus = $packagedApplicationSignature.Status.ToString()
+        signer = $packagedApplicationSignature.SignerCertificate.Subject
+        signerThumbprint = $packagedApplicationSignature.SignerCertificate.Thumbprint
+        timestampSigner = $packagedApplicationSignature.TimeStamperCertificate.Subject
+      },
+      [ordered]@{
         role = 'public-certificate'
         file = (Get-Item -LiteralPath $certificatePath).Name
         size = (Get-Item -LiteralPath $certificatePath).Length
@@ -277,14 +287,17 @@ Recommended: run $artifactPrefix-XboxMode-Setup-$displayVersion-x64.exe. It is a
 ZIP fallback:
 1. Keep all files from the ZIP in the same folder.
 2. Double-click Install-OrbitXboxMode.bat.
-3. Approve the administrator prompt. The installer adds the certificate only to LocalMachine\TrustedPeople,
-   enables Developer Mode for the SCCD capability, and installs the AppX package.
+3. Approve the administrator prompt. The installer verifies the publicly trusted Certum signature,
+   enables Developer Mode for the SCCD capability, and installs the AppX package without installing a certificate
+   into a Windows trust store. During the one-time Beta 1 migration, it may remove only the exact legacy ORBIT
+   development certificate after the new package has been installed and verified.
 4. The installer opens Settings > Gaming > Xbox mode. Under Choose home app, select ORBIT.
 
 Requirements: Windows 11 version 24H2 (build 10.0.26100.0) or newer. Xbox Mode availability still depends
 on Microsoft's supported markets, device policy, and phased Windows feature rollout. ORBIT deliberately does
 not hard-code an Xbox app version or write the selected Gaming Home app directly.
-This ORBIT $releaseLabel is signed with the self-signed ORBIT certificate. Verify its thumbprint before trusting it.
+This ORBIT $releaseLabel is signed with the publicly trusted Certum Open Source Code Signing certificate.
+SmartScreen reputation can still take time to build for a new certificate and binary.
 Expected certificate thumbprint: $($certificate.Thumbprint)
 "@ | Set-Content -LiteralPath $readmePath -Encoding UTF8
 
@@ -292,6 +305,7 @@ Expected certificate thumbprint: $($certificate.Thumbprint)
     $installerPath,
     $packagePath,
     $certificatePath,
+    $signingMetadataPath,
     $installScriptPath,
     $installBatchPath,
     $readmePath,

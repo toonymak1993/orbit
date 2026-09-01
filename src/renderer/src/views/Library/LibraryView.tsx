@@ -638,6 +638,7 @@ export function LibraryView(): JSX.Element {
         className="grid grid-cols-1 gap-x-3 gap-y-2 2xl:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] 2xl:items-center"
       >
         <div
+          data-navigation-layer="secondary"
           className="col-start-1 flex h-10 w-fit max-w-full shrink-0 items-center justify-self-center rounded-full border border-white/10 bg-black/25 px-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.035)] 2xl:col-start-2 2xl:row-start-1"
           aria-label={t('library.source.label')}
         >

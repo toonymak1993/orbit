@@ -45,13 +45,13 @@ ORBIT `0.1.1` is the current stable release. Download **`ORBIT-XboxMode-Setup-0.
 
 Run the setup from the Windows account that should own ORBIT and approve the administrator prompt. After installation, Windows opens **Settings > Gaming > Xbox mode** so ORBIT can be selected as the home app.
 
-> ORBIT currently uses a self-signed `CN=ORBIT Development` certificate. Windows can therefore show an unknown-publisher or SmartScreen warning. The setup trusts only the embedded public certificate in `LocalMachine\TrustedPeople`; it never installs a private key or adds the certificate to a Root store. Verify the SHA-256 hash and certificate thumbprint published in the release notes before installing.
+> The historical stable `0.1.1` release still uses the self-signed `CN=ORBIT Development` certificate. Public betas from `0.1.2-beta.2` onward use the publicly trusted Certum Open Source Code Signing certificate; ORBIT never installs that public certificate into a Windows trust store. During the one-time Beta 1 migration, setup may remove only the exact legacy ORBIT development certificate after the new package has been installed and verified. SmartScreen may still warn while a new certificate or binary builds reputation; always verify the SHA-256 and signer published in the release notes.
 
 ### Public beta
 
-ORBIT `0.1.2-beta.1` is available for community testing as a GitHub prerelease. Beta testers should download only **`ORBIT-Beta-XboxMode-Setup-0.1.2-beta.1-x64.exe`** from the [0.1.2 Beta 1 release](https://github.com/toonymak1993/orbit/releases/tag/v0.1.2-beta.1). It is the complete English all-in-one setup and follows the beta update channel; stable installations remain on the stable channel.
+ORBIT `0.1.2-beta.2` is available for community testing as a GitHub prerelease. Beta testers should download only **`ORBIT-Beta-XboxMode-Setup-0.1.2-beta.2-x64.exe`** from the [0.1.2 Beta 2 release](https://github.com/toonymak1993/orbit/releases/tag/v0.1.2-beta.2). It is the complete English all-in-one setup and follows the beta update channel; stable installations remain on the stable channel.
 
-This beta adds PlayStation, GOG, EA app, Ubisoft Connect and retro libraries, a controller-friendly Applications hub, Discord conversations, XMODE, one-click ORBIT Horizon desktop and lock-screen personalization, broader controller support and extensive Library, artwork, achievement and launch improvements. See the complete [0.1.2 Beta 1 testing notes](docs/releases/0.1.2-beta.1.md) before installing.
+Beta 2 adds the first publicly trusted ORBIT signing line, direct Xbox game installation requests, broader Xbox and Xbox 360 library reconciliation, richer Xbox download progress, Discord server access and more predictable hierarchical controller navigation. It also includes every Beta 1 feature. Beta 1 users must run this all-in-one setup manually once because the old build cannot trust a signer it did not yet know, then select ORBIT once again under **Settings > Gaming > Xbox mode**. See the complete [0.1.2 Beta 2 testing notes](docs/releases/0.1.2-beta.2.md) before installing.
 
 ### Requirements
 
@@ -92,7 +92,7 @@ Create a production build with `npm run build`. Windows installer and Xbox Mode 
 
 ## Project status
 
-ORBIT `0.1.1` is the current stable public release, with `0.1.2-beta.1` available separately for community testing. Integrations and packaging will continue to evolve as the launcher is tested across more PCs, handhelds and game libraries.
+ORBIT `0.1.1` is the current stable public release, with `0.1.2-beta.2` available separately for community testing. Integrations and packaging will continue to evolve as the launcher is tested across more PCs, handhelds and game libraries.
 
 ORBIT is an independent project and is not affiliated with Valve, Epic Games, Microsoft, Xbox or the publishers shown in screenshots.
 

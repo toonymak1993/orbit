@@ -920,6 +920,7 @@ export function SettingsView(): JSX.Element {
     <div ref={containerRef} className="flex h-full flex-col gap-5 overflow-hidden px-8 pb-8 pt-[6.5rem]">
       <div className="flex shrink-0 items-center justify-center">
         <div
+          data-navigation-layer="secondary"
           className="flex items-center gap-1 rounded-full border border-white/10 bg-black/25 p-1"
           aria-label={t('settings.page.label')}
         >

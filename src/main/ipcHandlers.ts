@@ -887,6 +887,10 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
   ipcMain.handle(IPC.discordChatSetVisible, (_e, showing: unknown) =>
     friendsService.setDiscordChatVisible(showing)
   )
+  ipcMain.handle(IPC.discordServersList, () => friendsService.getDiscordServers())
+  ipcMain.handle(IPC.discordServerOpen, (_e, serverId: unknown) =>
+    friendsService.openDiscordServer(serverId)
+  )
 
   ipcMain.handle(IPC.libraryGet, () => {
     const account = steamAuthManager.getAccount()

@@ -530,6 +530,21 @@ export type DiscordChatEvent =
   | { kind: 'created' | 'updated'; message: DiscordChatMessage }
   | { kind: 'deleted'; messageId: string }
 
+export type DiscordServerIssue = 'not-connected' | 'provider-unavailable'
+
+/** A minimal Discord guild record. The Social SDK intentionally exposes no
+ * server icon in this discovery response, so ORBIT keeps this contract small. */
+export interface DiscordServer {
+  id: string
+  name: string
+}
+
+export interface DiscordServerList {
+  state: 'ready' | 'unavailable'
+  servers: DiscordServer[]
+  issue?: DiscordServerIssue
+}
+
 export type GameProvider =
   | 'steam'
   | 'epic'
@@ -1220,6 +1235,8 @@ export const IPC = {
   discordChatSend: 'friends:discord-chat:send',
   discordChatSetVisible: 'friends:discord-chat:set-visible',
   discordChatMessage: 'friends:discord-chat:message',
+  discordServersList: 'friends:discord-servers:list',
+  discordServerOpen: 'friends:discord-server:open',
   libraryGet: 'library:get',
   libraryStatsGet: 'library:stats:get',
   libraryRefresh: 'library:refresh',

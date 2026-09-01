@@ -3,7 +3,8 @@ import { readdir, readFile, stat } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
 import type {
   LauncherDownloadActivity,
-  LauncherDownloadSnapshot
+  LauncherDownloadSnapshot,
+  LibraryGame
 } from '../../shared/ipc'
 import { gameRepository } from '../library/gameRepository'
 import { getSteamAppsDirectories } from '../steam/steamInstall'
@@ -13,6 +14,10 @@ import {
   xboxPackageActivityMonitor,
   type XboxPackageProgressEvent
 } from '../xbox/xboxPackageActivity'
+import {
+  xboxProductInstallService,
+  type XboxProductInstallProgress
+} from '../xbox/xboxInstallRequest'
 import {
   deriveEpicDownloadActivity,
   deriveSteamDownloadActivity,
@@ -34,6 +39,7 @@ const MAX_EPIC_PENDING_ITEMS = 32
 const MAX_EPIC_MANIFEST_BYTES = 2 * 1024 * 1024
 const MAX_EPIC_SHALLOW_ENTRIES = 128
 const XBOX_ACTIVITY_STALE_MS = 2 * 60_000
+const XBOX_REQUEST_STALE_MS = 10 * 60_000
 const XBOX_PHASE_TRANSITION_MS = 20_000
 const XBOX_PENDING_EVENT_MS = 2 * 60_000
 const MAX_PENDING_XBOX_PACKAGES = 32
@@ -223,6 +229,7 @@ export class LauncherDownloadMonitor extends EventEmitter {
   private steamActivities = new Map<string, LauncherDownloadActivity>()
   private epicActivities = new Map<string, LauncherDownloadActivity>()
   private xboxActivities = new Map<string, LauncherDownloadActivity>()
+  private xboxRequestedActivities = new Map<string, LauncherDownloadActivity>()
   private xboxTransitionExpiries = new Map<string, number>()
   private pendingXboxEvents = new Map<string, PendingXboxEvent>()
   private xboxLibraryRefreshes = new Map<string, XboxLibraryRefresh>()
@@ -239,6 +246,7 @@ export class LauncherDownloadMonitor extends EventEmitter {
     this.running = true
     xboxPackageActivityMonitor.on('progress', this.receiveXboxProgress)
     xboxPackageActivityMonitor.on('unavailable', this.receiveXboxUnavailable)
+    xboxProductInstallService.on('progress', this.receiveXboxProductInstallProgress)
     xboxLibraryService.on('updated', this.receiveXboxLibraryUpdate)
     xboxPackageActivityMonitor.start()
     this.schedule(350)
@@ -257,6 +265,7 @@ export class LauncherDownloadMonitor extends EventEmitter {
     this.steamActivities.clear()
     this.epicActivities.clear()
     this.xboxActivities.clear()
+    this.xboxRequestedActivities.clear()
     this.xboxTransitionExpiries.clear()
     this.pendingXboxEvents.clear()
     for (const refresh of this.xboxLibraryRefreshes.values()) {
@@ -272,6 +281,8 @@ export class LauncherDownloadMonitor extends EventEmitter {
     }
     xboxPackageActivityMonitor.off('progress', this.receiveXboxProgress)
     xboxPackageActivityMonitor.off('unavailable', this.receiveXboxUnavailable)
+    xboxProductInstallService.off('progress', this.receiveXboxProductInstallProgress)
+    xboxProductInstallService.stop()
     xboxLibraryService.off('updated', this.receiveXboxLibraryUpdate)
     xboxPackageActivityMonitor.stop()
   }
@@ -286,6 +297,74 @@ export class LauncherDownloadMonitor extends EventEmitter {
   private schedule(delay: number): void {
     if (!this.running) return
     this.timer = setTimeout(() => void this.scanAndSchedule(), delay)
+  }
+
+  /** Makes an accepted ORBIT install request visible immediately. The exact
+   * AppInstallStatus stream replaces this optimistic 0% state as soon as
+   * Windows publishes its first queue sample. */
+  announceXboxInstallRequest(game: LibraryGame, productId: string): void {
+    if (!this.running || game.provider !== 'xbox' || !/^[A-Z0-9]{12}$/.test(productId)) return
+    const now = Date.now()
+    const id = `xbox:request:${productId.toLowerCase()}`
+    if (this.xboxRequestedActivities.get(id)?.confidence === 'exact') return
+    this.xboxRequestedActivities.set(id, {
+      id,
+      provider: 'xbox',
+      providerGameId: productId,
+      gameId: game.id,
+      title: game.name.slice(0, 160),
+      phase: 'downloading',
+      confidence: 'heuristic',
+      progress: 0,
+      updatedAt: now
+    })
+    this.publish(now)
+  }
+
+  private readonly receiveXboxProductInstallProgress = (
+    event: XboxProductInstallProgress
+  ): void => {
+    if (!this.running) return
+    const now = Date.now()
+    const id = `xbox:request:${event.productId.toLowerCase()}`
+    const previous = this.xboxRequestedActivities.get(id)
+    let game = previous?.gameId ? gameRepository.getGame(previous.gameId) : undefined
+    if (!game) game = gameRepository.getGame(`xbox:${event.productId}`)
+    const activity: LauncherDownloadActivity = {
+      id,
+      provider: 'xbox',
+      providerGameId: event.productId,
+      gameId: game?.id ?? previous?.gameId,
+      title: (game?.name ?? previous?.title ?? 'Xbox game').slice(0, 160),
+      phase: event.phase,
+      confidence: 'exact',
+      progress: event.progress,
+      bytesDownloaded: event.bytesDownloaded,
+      bytesTotal: event.bytesTotal,
+      updatedAt: now
+    }
+
+    for (const [packageId, packageActivity] of this.xboxActivities) {
+      if (
+        packageActivity.providerGameId === event.productId ||
+        (activity.gameId && packageActivity.gameId === activity.gameId)
+      ) {
+        this.xboxActivities.delete(packageId)
+        this.xboxTransitionExpiries.delete(packageId)
+      }
+    }
+
+    if (event.phase === 'completed' || event.phase === 'error') {
+      this.xboxRequestedActivities.delete(id)
+      this.terminalActivities.set(
+        id,
+        terminalActivity(activity, event.phase === 'error' ? 'error' : 'completed', now)
+      )
+    } else {
+      this.terminalActivities.delete(id)
+      this.xboxRequestedActivities.set(id, activity)
+    }
+    this.publish(now)
   }
 
   private readonly receiveXboxProgress = (event: XboxPackageProgressEvent): void => {
@@ -310,6 +389,19 @@ export class LauncherDownloadMonitor extends EventEmitter {
       }
       return
     }
+    const requestedId = event.gamingProductId
+      ? `xbox:request:${event.gamingProductId.toLowerCase()}`
+      : undefined
+    const requested = requestedId
+      ? this.xboxRequestedActivities.get(requestedId)
+      : [...this.xboxRequestedActivities.values()].find(
+          (activity) => game?.id && activity.gameId === game.id
+        )
+    if (requested?.confidence === 'exact') {
+      if (state.refreshLibrary) this.scheduleXboxLibraryRefresh(event)
+      return
+    }
+    if (requested) this.xboxRequestedActivities.delete(requested.id)
     if (!game && !event.isGamingPackage) {
       if (this.pendingXboxEvents.size >= MAX_PENDING_XBOX_PACKAGES) {
         const oldest = this.pendingXboxEvents.keys().next().value as string | undefined
@@ -563,18 +655,25 @@ export class LauncherDownloadMonitor extends EventEmitter {
     for (const [key, pending] of this.pendingXboxEvents) {
       if (now - pending.receivedAt > XBOX_PENDING_EVENT_MS) this.pendingXboxEvents.delete(key)
     }
+    for (const [id, activity] of this.xboxRequestedActivities) {
+      if (now - activity.updatedAt > XBOX_REQUEST_STALE_MS) {
+        this.xboxRequestedActivities.delete(id)
+      }
+    }
     for (const [id, terminal] of this.terminalActivities) {
       if (terminal.expiresAt <= now) this.terminalActivities.delete(id)
     }
     const liveIds = new Set([
       ...this.steamActivities.keys(),
       ...this.epicActivities.keys(),
-      ...this.xboxActivities.keys()
+      ...this.xboxActivities.keys(),
+      ...this.xboxRequestedActivities.keys()
     ])
     const activities = [
       ...this.steamActivities.values(),
       ...this.epicActivities.values(),
       ...this.xboxActivities.values(),
+      ...this.xboxRequestedActivities.values(),
       ...[...this.terminalActivities.values()]
         .filter((terminal) => !liveIds.has(terminal.activity.id))
         .map((terminal) => terminal.activity)

@@ -12,6 +12,7 @@ interface XboxPackageRecord {
   packageFullName?: string
   packageFamilyName?: string
   packageVersion?: string
+  storeId?: string
   applicationId?: string
   name?: string
   publisher?: string
@@ -69,7 +70,25 @@ $records = @(
       continue
     }
 
-    $manifestPath = Join-Path ([string]$package.InstallLocation) 'AppxManifest.xml'
+    $installLocation = [string]$package.InstallLocation
+    $manifestPath = Join-Path $installLocation 'AppxManifest.xml'
+    $gameConfigPath = Join-Path $installLocation 'MicrosoftGame.config'
+    $gameConfig = $null
+    $storeId = $null
+    $configuredExecutable = $null
+    if (Test-Path -LiteralPath $gameConfigPath) {
+      try {
+        [xml]$gameConfig = [System.IO.File]::ReadAllText($gameConfigPath)
+        $candidateStoreId = ([string]$gameConfig.Game.StoreId).Trim().ToUpperInvariant()
+        $configuredExecutable = @($gameConfig.Game.ExecutableList.Executable |
+          Where-Object { $_.Name -and (-not $_.TargetDeviceFamily -or $_.TargetDeviceFamily -eq 'PC') } |
+          ForEach-Object { [string]$_.Name } |
+          Select-Object -First 1)[0]
+        if ($candidateStoreId -match '^[A-Z0-9]{12}$' -and $configuredExecutable) {
+          $storeId = $candidateStoreId
+        }
+      } catch {}
+    }
     $isLegacyXboxGame = $false
     if (-not $isGamingPackage -and (Test-Path -LiteralPath $manifestPath)) {
       try {
@@ -77,7 +96,11 @@ $records = @(
         $isLegacyXboxGame = $manifestText.IndexOf('Microsoft.Xbox.Services', [System.StringComparison]::OrdinalIgnoreCase) -ge 0
       } catch {}
     }
-    if (-not $isGamingPackage -and -not $isLegacyXboxGame) { continue }
+    # MicrosoftGame.config is the package-owned GDK identity source. Some
+    # Xbox 360 backward-compatibility packages are deliberately not present
+    # below GamingServices\GameConfig, but still expose a PC executable and
+    # their durable 12-character Store ID here.
+    if (-not $isGamingPackage -and -not $isLegacyXboxGame -and -not $storeId) { continue }
 
     try {
       $manifest = Get-AppxPackageManifest -Package $package
@@ -88,8 +111,8 @@ $records = @(
       if (-not $application) { $application = $applications | Select-Object -First 1 }
       if (-not $application -or -not $application.Id) { continue }
 
-      $shellVisuals = $null
-      $executableName = $null
+      $shellVisuals = if ($gameConfig) { $gameConfig.Game.ShellVisuals } else { $null }
+      $executableName = $configuredExecutable
       if ($isGamingPackage) {
         $packageKey = Join-Path $gamingRoot ([string]$package.PackageFullName)
         $visualKey = Join-Path $packageKey 'ShellVisuals'
@@ -98,10 +121,11 @@ $records = @(
         }
         $executableKey = Join-Path $packageKey 'Executable'
         if (Test-Path -LiteralPath $executableKey) {
-          $executableName = Get-ChildItem -LiteralPath $executableKey -ErrorAction SilentlyContinue |
+          $registeredExecutable = Get-ChildItem -LiteralPath $executableKey -ErrorAction SilentlyContinue |
             ForEach-Object { (Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction SilentlyContinue).Name } |
             Where-Object { $_ } |
             Select-Object -First 1
+          if ($registeredExecutable) { $executableName = $registeredExecutable }
         }
       }
 
@@ -135,6 +159,7 @@ $records = @(
         packageFullName = [string]$package.PackageFullName
         packageFamilyName = [string]$package.PackageFamilyName
         packageVersion = [string]$package.Version
+        storeId = $storeId
         applicationId = [string]$application.Id
         name = $name
         publisher = $publisher
@@ -179,6 +204,11 @@ function safeText(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined
   const text = value.trim()
   return text && !text.toLowerCase().startsWith('ms-resource:') ? text : undefined
+}
+
+function xboxProductId(value: unknown): string | undefined {
+  const productId = safeText(value)?.toUpperCase()
+  return productId && /^[A-Z0-9]{12}$/.test(productId) ? productId : undefined
 }
 
 function packageAssetPath(installLocation: string, rawPath: unknown): string | undefined {
@@ -235,7 +265,12 @@ async function scanInstalledXboxGamesInternal(
     const installLocation = safeText(record.installLocation)
     if (!family || !applicationId || !name || !installLocation || !existsSync(installLocation)) continue
 
-    const providerGameId = `${family}!${applicationId}`
+    // Prefer the Store ID embedded in MicrosoftGame.config so the installed
+    // package rejoins the existing owned-library record after every restart.
+    // PFN!Application remains the launch identity and the safe fallback for
+    // older UWP packages without a Store ID.
+    const applicationIdentity = `${family}!${applicationId}`
+    const providerGameId = xboxProductId(record.storeId) ?? applicationIdentity
     const logo = packageAssetPath(installLocation, record.logoPath)
     const splash = packageAssetPath(installLocation, record.splashPath)
     const publisher = safeText(record.publisher)
@@ -246,7 +281,7 @@ async function scanInstalledXboxGamesInternal(
       publishers: publisher ? [publisher] : undefined,
       platforms: ['windows'],
       storeUrl: `ms-windows-store://pdp/?PFN=${encodeURIComponent(family)}`,
-      launchUri: `shell:AppsFolder\\${providerGameId}`,
+      launchUri: `shell:AppsFolder\\${applicationIdentity}`,
       launchExecutable: safeText(record.executable),
       backgroundUrl: splash ? pathToFileURL(splash).href : undefined,
       iconUrl: logo ? pathToFileURL(logo).href : undefined,

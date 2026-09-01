@@ -56,10 +56,12 @@ function Get-OrbitPlainText([object] $value) {
 function Get-OrbitStreamingIdentity([object] $request) {
   try {
     $caller = [string]$request.Caller.CallerIdentity
+    $isXboxCaller = $caller.StartsWith('Microsoft.GamingApp_', [System.StringComparison]::OrdinalIgnoreCase)
+    $isOrbitCaller = $caller.StartsWith('ORBIT-', [System.StringComparison]::OrdinalIgnoreCase)
     $storeId = ([string]$request.StoreId).Trim().ToUpperInvariant()
     $crdPath = [string]$request.ActiveSource.CrdPath
     $sessionId = [guid]::Empty
-    if (-not $caller.StartsWith('Microsoft.GamingApp_', [System.StringComparison]::OrdinalIgnoreCase) -or
+    if ((-not $isXboxCaller -and -not $isOrbitCaller) -or
         $storeId -notmatch '^[A-Z0-9]{12}$' -or
         -not [guid]::TryParse([string]$request.Scheme.SessionId, [ref]$sessionId) -or
         $crdPath -notmatch '(?i)(?<name>[A-Z0-9.-]+)_[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+_(?:x64|x86|arm64|neutral)_[A-Z0-9.-]*_(?<publisher>[A-Z0-9]+)\.msixvc(?:,|$)') {
@@ -70,6 +72,7 @@ function Get-OrbitStreamingIdentity([object] $request) {
       packageFamilyName = $Matches['name'] + '_' + $Matches['publisher']
       gamingProductId = $storeId
       displayName = @($Matches['name'] -split '\.')[-1]
+      isOrbitCaller = $isOrbitCaller
     }
   } catch {
     return $null
@@ -97,6 +100,7 @@ function Write-OrbitStreamingEvent([object] $identity, [bool] $isComplete) {
 
 $streamingRoot = 'HKLM:\SOFTWARE\Microsoft\GamingServices\StreamingRequests'
 $streamingSeen = @{}
+$streamingProducts = @{}
 $deploymentsSeen = @{}
 $lastStreamingPoll = [DateTime]::MinValue
 
@@ -108,6 +112,7 @@ try {
     if (($pollTime - $lastStreamingPoll).TotalMilliseconds -ge 750) {
       $lastStreamingPoll = $pollTime
       $currentStreaming = @{}
+      $currentStreamingProducts = @{}
       try {
         if (Test-Path -LiteralPath $streamingRoot) {
           $requestKey = Get-Item -LiteralPath $streamingRoot -ErrorAction Stop
@@ -117,7 +122,8 @@ try {
             try { $request = $rawRequest | ConvertFrom-Json } catch { continue }
             $identity = Get-OrbitStreamingIdentity $request
             if ($null -eq $identity) { continue }
-            $active = $request.Scheme.RegisterOnly -eq $false
+            $currentStreamingProducts[$identity.packageFamilyName.ToLowerInvariant()] = $identity
+            $active = $request.Scheme.RegisterOnly -eq $false -or $identity.isOrbitCaller
             $currentStreaming[$valueName] = [pscustomobject]@{
               active = $active
               identity = $identity
@@ -137,6 +143,7 @@ try {
         }
       }
       $streamingSeen = $currentStreaming
+      $streamingProducts = $currentStreamingProducts
     }
     $eventArgs = $null
     if (-not $queue.TryDequeue([ref] $eventArgs)) {
@@ -178,6 +185,13 @@ try {
             Get-ItemPropertyValue -LiteralPath $gameConfigPath -Name StoreId -ErrorAction SilentlyContinue
           )
         } catch {}
+      }
+      if (-not $gamingProductId) {
+        $streamingIdentity = $streamingProducts[([string]$package.Id.FamilyName).ToLowerInvariant()]
+        if ($null -ne $streamingIdentity) {
+          $gamingProductId = $streamingIdentity.gamingProductId
+          $isGamingPackage = $true
+        }
       }
       $displayName = $null
       try { $displayName = Get-OrbitPlainText $package.DisplayName } catch {}
