@@ -36,16 +36,13 @@ $installerText = Get-Content -LiteralPath $installerScriptPath -Raw
 if ($installerText -match 'function\s+Add-ValidatedCertificateTrust|Import-Certificate') {
   throw 'The public Certum installer must not add certificates to a Windows trust store.'
 }
-if ($installerText -notmatch 'Remove-AppxPackage\s+-Package\s+\$legacyPackage\.PackageFullName\s+-PreserveApplicationData') {
-  throw 'The legacy AppX publisher migration must preserve application data.'
+if ($installerText -match 'Remove-AppxPackage\s+-Package\s+\$legacyPackage\.PackageFullName') {
+  throw 'The installer must retain the packaged legacy AppX because PreserveApplicationData is unsupported for this migration.'
 }
 $newPackageValidation = $installerText.IndexOf('$null = Assert-InstalledOrbitPackage $installedPackage', [System.StringComparison]::Ordinal)
-$legacyRemoval = $installerText.IndexOf('Remove-AppxPackage -Package $legacyPackage.PackageFullName', [System.StringComparison]::Ordinal)
-if ($newPackageValidation -lt 0 -or $legacyRemoval -lt 0 -or $legacyRemoval -le $newPackageValidation) {
-  throw 'The legacy package may only be removed after the new Certum package passes post-install validation.'
-}
-if ($installerText -notmatch [regex]::Escape('if ($packageDeploymentCompleted -and !$existingPackage -and !$legacyRemovalStarted)')) {
-  throw 'The validated Certum package must not be rolled back after legacy package removal begins.'
+$legacyRetention = $installerText.IndexOf('legacyPackageRetained = $true', [System.StringComparison]::Ordinal)
+if ($newPackageValidation -lt 0 -or $legacyRetention -lt 0 -or $legacyRetention -le $newPackageValidation) {
+  throw 'The legacy package retention contract may only be recorded after the new Certum package passes post-install validation.'
 }
 if ($installerText -notmatch [regex]::Escape('61E90C0AACBF2F407A575903FCC197F45B61706D')) {
   throw 'The Xbox Mode installer does not pin the official Certum signer.'

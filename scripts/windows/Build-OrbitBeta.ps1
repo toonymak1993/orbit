@@ -80,7 +80,8 @@ XBOX MODE
 2. Before changing Windows, setup validates the certificate, signature, package identity, Gaming Home contract,
    registration metadata, packaged release metadata, and supported Windows baseline.
 3. Setup verifies public Certum trust, enables Developer Mode for the beta capability, installs the signed AppX,
-   verifies registration, and only then removes a legacy self-signed ORBIT package while preserving its app data.
+   and verifies registration. It retains a legacy self-signed package because its data belongs to a different
+   Windows package family; confirm your data in Beta 2 before removing the old package yourself.
 4. Under Settings > Gaming > Xbox mode > Choose home app, select ORBIT.
 5. Optionally enable startup into Xbox Mode.
 
@@ -98,7 +99,9 @@ Integrity hashes are listed in BETA-SHA256SUMS.txt.
 
 ONE-TIME BETA 1 MIGRATION
 Beta 1 pins the previous self-signed signer and cannot accept this release through automatic update. Download and
-run the all-in-one setup manually once. Future Certum-signed betas can update normally.
+run the all-in-one setup manually once, then select the new ORBIT entry in Xbox Mode settings. The legacy package
+and development certificate remain installed to avoid deleting package-family-scoped data. Future Certum-signed
+betas can update normally.
 "@ | Set-Content -LiteralPath (Join-Path $bundleDir 'BETA-README.txt') -Encoding UTF8
 
   $hashTargets = @($standardInstaller, $xboxInstaller, $xboxPackage, 'ORBIT-Code-Signing.cer')

@@ -24,7 +24,6 @@ $expectedPublisher = 'CN=Open Source Developer Luis Antonio Garcia Roque, O=Open
 $expectedIssuer = 'CN=Certum Code Signing 2021 CA, O=Asseco Data Systems S.A., C=PL'
 $expectedSignerThumbprint = '61E90C0AACBF2F407A575903FCC197F45B61706D'
 $legacyPublisher = 'CN=ORBIT Development'
-$legacySignerThumbprint = 'D1D2DE6B5C77C880DFEA5184245722C67F941189'
 $expectedGamingExtension = 'windows.gamingApp'
 $expectedGamingCapability = 'Microsoft.appCategory.gamingHome_8wekyb3d8bbwe'
 $minimumXboxModeVersion = [version]'10.0.26100.0'
@@ -407,8 +406,6 @@ $packageRollbackCompleted = $false
 $developerModeRollbackCompleted = $false
 $existingPackage = $null
 $legacyPackage = $null
-$legacyMigrationCompleted = $false
-$legacyRemovalStarted = $false
 
 try {
   if (!$ValidateOnly -and ![string]::IsNullOrWhiteSpace($InvokingUserSid) -and $InvokingUserSid -ne $currentUserSid) {
@@ -569,33 +566,14 @@ try {
   }
 
   if ($legacyPackage) {
-    $diagnostics.phase = 'legacy-publisher-migration'
-    Write-Host "Removing the legacy self-signed ORBIT Xbox Mode package after the new Certum package passed validation..."
-    # From this point forward the validated replacement is the recovery path. Even if
-    # Windows reports an ambiguous removal failure, never roll the new package back too.
-    $legacyRemovalStarted = $true
-    Remove-AppxPackage -Package $legacyPackage.PackageFullName -PreserveApplicationData -Confirm:$false
-    if (Get-LegacyOrbitPackage) { throw 'The legacy ORBIT Xbox Mode package is still registered after migration.' }
-    $legacyMigrationCompleted = $true
+    $diagnostics.phase = 'legacy-publisher-transition'
     $diagnostics.legacyMigration = [ordered]@{
-      completed = $true
-      preservedApplicationData = $true
+      automaticRemovalAttempted = $false
+      legacyPackageRetained = $true
       previousPackageFamilyName = $legacyPackage.PackageFamilyName
+      reason = 'Windows does not support PreserveApplicationData for packaged AppX removals. The legacy package remains registered to avoid deleting its package-family-scoped data.'
     }
-
-    $legacyTrustedCertificatePath = "Cert:\LocalMachine\TrustedPeople\$legacySignerThumbprint"
-    if (Test-Path -LiteralPath $legacyTrustedCertificatePath) {
-      try {
-        Remove-Item -LiteralPath $legacyTrustedCertificatePath -Force
-        $diagnostics.legacyMigration.removedLegacyTrustedPublisher = !(Test-Path -LiteralPath $legacyTrustedCertificatePath)
-      } catch {
-        $diagnostics.legacyMigration.removedLegacyTrustedPublisher = $false
-        $diagnostics.legacyMigration.trustCleanupWarning = $_.Exception.Message
-        Write-Warning 'The new Certum package is installed, but the old ORBIT Development certificate could not be removed from TrustedPeople.'
-      }
-    } else {
-      $diagnostics.legacyMigration.removedLegacyTrustedPublisher = $false
-    }
+    Write-Warning 'The legacy self-signed ORBIT package remains installed so Windows does not delete its package-family-scoped data. Select the new ORBIT entry in Xbox Mode settings; do not remove the legacy package until you have confirmed your data in the Certum-signed build.'
   }
 
   $diagnostics.result = 'success'
@@ -635,7 +613,7 @@ try {
   if (!$ValidateOnly) {
     $diagnostics.phase = 'rollback'
     $canRestoreMachinePreparation = !$packageDeploymentCompleted
-    if ($packageDeploymentCompleted -and !$existingPackage -and !$legacyRemovalStarted) {
+    if ($packageDeploymentCompleted -and !$existingPackage) {
       try {
         $newPackage = Get-InstalledOrbitPackage
         if ($newPackage) { Remove-AppxPackage -Package $newPackage.PackageFullName -Confirm:$false }
@@ -667,7 +645,6 @@ try {
     }
     $diagnostics.rollback = [ordered]@{
       packageRemovedAfterFailedFirstInstall = $packageRollbackCompleted
-      validatedReplacementPreservedAfterLegacyRemovalStarted = $legacyRemovalStarted -and !$packageRollbackCompleted
       developerModeRestored = $developerModeRollbackCompleted
       legacyPackagePreserved = $legacyPackageStillRegistered
     }

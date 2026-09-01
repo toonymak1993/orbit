@@ -37,6 +37,8 @@
     "appExtension": "windows.gamingApp",
     "customCapability": "Microsoft.appCategory.gamingHome_8wekyb3d8bbwe",
     "legacyPublisher": "CN=ORBIT Development",
-    "manualPublisherMigrationRequired": true
+    "manualPublisherMigrationRequired": true,
+    "automaticLegacyRemoval": false,
+    "legacyPackageRetentionRequired": true
   }
 }

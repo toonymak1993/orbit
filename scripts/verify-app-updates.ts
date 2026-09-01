@@ -69,6 +69,8 @@ const manifest = JSON.parse(
 ) as Record<string, any>
 assert.equal(manifest.updateMode, 'github-release')
 assert.equal(manifest.automaticUpdatesEnabled, true)
+assert.equal(manifest.xboxMode.automaticLegacyRemoval, false)
+assert.equal(manifest.xboxMode.legacyPackageRetentionRequired, true)
 assert.match(manifest.updates.owner, /^[a-zA-Z0-9-]+$/)
 assert.match(manifest.updates.repository, /^[a-zA-Z0-9._-]+$/)
 assert.ok(manifest.updates.signerThumbprints.length > 0)
@@ -80,7 +82,8 @@ const installerScript = readFileSync(
 assert.match(installerScript, /\[switch\]\$UpdateOnly/)
 assert.match(installerScript, /!\$ValidateOnly -and !\$UpdateOnly -and !\$isAdministrator/)
 assert.doesNotMatch(installerScript, /Add-ValidatedCertificateTrust|Import-Certificate/)
-assert.match(installerScript, /Remove-AppxPackage -Package \$legacyPackage\.PackageFullName -PreserveApplicationData/)
+assert.doesNotMatch(installerScript, /Remove-AppxPackage -Package \$legacyPackage\.PackageFullName/)
+assert.match(installerScript, /legacyPackageRetained = \$true/)
 assert.match(installerScript, /61E90C0AACBF2F407A575903FCC197F45B61706D/)
 assert.match(installerScript, /Update-only mode will not change machine policy/)
 

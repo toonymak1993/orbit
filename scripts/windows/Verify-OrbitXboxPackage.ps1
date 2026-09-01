@@ -288,9 +288,9 @@ ZIP fallback:
 1. Keep all files from the ZIP in the same folder.
 2. Double-click Install-OrbitXboxMode.bat.
 3. Approve the administrator prompt. The installer verifies the publicly trusted Certum signature,
-   enables Developer Mode for the SCCD capability, and installs the AppX package without installing a certificate
-   into a Windows trust store. During the one-time Beta 1 migration, it may remove only the exact legacy ORBIT
-   development certificate after the new package has been installed and verified.
+   enables Developer Mode for the SCCD capability, and installs the AppX package without changing a Windows
+   certificate trust store. During the one-time Beta 1 transition, the legacy package and development certificate
+   remain installed to avoid deleting package-family-scoped data.
 4. The installer opens Settings > Gaming > Xbox mode. Under Choose home app, select ORBIT.
 
 Requirements: Windows 11 version 24H2 (build 10.0.26100.0) or newer. Xbox Mode availability still depends

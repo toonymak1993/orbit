@@ -67,7 +67,7 @@ VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright 2026 Luis Garcia"
 !define MUI_WELCOMEFINISHPAGE_BITMAP "${ORBIT_ROOT}\build\installerSidebar.bmp"
 !define MUI_ABORTWARNING
 !define MUI_WELCOMEPAGE_TITLE "ORBIT ${DISPLAY_VERSION} Xbox Mode"
-  !define MUI_WELCOMEPAGE_TEXT "This setup installs the ORBIT ${ORBIT_RELEASE_KIND} as a Windows Gaming Home app.$\r$\n$\r$\nAfter administrator approval it validates the complete package contract and publicly trusted Certum signature, enables Developer Mode for the ${ORBIT_CAPABILITY_KIND} capability, and installs the signed AppX for this Windows account. A legacy self-signed ORBIT package is removed only after the new package passes validation."
+  !define MUI_WELCOMEPAGE_TEXT "This setup installs the ORBIT ${ORBIT_RELEASE_KIND} as a Windows Gaming Home app.$\r$\n$\r$\nAfter administrator approval it validates the complete package contract and publicly trusted Certum signature, enables Developer Mode for the ${ORBIT_CAPABILITY_KIND} capability, and installs the signed AppX for this Windows account. A legacy self-signed ORBIT package is retained so Windows does not delete its package-family-scoped data."
 !define MUI_FINISHPAGE_TITLE "ORBIT is installed for Xbox Mode"
 !define MUI_FINISHPAGE_TEXT "Windows Xbox Mode settings will open next. Under Choose home app, select ORBIT."
 
