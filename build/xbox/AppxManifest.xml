@@ -10,7 +10,7 @@
     Name="ORBIT.GamingHome"
     ProcessorArchitecture="x64"
     Publisher="CN=Open Source Developer Luis Antonio Garcia Roque, O=Open Source Developer, L=Alfdorf, S=Baden-Württemberg, C=DE"
-    Version="0.1.2.0" />
+    Version="0.1.2.1" />
   <Properties>
     <DisplayName>ORBIT</DisplayName>
     <PublisherDisplayName>Open Source Developer Luis Antonio Garcia Roque</PublisherDisplayName>

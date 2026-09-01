@@ -9,7 +9,7 @@ $releaseDir = Join-Path $repoRoot 'release'
 . (Join-Path $PSScriptRoot 'OrbitSigning.ps1')
 $signingProfile = Get-OrbitSigningProfile -RepoRoot $repoRoot
 $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($signingProfile.CertificatePath)
-$releaseMetadata = Get-Content -LiteralPath (Join-Path $repoRoot 'resources\release-manifest.json') -Raw | ConvertFrom-Json
+$releaseMetadata = Get-Content -LiteralPath (Join-Path $repoRoot 'resources\release-manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $displayVersion = [string]$releaseMetadata.displayVersion
 $bundleName = "ORBIT-Beta-$displayVersion-x64"
 $bundleDir = Join-Path $releaseDir $bundleName
@@ -82,7 +82,7 @@ XBOX MODE
 3. Setup verifies public Certum trust, enables Developer Mode for the beta capability, installs the signed AppX,
    and verifies registration. It retains a legacy self-signed package because its data belongs to a different
    Windows package family; confirm your data in Beta 2 before removing the old package yourself.
-4. Under Settings > Gaming > Xbox mode > Choose home app, select ORBIT.
+4. Under Settings > Gaming > Xbox mode > Choose home app, select ORBIT Beta.
 5. Optionally enable startup into Xbox Mode.
 
 Windows 11 version 24H2 (build 26100.0) or newer is required. Availability depends on Microsoft's supported
@@ -99,7 +99,7 @@ Integrity hashes are listed in BETA-SHA256SUMS.txt.
 
 ONE-TIME BETA 1 MIGRATION
 Beta 1 pins the previous self-signed signer and cannot accept this release through automatic update. Download and
-run the all-in-one setup manually once, then select the new ORBIT entry in Xbox Mode settings. The legacy package
+run the all-in-one setup manually once, then select ORBIT Beta in Xbox Mode settings. The legacy ORBIT package
 and development certificate remain installed to avoid deleting package-family-scoped data. Future Certum-signed
 betas can update normally.
 "@ | Set-Content -LiteralPath (Join-Path $bundleDir 'BETA-README.txt') -Encoding UTF8

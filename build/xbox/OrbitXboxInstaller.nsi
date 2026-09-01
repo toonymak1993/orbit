@@ -18,10 +18,12 @@ SetCompressorDictSize 32
 
 !if ${IS_BETA} == 1
   !define ORBIT_SETUP_NAME "ORBIT Beta Xbox Mode"
+  !define ORBIT_APP_DISPLAY_NAME "ORBIT Beta"
   !define ORBIT_RELEASE_KIND "beta"
   !define ORBIT_CAPABILITY_KIND "community-beta"
 !else
   !define ORBIT_SETUP_NAME "ORBIT Xbox Mode"
+  !define ORBIT_APP_DISPLAY_NAME "ORBIT"
   !define ORBIT_RELEASE_KIND "release"
   !define ORBIT_CAPABILITY_KIND "Gaming Home"
 !endif
@@ -69,7 +71,7 @@ VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright 2026 Luis Garcia"
 !define MUI_WELCOMEPAGE_TITLE "ORBIT ${DISPLAY_VERSION} Xbox Mode"
   !define MUI_WELCOMEPAGE_TEXT "This setup installs the ORBIT ${ORBIT_RELEASE_KIND} as a Windows Gaming Home app.$\r$\n$\r$\nAfter administrator approval it validates the complete package contract and publicly trusted Certum signature, enables Developer Mode for the ${ORBIT_CAPABILITY_KIND} capability, and installs the signed AppX for this Windows account. A legacy self-signed ORBIT package is retained so Windows does not delete its package-family-scoped data."
 !define MUI_FINISHPAGE_TITLE "ORBIT is installed for Xbox Mode"
-!define MUI_FINISHPAGE_TEXT "Windows Xbox Mode settings will open next. Under Choose home app, select ORBIT."
+!define MUI_FINISHPAGE_TEXT "Windows Xbox Mode settings will open next. Under Choose home app, select ${ORBIT_APP_DISPLAY_NAME}."
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_INSTFILES

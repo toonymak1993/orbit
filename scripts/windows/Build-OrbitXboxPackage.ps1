@@ -9,7 +9,7 @@ Set-StrictMode -Version Latest
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $releaseDir = Join-Path $repoRoot 'release'
 $releaseMetadataPath = Join-Path $repoRoot 'resources\release-manifest.json'
-$releaseMetadata = Get-Content -LiteralPath $releaseMetadataPath -Raw | ConvertFrom-Json
+$releaseMetadata = Get-Content -LiteralPath $releaseMetadataPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $displayVersion = [string]$releaseMetadata.displayVersion
 $releaseChannel = ([string]$releaseMetadata.channel).Trim().ToLowerInvariant()
 if ($releaseChannel -notin @('beta', 'stable')) {
@@ -17,6 +17,7 @@ if ($releaseChannel -notin @('beta', 'stable')) {
 }
 $isBeta = $releaseChannel -eq 'beta'
 $artifactPrefix = if ($isBeta) { 'ORBIT-Beta' } else { 'ORBIT' }
+$xboxDisplayName = if ($isBeta) { 'ORBIT Beta' } else { 'ORBIT' }
 $windowsFileVersion = [string]$releaseMetadata.windowsFileVersion
 $xboxPackageVersion = [version][string]$releaseMetadata.xboxPackageVersion
 $xboxMinimumWindowsVersion = [version][string]$releaseMetadata.xboxMode.minimumWindowsVersion
@@ -154,12 +155,23 @@ try {
   # staging copy so a package cannot accidentally ship stale identity,
   # channel, or Gaming Home registration data after the next release bump.
   $stagedManifestPath = Join-Path $stageDir 'AppxManifest.xml'
-  [xml]$stagedManifest = Get-Content -LiteralPath $stagedManifestPath -Raw
+  [xml]$stagedManifest = Get-Content -LiteralPath $stagedManifestPath -Raw -Encoding UTF8
   $manifestNamespace = [System.Xml.XmlNamespaceManager]::new($stagedManifest.NameTable)
   $manifestNamespace.AddNamespace('f', 'http://schemas.microsoft.com/appx/manifest/foundation/windows10')
+  $manifestNamespace.AddNamespace('uap', 'http://schemas.microsoft.com/appx/manifest/uap/windows10')
+  $manifestNamespace.AddNamespace('uap3', 'http://schemas.microsoft.com/appx/manifest/uap/windows10/3')
   $stagedIdentity = $stagedManifest.SelectSingleNode('/f:Package/f:Identity', $manifestNamespace)
   if (!$stagedIdentity) { throw 'The staged Xbox manifest has no package identity.' }
   $stagedIdentity.SetAttribute('Version', $xboxPackageVersion.ToString())
+  $stagedPackageDisplayName = $stagedManifest.SelectSingleNode('/f:Package/f:Properties/f:DisplayName', $manifestNamespace)
+  $stagedVisualElements = $stagedManifest.SelectSingleNode("/f:Package/f:Applications/f:Application[@Id='ORBIT']/uap:VisualElements", $manifestNamespace)
+  $stagedGamingExtension = $stagedManifest.SelectSingleNode("//uap3:AppExtension[@Name='windows.gamingApp']", $manifestNamespace)
+  if (!$stagedPackageDisplayName -or !$stagedVisualElements -or !$stagedGamingExtension) {
+    throw 'The staged Xbox manifest is missing a visible display-name contract.'
+  }
+  $stagedPackageDisplayName.InnerText = $xboxDisplayName
+  $stagedVisualElements.SetAttribute('DisplayName', $xboxDisplayName)
+  $stagedGamingExtension.SetAttribute('DisplayName', $xboxDisplayName)
   foreach ($targetFamily in $stagedManifest.SelectNodes('/f:Package/f:Dependencies/f:TargetDeviceFamily', $manifestNamespace)) {
     $targetFamily.SetAttribute('MinVersion', $xboxMinimumWindowsVersion.ToString())
   }

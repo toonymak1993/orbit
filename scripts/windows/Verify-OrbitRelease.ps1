@@ -10,7 +10,7 @@ $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $releaseDir = Join-Path $repoRoot 'release'
 . (Join-Path $PSScriptRoot 'OrbitSigning.ps1')
 $signingProfile = Get-OrbitSigningProfile -RepoRoot $repoRoot
-$releaseMetadata = Get-Content -LiteralPath (Join-Path $repoRoot 'resources\release-manifest.json') -Raw | ConvertFrom-Json
+$releaseMetadata = Get-Content -LiteralPath (Join-Path $repoRoot 'resources\release-manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $displayVersion = [string]$releaseMetadata.displayVersion
 $packageVersion = [string]$releaseMetadata.packageVersion
 $releaseChannel = ([string]$releaseMetadata.channel).Trim().ToLowerInvariant()

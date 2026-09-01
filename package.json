@@ -1,6 +1,6 @@
 {
   "name": "orbit",
-  "version": "0.1.2-beta.1",
+  "version": "0.1.2-beta.2",
   "description": "ORBIT — Gaming Launcher Console UI",
   "main": "./out/main/index.js",
   "author": "Luis Garcia",

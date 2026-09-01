@@ -7,7 +7,7 @@ function Get-OrbitSigningProfile {
     throw "Missing ORBIT code-signing metadata: $metadataPath"
   }
 
-  $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
+  $metadata = Get-Content -LiteralPath $metadataPath -Raw -Encoding UTF8 | ConvertFrom-Json
   if ([int]$metadata.schemaVersion -ne 1) { throw 'Unsupported ORBIT code-signing metadata schema.' }
   if ([string]$metadata.provider -ne 'Certum SimplySign') { throw 'Unexpected ORBIT signing provider.' }
   if ([string]$metadata.storeLocation -ne 'CurrentUser' -or [string]$metadata.storeName -ne 'My') {

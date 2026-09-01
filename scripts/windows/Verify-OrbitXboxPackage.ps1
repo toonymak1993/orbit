@@ -10,7 +10,7 @@ $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $releaseDir = Join-Path $repoRoot 'release'
 . (Join-Path $PSScriptRoot 'OrbitSigning.ps1')
 $signingProfile = Get-OrbitSigningProfile -RepoRoot $repoRoot
-$releaseMetadata = Get-Content -LiteralPath (Join-Path $repoRoot 'resources\release-manifest.json') -Raw | ConvertFrom-Json
+$releaseMetadata = Get-Content -LiteralPath (Join-Path $repoRoot 'resources\release-manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $displayVersion = [string]$releaseMetadata.displayVersion
 $packageVersion = [string]$releaseMetadata.packageVersion
 $releaseChannel = ([string]$releaseMetadata.channel).Trim().ToLowerInvariant()
@@ -19,6 +19,7 @@ if ($releaseChannel -notin @('beta', 'stable')) {
 }
 $artifactPrefix = if ($releaseChannel -eq 'beta') { 'ORBIT-Beta' } else { 'ORBIT' }
 $releaseLabel = if ($releaseChannel -eq 'beta') { 'beta' } else { 'stable release' }
+$xboxDisplayName = if ($releaseChannel -eq 'beta') { 'ORBIT Beta' } else { 'ORBIT' }
 $windowsFileVersion = [string]$releaseMetadata.windowsFileVersion
 $xboxPackageVersion = [string]$releaseMetadata.xboxPackageVersion
 $xboxMinimumWindowsVersion = [version][string]$releaseMetadata.xboxMode.minimumWindowsVersion
@@ -98,9 +99,10 @@ try {
   & $makeAppx.FullName unpack /o /p $packagePath /d $inspectionDir
   if ($LASTEXITCODE -ne 0) { throw 'The Xbox Mode package could not be unpacked.' }
 
-  [xml]$manifest = Get-Content -LiteralPath (Join-Path $inspectionDir 'AppxManifest.xml') -Raw
+  [xml]$manifest = Get-Content -LiteralPath (Join-Path $inspectionDir 'AppxManifest.xml') -Raw -Encoding UTF8
   $namespaceManager = [System.Xml.XmlNamespaceManager]::new($manifest.NameTable)
   $namespaceManager.AddNamespace('f', 'http://schemas.microsoft.com/appx/manifest/foundation/windows10')
+  $namespaceManager.AddNamespace('uap', 'http://schemas.microsoft.com/appx/manifest/uap/windows10')
   $namespaceManager.AddNamespace('uap3', 'http://schemas.microsoft.com/appx/manifest/uap/windows10/3')
   $namespaceManager.AddNamespace('uap4', 'http://schemas.microsoft.com/appx/manifest/uap/windows10/4')
   $namespaceManager.AddNamespace('rescap', 'http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities')
@@ -129,10 +131,21 @@ try {
   if (!$application -or $application.Executable -ne 'app\ORBIT.exe' -or $application.EntryPoint -ne 'Windows.FullTrustApplication') {
     throw 'The ORBIT full-trust application declaration is invalid.'
   }
+  $packageDisplayName = $manifest.SelectSingleNode('/f:Package/f:Properties/f:DisplayName', $namespaceManager)
+  $visualElements = $manifest.SelectSingleNode("/f:Package/f:Applications/f:Application[@Id='ORBIT']/uap:VisualElements", $namespaceManager)
   $runFullTrust = $manifest.SelectSingleNode("//rescap:Capability[@Name='runFullTrust']", $namespaceManager)
   $gamingExtension = $manifest.SelectSingleNode("//uap3:AppExtension[@Name='windows.gamingApp']", $namespaceManager)
   $gamingCapability = $manifest.SelectSingleNode("//uap4:CustomCapability[@Name='Microsoft.appCategory.gamingHome_8wekyb3d8bbwe']", $namespaceManager)
   if (!$runFullTrust -or !$gamingExtension -or !$gamingCapability) { throw 'The full-trust or Xbox Gaming Home declaration is missing.' }
+  if (
+    !$packageDisplayName -or
+    !$visualElements -or
+    $packageDisplayName.InnerText -cne $xboxDisplayName -or
+    $visualElements.DisplayName -cne $xboxDisplayName -or
+    $gamingExtension.DisplayName -cne $xboxDisplayName
+  ) {
+    throw "The visible Xbox package name must be '$xboxDisplayName' for the $releaseChannel channel."
+  }
 
   foreach ($requiredPath in @(
     (Join-Path $inspectionDir 'CustomCapability.SCCD'),
@@ -164,7 +177,7 @@ try {
   $packagedApplicationPath = Join-Path $inspectionDir 'app\ORBIT.exe'
   $packagedApplicationSignature = Assert-OrbitSignedFile -Path $packagedApplicationPath -Profile $signingProfile
 
-  $packagedRelease = Get-Content -LiteralPath (Join-Path $inspectionDir 'app\resources\release-manifest.json') -Raw | ConvertFrom-Json
+  $packagedRelease = Get-Content -LiteralPath (Join-Path $inspectionDir 'app\resources\release-manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
   if (
     $packagedRelease.displayVersion -ne $displayVersion -or
     $packagedRelease.channel -ne $releaseChannel -or
@@ -291,7 +304,7 @@ ZIP fallback:
    enables Developer Mode for the SCCD capability, and installs the AppX package without changing a Windows
    certificate trust store. During the one-time Beta 1 transition, the legacy package and development certificate
    remain installed to avoid deleting package-family-scoped data.
-4. The installer opens Settings > Gaming > Xbox mode. Under Choose home app, select ORBIT.
+4. The installer opens Settings > Gaming > Xbox mode. Under Choose home app, select $xboxDisplayName.
 
 Requirements: Windows 11 version 24H2 (build 10.0.26100.0) or newer. Xbox Mode availability still depends
 on Microsoft's supported markets, device policy, and phased Windows feature rollout. ORBIT deliberately does

@@ -20,7 +20,7 @@ Set-StrictMode -Version Latest
 
 $expectedPackageIdentity = 'ORBIT.GamingHome'
 $expectedApplicationId = 'ORBIT'
-$expectedPublisher = 'CN=Open Source Developer Luis Antonio Garcia Roque, O=Open Source Developer, L=Alfdorf, S=Baden-Württemberg, C=DE'
+$expectedPublisher = 'CN=Open Source Developer Luis Antonio Garcia Roque, O=Open Source Developer, L=Alfdorf, S=Baden-W' + [char]0x00FC + 'rttemberg, C=DE'
 $expectedIssuer = 'CN=Certum Code Signing 2021 CA, O=Asseco Data Systems S.A., C=PL'
 $expectedSignerThumbprint = '61E90C0AACBF2F407A575903FCC197F45B61706D'
 $legacyPublisher = 'CN=ORBIT Development'
@@ -135,6 +135,7 @@ function Assert-OrbitManifestContract {
 
   $namespaceManager = [System.Xml.XmlNamespaceManager]::new($Manifest.NameTable)
   $namespaceManager.AddNamespace('f', 'http://schemas.microsoft.com/appx/manifest/foundation/windows10')
+  $namespaceManager.AddNamespace('uap', 'http://schemas.microsoft.com/appx/manifest/uap/windows10')
   $namespaceManager.AddNamespace('uap3', 'http://schemas.microsoft.com/appx/manifest/uap/windows10/3')
   $namespaceManager.AddNamespace('uap4', 'http://schemas.microsoft.com/appx/manifest/uap/windows10/4')
   $namespaceManager.AddNamespace('rescap', 'http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities')
@@ -163,6 +164,17 @@ function Assert-OrbitManifestContract {
   if (!$runFullTrust -or !$gamingExtension -or !$gamingCapability) {
     throw 'The AppX is missing its full-trust, Gaming Home extension, or Gaming Home capability contract.'
   }
+  $packageDisplayName = $Manifest.SelectSingleNode('/f:Package/f:Properties/f:DisplayName', $namespaceManager)
+  $visualElements = $Manifest.SelectSingleNode("/f:Package/f:Applications/f:Application[@Id='$expectedApplicationId']/uap:VisualElements", $namespaceManager)
+  if (
+    !$packageDisplayName -or
+    !$visualElements -or
+    [string]::IsNullOrWhiteSpace($packageDisplayName.InnerText) -or
+    $visualElements.GetAttribute('DisplayName') -ne $packageDisplayName.InnerText -or
+    $gamingExtension.GetAttribute('DisplayName') -ne $packageDisplayName.InnerText
+  ) {
+    throw 'The AppX visible display names are missing or inconsistent.'
+  }
 
   $minimumVersions = @()
   foreach ($familyName in @('Windows.Universal', 'Windows.Desktop')) {
@@ -176,6 +188,7 @@ function Assert-OrbitManifestContract {
     Publisher = $identity.GetAttribute('Publisher')
     Version = $packageVersion
     Architecture = $identity.GetAttribute('ProcessorArchitecture')
+    DisplayName = $packageDisplayName.InnerText
     MinimumWindowsVersion = ($minimumVersions | Sort-Object -Descending | Select-Object -First 1)
   }
 }
@@ -573,7 +586,7 @@ try {
       previousPackageFamilyName = $legacyPackage.PackageFamilyName
       reason = 'Windows does not support PreserveApplicationData for packaged AppX removals. The legacy package remains registered to avoid deleting its package-family-scoped data.'
     }
-    Write-Warning 'The legacy self-signed ORBIT package remains installed so Windows does not delete its package-family-scoped data. Select the new ORBIT entry in Xbox Mode settings; do not remove the legacy package until you have confirmed your data in the Certum-signed build.'
+    Write-Warning "The legacy self-signed ORBIT package remains installed so Windows does not delete its package-family-scoped data. Select $($packageContract.DisplayName) in Xbox Mode settings; do not remove the legacy package until you have confirmed your data in the Certum-signed build."
   }
 
   $diagnostics.result = 'success'
@@ -586,10 +599,10 @@ try {
   if ($currentGamingHome -eq $orbitAumid) {
     Write-Host 'ORBIT is already configured as the Windows Gaming Home app.'
   } elseif ([string]::IsNullOrWhiteSpace($currentGamingHome)) {
-    Write-Warning 'No Gaming Home app is selected yet. Select ORBIT in Settings > Gaming > Xbox mode.'
+    Write-Warning "No Gaming Home app is selected yet. Select $($packageContract.DisplayName) in Settings > Gaming > Xbox mode."
   } else {
     Write-Warning "Another Gaming Home app is selected: $currentGamingHome"
-    Write-Host 'Select ORBIT under Settings > Gaming > Xbox mode > Choose home app.'
+    Write-Host "Select $($packageContract.DisplayName) under Settings > Gaming > Xbox mode > Choose home app."
   }
   Write-Host 'Windows controls Xbox Mode availability by OS version, market, device policy, and phased feature rollout; no Xbox app version is hard-coded by ORBIT.'
   Write-Host "Diagnostics: $diagnosticPath"
