@@ -57,6 +57,10 @@ function installedMetadata(local: GameMetadata, catalog?: XboxAppGame): GameMeta
       icon: unique([
         ...(catalog.metadata.artwork?.icon ?? []),
         ...(local.artwork?.icon ?? [])
+      ]),
+      logo: unique([
+        ...(catalog.metadata.artwork?.logo ?? []),
+        ...(local.artwork?.logo ?? [])
       ])
     }
   }

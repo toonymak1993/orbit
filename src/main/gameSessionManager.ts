@@ -22,6 +22,14 @@ import {
 } from './gameLaunchDetectionPolicy'
 import { settingsStore } from './settingsStore'
 
+const WINDOWS_POWERSHELL_PATH = path.join(
+  process.env.SystemRoot ?? 'C:\\Windows',
+  'System32',
+  'WindowsPowerShell',
+  'v1.0',
+  'powershell.exe'
+)
+
 interface WindowsProcess {
   ProcessId?: number
   ParentProcessId?: number
@@ -587,7 +595,7 @@ class WindowsProcessSampler extends EventEmitter {
     this.failure = null
     this.stopping = false
     const child = spawn(
-      'powershell.exe',
+      WINDOWS_POWERSHELL_PATH,
       [
         '-NoLogo',
         '-NoProfile',
@@ -734,7 +742,7 @@ foreach ($id in $ids) {
 
   return new Promise((resolve) => {
     execFile(
-      'powershell.exe',
+      WINDOWS_POWERSHELL_PATH,
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encodedPowerShell(script)],
       { windowsHide: true, encoding: 'utf8' },
       () => resolve()
@@ -789,7 +797,7 @@ if ($null -ne $target) {
   ${fullscreenFallback}
 }`
   execFile(
-    'powershell.exe',
+    WINDOWS_POWERSHELL_PATH,
     ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encodedPowerShell(script)],
     { windowsHide: true, encoding: 'utf8' },
     () => undefined
@@ -860,7 +868,7 @@ for ($attempt = 0; $attempt -lt 3; $attempt++) {
 
   return new Promise((resolve) => {
     execFile(
-      'powershell.exe',
+      WINDOWS_POWERSHELL_PATH,
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encodedPowerShell(script)],
       { windowsHide: true, encoding: 'utf8', timeout: 2_000 },
       () => resolve()

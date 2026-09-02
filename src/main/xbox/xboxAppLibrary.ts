@@ -20,6 +20,7 @@ interface XboxAppCacheRecord {
   verticalUrls?: unknown
   horizontalUrls?: unknown
   iconUrls?: unknown
+  logoUrls?: unknown
 }
 
 interface XboxAppCachePayload {
@@ -211,7 +212,8 @@ if ($hasActiveSubscription -and $subscriptionData) {
     if (-not $packageFamilyName) { $packageFamilyName = $packageFamilyByStoreId[$storeId] }
     $verticalUrls = Get-Urls @($data.artwork) @('POSTER', 'BRANDEDKEYART')
     $horizontalUrls = Get-Urls @($data.artwork) @('SUPERHEROART', 'TITLEDHEROART')
-    $iconUrls = Get-Urls @($data.artwork) @('LOGO', 'BOXART')
+    $iconUrls = Get-Urls @($data.artwork) @('BOXART', 'SQUARE', 'ICON')
+    $logoUrls = Get-Urls @($data.artwork) @('LOGO')
     $gamesByProductId[$storeId] = [pscustomobject]@{
       productId = $storeId
       title = $title
@@ -224,6 +226,7 @@ if ($hasActiveSubscription -and $subscriptionData) {
       verticalUrls = $verticalUrls
       horizontalUrls = $horizontalUrls
       iconUrls = $iconUrls
+      logoUrls = $logoUrls
     }
   }
 }
@@ -322,6 +325,7 @@ export async function scanXboxAppLibrary(): Promise<XboxAppLibrarySnapshot> {
     const vertical = httpsUrls(record.verticalUrls)
     const horizontal = httpsUrls(record.horizontalUrls)
     const icon = httpsUrls(record.iconUrls)
+    const logo = httpsUrls(record.logoUrls)
     const packageFamilyName = normalizeXboxPackageFamilyName(record.packageFamilyName)
     const description = text(record.description)
     const developer = text(record.developer)
@@ -342,7 +346,7 @@ export async function scanXboxAppLibrary(): Promise<XboxAppLibrarySnapshot> {
         backgroundUrl: horizontal?.[0],
         storeHeaderUrl: horizontal?.[0],
         iconUrl: icon?.[0],
-        artwork: { vertical, horizontal, icon }
+        artwork: { vertical, horizontal, icon, logo }
       }
     }
     games.set(productId, game)

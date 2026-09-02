@@ -20,14 +20,22 @@ function presentation(
 ): { label: string; tone: string; icon: JSX.Element } {
   if (status.installation === 'unsupported') {
     return {
-      label: t('settings.backgroundService.status.unsupported'),
+      label: t(
+        status.reason === 'unsupported-package'
+          ? 'settings.backgroundService.status.unsupportedPackage'
+          : 'settings.backgroundService.status.unsupported'
+      ),
       tone: 'border-amber-300/25 bg-amber-300/10 text-amber-200',
       icon: <CircleAlert size={12} />
     }
   }
   if (status.installation === 'repair-needed') {
     return {
-      label: t('settings.backgroundService.status.repairNeeded'),
+      label: t(
+        status.reason === 'machine-configuration-mismatch'
+          ? 'settings.backgroundService.status.managedRepairNeeded'
+          : 'settings.backgroundService.status.repairNeeded'
+      ),
       tone: 'border-amber-300/25 bg-amber-300/10 text-amber-200',
       icon: <CircleAlert size={12} />
     }
@@ -37,6 +45,28 @@ function presentation(
       label: t('settings.backgroundService.status.notInstalled'),
       tone: 'border-white/10 bg-white/[0.04] text-white/45',
       icon: <Power size={12} />
+    }
+  }
+  if (
+    status.runtime === 'running' &&
+    (status.hardwareControl.state === 'starting' || status.hardwareControl.state === 'unavailable')
+  ) {
+    return {
+      label: t('settings.backgroundService.status.recovering'),
+      tone: 'border-amber-300/25 bg-amber-300/10 text-amber-200',
+      icon:
+        status.hardwareControl.state === 'starting' ? (
+          <Loader2 size={12} className="animate-spin" />
+        ) : (
+          <CircleAlert size={12} />
+        )
+    }
+  }
+  if (status.runtime === 'running' && status.reason === 'machine-login-item') {
+    return {
+      label: t('settings.backgroundService.status.managed'),
+      tone: 'border-sky-300/25 bg-sky-300/10 text-sky-200',
+      icon: <ShieldCheck size={12} />
     }
   }
   if (status.runtime === 'running') {
@@ -70,6 +100,9 @@ export function OrbitBackgroundServicePanel(): JSX.Element {
   const [status, setStatus] = useState(INITIAL_STATUS)
   const [busy, setBusy] = useState<OrbitBackgroundServiceAction | null>(null)
   const [failed, setFailed] = useState(false)
+  const isMachineManaged =
+    status.reason === 'machine-login-item' ||
+    status.reason === 'machine-configuration-mismatch'
 
   useEffect(() => {
     let mounted = true
@@ -89,8 +122,9 @@ export function OrbitBackgroundServicePanel(): JSX.Element {
     setBusy(action)
     setFailed(false)
     try {
+      const next = await window.api.backgroundService.control(action)
       if (action === 'remove') await setHardwareControlEnabled(false)
-      setStatus(await window.api.backgroundService.control(action))
+      setStatus(next)
     } catch {
       setFailed(true)
     } finally {
@@ -111,7 +145,10 @@ export function OrbitBackgroundServicePanel(): JSX.Element {
       : primaryAction === 'repair'
         ? t('settings.backgroundService.repair')
         : t('settings.backgroundService.restart')
-  const disabled = busy !== null || status.installation === 'unsupported'
+  const disabled =
+    busy !== null ||
+    status.installation === 'unsupported' ||
+    status.reason === 'machine-configuration-mismatch'
 
   return (
     <div className="rounded-2xl border border-white/[0.07] bg-black/25 p-4">
@@ -140,7 +177,11 @@ export function OrbitBackgroundServicePanel(): JSX.Element {
               {t('settings.backgroundService.body')}
             </p>
             <p className="mt-2 text-[10px] leading-relaxed text-white/32">
-              {t('settings.backgroundService.noAdmin')}
+              {t(
+                isMachineManaged
+                  ? 'settings.backgroundService.managedNote'
+                  : 'settings.backgroundService.noAdmin'
+              )}
             </p>
             {failed && (
               <p className="mt-2 flex items-center gap-1.5 text-[10px] font-semibold text-amber-200">
@@ -152,7 +193,7 @@ export function OrbitBackgroundServicePanel(): JSX.Element {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {status.installation === 'installed' && (
+          {status.installation === 'installed' && !isMachineManaged && (
             <motion.button
               data-focusable
               type="button"

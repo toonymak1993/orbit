@@ -94,7 +94,8 @@ export function parseXboxCatalogProducts(
     const images = imageCandidates(localized)
     const vertical = uniqueUrls(images, /poster|brandedkeyart|boxart/)
     const horizontal = uniqueUrls(images, /superheroart|titledheroart|screenshot/)
-    const icon = uniqueUrls(images, /boxart|square|logo|icon/)
+    const icon = uniqueUrls(images, /boxart|square|icon/)
+    const logo = uniqueUrls(images, /logo/)
     const description = text(localized.ShortDescription) ?? text(localized.ProductDescription)
     const developer = text(localized.DeveloperName)
     const publisher = text(localized.PublisherName)
@@ -116,7 +117,7 @@ export function parseXboxCatalogProducts(
         backgroundUrl: horizontal?.[0],
         storeHeaderUrl: horizontal?.[0],
         iconUrl: icon?.[0],
-        artwork: { vertical, horizontal, icon }
+        artwork: { vertical, horizontal, icon, logo }
       }
     })
   }

@@ -1,5 +1,10 @@
-import type { ImageOrientation, SteamGridDbArtworkOption } from '@shared/ipc'
+import type {
+  ImageOrientation,
+  SteamGridDbArtworkOption,
+  SteamGridDbTokenStatus
+} from '@shared/ipc'
 import { fetchWithElectronNet } from './networkFetch'
+import { steamGridDbTokenExpiresAt } from './steamGridDbCredential'
 import {
   isTransientArtworkStatus,
   runArtworkNetworkAttempt,
@@ -20,7 +25,7 @@ import {
  */
 type SteamGridDbOrientation = Exclude<ImageOrientation, 'icon'>
 
-const DIMENSIONS: Record<SteamGridDbOrientation, string> = {
+const DIMENSIONS: Partial<Record<SteamGridDbOrientation, string>> = {
   vertical: '600x900',
   horizontal: '1920x620,3840x1240'
 }
@@ -52,6 +57,43 @@ const MAX_SEARCH_CACHE_ENTRIES = 1_000
 const MAX_PICKER_ASSETS = 24
 const searchCache = new Map<string, SearchCacheEntry>()
 const searchInFlight = new Map<string, Promise<ArtworkNetworkAttempt<number>>>()
+let searchCacheGeneration = 0
+
+export function clearSteamGridDbCache(): void {
+  searchCacheGeneration++
+  searchCache.clear()
+  searchInFlight.clear()
+}
+
+export async function getSteamGridDbTokenStatus(apiKey: string): Promise<SteamGridDbTokenStatus> {
+  const token = apiKey.trim()
+  if (!token) return { state: 'not-configured' }
+
+  const checkedAt = Date.now()
+  const expiresAt = steamGridDbTokenExpiresAt(token)
+  if (expiresAt !== undefined && expiresAt <= checkedAt) {
+    return { state: 'expired', checkedAt, expiresAt }
+  }
+
+  try {
+    const response = await fetchWithElectronNet(
+      'https://www.steamgriddb.com/api/v2/search/autocomplete/Portal',
+      {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(API_TIMEOUT_MS)
+      }
+    )
+    const status = response.status
+    await response.body?.cancel().catch(() => undefined)
+    if (response.ok) return { state: 'valid', checkedAt, expiresAt }
+    if (status === 401 || status === 403) {
+      return { state: 'invalid', checkedAt, expiresAt }
+    }
+    return { state: 'unavailable', checkedAt, expiresAt }
+  } catch {
+    return { state: 'unavailable', checkedAt, expiresAt }
+  }
+}
 
 function cacheSearchResult(cacheKey: string, entry: SearchCacheEntry): void {
   searchCache.delete(cacheKey)
@@ -105,6 +147,7 @@ async function searchGameId(
   const pending = searchInFlight.get(cacheKey)
   if (pending) return pending
 
+  const generation = searchCacheGeneration
   const request = (async (): Promise<ArtworkNetworkAttempt<number>> => {
     const queries = [...new Set([gameName.trim(), stripSteamGridDbEditionWords(gameName)])].filter(Boolean)
     for (const query of queries) {
@@ -116,19 +159,25 @@ async function searchGameId(
       const match = selectSteamGridDbGame(gameName, result.value.data)
       if (match) {
         const gameId = match.id
-        cacheSearchResult(cacheKey, { gameId, expiresAt: Date.now() + FOUND_CACHE_TTL_MS })
+        if (generation === searchCacheGeneration) {
+          cacheSearchResult(cacheKey, { gameId, expiresAt: Date.now() + FOUND_CACHE_TTL_MS })
+        }
         return { state: 'success', value: gameId }
       }
     }
-    cacheSearchResult(cacheKey, {
-      gameId: null,
-      expiresAt: Date.now() + MISSING_CACHE_TTL_MS
-    })
+    if (generation === searchCacheGeneration) {
+      cacheSearchResult(cacheKey, {
+        gameId: null,
+        expiresAt: Date.now() + MISSING_CACHE_TTL_MS
+      })
+    }
     return { state: 'missing' }
   })()
 
   searchInFlight.set(cacheKey, request)
-  return request.finally(() => searchInFlight.delete(cacheKey))
+  return request.finally(() => {
+    if (searchInFlight.get(cacheKey) === request) searchInFlight.delete(cacheKey)
+  })
 }
 
 async function fetchAssets(
@@ -136,8 +185,11 @@ async function fetchAssets(
   apiKey: string,
   orientation: SteamGridDbOrientation
 ): Promise<ArtworkNetworkAttempt<SteamGridDbAsset[]>> {
-  const assetType = orientation === 'vertical' ? 'grids' : 'heroes'
-  const url = `https://www.steamgriddb.com/api/v2/${assetType}/${target}?dimensions=${DIMENSIONS[orientation]}&types=static&nsfw=false`
+  const assetType = orientation === 'vertical' ? 'grids' : orientation === 'horizontal' ? 'heroes' : 'logos'
+  const query = new URLSearchParams({ types: 'static', nsfw: 'false' })
+  const dimensions = DIMENSIONS[orientation]
+  if (dimensions) query.set('dimensions', dimensions)
+  const url = `https://www.steamgriddb.com/api/v2/${assetType}/${target}?${query}`
   const result = await fetchJson<{ success: boolean; data?: SteamGridDbAsset[] }>(url, apiKey)
   if (result.state !== 'success') return result
   if (!result.value.success) return { state: 'missing' }

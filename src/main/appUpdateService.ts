@@ -1,10 +1,10 @@
-import { app, type BrowserWindow } from 'electron'
+import { app, autoUpdater as electronAutoUpdater, type BrowserWindow } from 'electron'
 import { spawn } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
-import { join, resolve } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
 import electronUpdater, { type AppUpdater, type ProgressInfo, type UpdateInfo } from 'electron-updater'
 import {
   IPC,
@@ -21,7 +21,22 @@ import {
   type AppUpdateReleaseCandidate
 } from '@shared/appUpdatePolicy'
 import { fetchWithElectronNet } from './networkFetch'
+import {
+  PENDING_INSTALL_LAUNCH_GRACE_MS,
+  PENDING_INSTALL_MAX_RUNTIME_MS,
+  isPendingInstallConfirmation,
+  isPendingInstallJournal,
+  shouldWaitForPendingInstall,
+  type PendingInstallConfirmation,
+  type PendingInstallJournal
+} from './appUpdateInstallJournal'
+import { launchNsisInstaller } from './nsisInstallerLaunch'
+import {
+  readBackgroundAgentSuspension,
+  renewBackgroundAgentSuspension
+} from './orbitBackgroundServiceSuspension'
 import { getDisplayVersion, getReleaseManifest, type ReleaseManifest } from './releaseManifest'
+import { isProcessAlive, windowsProcessIdentity } from './windowsProcess'
 
 const ACTIVE_DOWNLOAD_PHASES = new Set(['downloading', 'updating', 'installing', 'verifying'])
 const INSTALL_COUNTDOWN_MS = 8_000
@@ -30,21 +45,28 @@ const SIGNATURE_TIMEOUT_MS = 30_000
 const DOWNLOAD_CONNECT_TIMEOUT_MS = 30_000
 const DOWNLOAD_STALL_TIMEOUT_MS = 45_000
 const AUTOMATIC_RETRY_MS = 30 * 60 * 1_000
+const PENDING_INSTALL_POLL_MS = 500
+const PENDING_INSTALL_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000
+const INSTALLER_START_TOLERANCE_MS = 30_000
 
 interface AppUpdateServiceOptions {
   getGameLaunchPhase: () => GameLaunchPhase
   hasActiveLauncherDownload: () => boolean
-  prepareForInstall: () => Promise<void>
-  recoverFromFailedInstall: () => Promise<void>
+  prepareForInstall: (transactionId: string) => Promise<void>
+  recoverFromFailedInstall: (transactionId?: string) => Promise<void>
   getAutoDownloadEnabled: () => boolean
 }
 
-interface PendingInstall {
-  targetVersion: string
-  createdAt: number
-}
-
 type UpdaterCancellationToken = NonNullable<Parameters<AppUpdater['downloadUpdate']>[0]>
+
+interface NsisUpdaterRuntime {
+  downloadedUpdateHelper?: {
+    file: string | null
+    packageFile: string | null
+    downloadedFileInfo: { isAdminRightsRequired?: boolean } | null
+  }
+  installDirectory?: string
+}
 
 /** Loads the token from electron-updater's own dependency tree so pnpm cannot hand
  * the updater a nominally incompatible token from another transitive version. */
@@ -119,6 +141,11 @@ export class AppUpdateService {
   private readonly updatesDirectory = join(app.getPath('userData'), 'app-updates')
   private readonly pendingInstallPath = join(this.updatesDirectory, 'pending-install.json')
   private readonly pendingInstallTempPath = `${this.pendingInstallPath}.tmp`
+  private readonly pendingInstallConfirmationPath = join(
+    this.updatesDirectory,
+    'pending-install-confirmed.json'
+  )
+  private readonly pendingInstallConfirmationTempPath = `${this.pendingInstallConfirmationPath}.tmp`
   private snapshot: AppUpdateSnapshot
   private updater: AppUpdater | null = null
   private release: AppUpdateReleaseCandidate | null = null
@@ -133,6 +160,8 @@ export class AppUpdateService {
   private disposed = false
   private lastProgressEmittedAt = 0
   private installFailureHandled = false
+  private installerLaunchConfirmed = false
+  private activeInstallTransactionId: string | undefined
   private readonly updaterDisposers: Array<() => void> = []
 
   constructor(
@@ -158,10 +187,10 @@ export class AppUpdateService {
     }
   }
 
-  start(): void {
-    if (this.snapshot.stage === 'unsupported') return
+  start(): Promise<void> {
+    if (this.snapshot.stage === 'unsupported') return Promise.resolve()
     if (this.mode === 'nsis') this.configureNsisUpdater()
-    void this.initialize()
+    return this.initialize()
   }
 
   dispose(): void {
@@ -273,7 +302,15 @@ export class AppUpdateService {
   }
 
   private async initialize(): Promise<void> {
-    await this.reconcilePendingInstall()
+    try {
+      await this.reconcilePendingInstall()
+    } catch {
+      // Startup reconciliation is a lifecycle gate for the background agent.
+      // Always resolve it explicitly, even when AV/file locks break cleanup.
+      await this.removePendingInstallFiles()
+      await this.recoverBackgroundAfterFailedInstall()
+      this.setError('install-failed')
+    }
     if (this.disposed) return
     this.scheduleAutomaticCheck(this.manifest.updates.startupDelaySeconds * 1_000)
   }
@@ -296,52 +333,145 @@ export class AppUpdateService {
     return this.manifest.updates.autoDownload && this.options.getAutoDownloadEnabled()
   }
 
-  private async reconcilePendingInstall(): Promise<void> {
-    let raw: string
+  private async removePendingInstallFiles(): Promise<void> {
+    await Promise.all(
+      [
+        this.pendingInstallPath,
+        this.pendingInstallTempPath,
+        this.pendingInstallConfirmationPath,
+        this.pendingInstallConfirmationTempPath
+      ].map((path) => rm(path, { force: true }).catch(() => undefined))
+    )
+  }
+
+  private async readPendingInstallWithGrace(): Promise<
+    PendingInstallJournal | null | undefined
+  > {
+    let deadline = Date.now() + PENDING_INSTALL_LAUNCH_GRACE_MS
+    while (!this.disposed) {
+      try {
+        const parsed = JSON.parse(await readFile(this.pendingInstallPath, 'utf8')) as unknown
+        if (isPendingInstallJournal(parsed)) return parsed
+        try {
+          const metadata = await stat(this.pendingInstallPath)
+          deadline = Math.min(deadline, metadata.mtimeMs + PENDING_INSTALL_LAUNCH_GRACE_MS)
+        } catch {
+          // The initial bounded deadline still applies.
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          await Promise.all(
+            [
+              this.pendingInstallTempPath,
+              this.pendingInstallConfirmationPath,
+              this.pendingInstallConfirmationTempPath
+            ].map((path) => rm(path, { force: true }).catch(() => undefined))
+          )
+          return undefined
+        }
+      }
+      if (Date.now() >= deadline) return null
+      await wait(Math.min(PENDING_INSTALL_POLL_MS, Math.max(1, deadline - Date.now())))
+    }
+    return undefined
+  }
+
+  private async readPendingInstallConfirmation(
+    transactionId: string
+  ): Promise<PendingInstallConfirmation | undefined> {
     try {
-      raw = await readFile(this.pendingInstallPath, 'utf8')
-    } catch (error) {
-      await rm(this.pendingInstallTempPath, { force: true })
-      if ((error as { code?: string }).code !== 'ENOENT') this.setError('install-failed')
+      const parsed = JSON.parse(
+        await readFile(this.pendingInstallConfirmationPath, 'utf8')
+      ) as unknown
+      if (
+        isPendingInstallConfirmation(parsed) &&
+        parsed.transactionId === transactionId &&
+        isAbsolute(parsed.installerPath)
+      ) {
+        return parsed
+      }
+    } catch {
+      // The launcher may still be between process confirmation and journal rename.
+    }
+    return undefined
+  }
+
+  private async isConfirmedInstallerRunning(
+    confirmation: PendingInstallConfirmation
+  ): Promise<boolean> {
+    if (!isProcessAlive(confirmation.processId)) return false
+    if (process.platform !== 'win32') return true
+    const identity = await windowsProcessIdentity(confirmation.processId)
+    if (!identity) return true
+    return (
+      identity.executablePath.trim().replace(/^"|"$/g, '').toLowerCase() ===
+        confirmation.installerPath.trim().replace(/^"|"$/g, '').toLowerCase() &&
+      Math.abs(identity.startedAt - confirmation.startedAt) <= INSTALLER_START_TOLERANCE_MS
+    )
+  }
+
+  private async waitForPendingInstall(journal: PendingInstallJournal): Promise<boolean> {
+    const confirmation = await this.readPendingInstallConfirmation(journal.transactionId)
+    const installerRunning = confirmation
+      ? await this.isConfirmedInstallerRunning(confirmation)
+      : false
+    const suspension = await readBackgroundAgentSuspension(app.getPath('userData'))
+    const now = Date.now()
+    const matchingSuspensionActive =
+      suspension?.transactionId === journal.transactionId && suspension.expiresAt > now
+    // Never keep an old UI resident while a prepared/confirmed installer owns
+    // the application directory. Reconciliation remains unresolved until this
+    // process exits, so the manager cannot clear the suspension marker.
+    return shouldWaitForPendingInstall(
+      journal,
+      confirmation,
+      installerRunning,
+      matchingSuspensionActive,
+      now
+    )
+  }
+
+  private async reconcilePendingInstall(): Promise<void> {
+    const pending = await this.readPendingInstallWithGrace()
+    if (pending === undefined) return
+    if (
+      pending === null ||
+      pending.createdAt > Date.now() + PENDING_INSTALL_LAUNCH_GRACE_MS ||
+      Date.now() - pending.createdAt > PENDING_INSTALL_MAX_AGE_MS
+    ) {
+      await this.removePendingInstallFiles()
+      await this.cleanupUpdateCache(new Set())
+      await this.recoverBackgroundAfterFailedInstall()
+      this.setError('install-failed')
       return
     }
 
-    try {
-      const pending = JSON.parse(raw) as PendingInstall
-      if (
-        !pending ||
-        typeof pending.targetVersion !== 'string' ||
-        typeof pending.createdAt !== 'number' ||
-        Date.now() - pending.createdAt > 7 * 24 * 60 * 60 * 1_000
-      ) {
-        await rm(this.pendingInstallPath, { force: true })
-        await rm(this.pendingInstallTempPath, { force: true })
-        await this.cleanupUpdateCache(new Set())
-        await this.recoverBackgroundAfterFailedInstall()
-        this.setError('install-failed')
-        return
-      }
-      const comparison = compareAppVersions(this.snapshot.currentVersion, pending.targetVersion)
-      if (comparison !== null && comparison >= 0) {
-        this.setSnapshot({
-          stage: 'up-to-date',
-          installedVersion: this.snapshot.currentVersion,
-          checkedAt: Date.now(),
-          error: undefined
-        })
-        await this.cleanupUpdateCache(new Set())
-      } else {
-        await this.recoverBackgroundAfterFailedInstall()
-        this.setError('install-failed')
-      }
-      await rm(this.pendingInstallPath, { force: true })
-      await rm(this.pendingInstallTempPath, { force: true })
-    } catch {
-      await rm(this.pendingInstallPath, { force: true })
-      await rm(this.pendingInstallTempPath, { force: true })
-      await this.recoverBackgroundAfterFailedInstall()
-      this.setError('install-failed')
+    const comparison = compareAppVersions(this.snapshot.currentVersion, pending.targetVersion)
+    if (comparison !== null && comparison >= 0) {
+      this.setSnapshot({
+        stage: 'up-to-date',
+        installedVersion: this.snapshot.currentVersion,
+        checkedAt: Date.now(),
+        error: undefined
+      })
+      await this.removePendingInstallFiles()
+      await this.cleanupUpdateCache(new Set())
+      // Completing the durable journal is the only startup path authorized to
+      // release the matching background-agent suspension before it expires.
+      await this.recoverBackgroundAfterFailedInstall(pending.transactionId)
+      return
     }
+
+    const installerConfirmed = await this.waitForPendingInstall(pending)
+    if (this.disposed) return
+    if (installerConfirmed) {
+      app.quit()
+      await new Promise<void>(() => undefined)
+      return
+    }
+    await this.removePendingInstallFiles()
+    await this.recoverBackgroundAfterFailedInstall(pending.transactionId)
+    this.setError('install-failed')
   }
 
   private configureNsisUpdater(): void {
@@ -407,12 +537,14 @@ export class AppUpdateService {
     }
     const onError = (): void => {
       if (this.nsisCancellationExpected) return
+      if (this.snapshot.stage === 'installing') {
+        void this.handleInstallLaunchFailure()
+        return
+      }
       this.setError(
         this.snapshot.stage === 'checking'
           ? 'release-unavailable'
-          : this.snapshot.stage === 'installing'
-            ? 'install-failed'
-            : 'download-failed'
+          : 'download-failed'
       )
     }
 
@@ -818,6 +950,29 @@ export class AppUpdateService {
     })
   }
 
+  private async writePendingInstallJournal(journal: PendingInstallJournal): Promise<void> {
+    await rm(this.pendingInstallTempPath, { force: true })
+    await writeFile(this.pendingInstallTempPath, JSON.stringify(journal), 'utf8')
+    await rm(this.pendingInstallPath, { force: true })
+    await rename(this.pendingInstallTempPath, this.pendingInstallPath)
+  }
+
+  private async writePendingInstallConfirmation(
+    confirmation: PendingInstallConfirmation
+  ): Promise<void> {
+    await rm(this.pendingInstallConfirmationTempPath, { force: true })
+    await writeFile(
+      this.pendingInstallConfirmationTempPath,
+      JSON.stringify(confirmation),
+      'utf8'
+    )
+    await rm(this.pendingInstallConfirmationPath, { force: true })
+    await rename(
+      this.pendingInstallConfirmationTempPath,
+      this.pendingInstallConfirmationPath
+    )
+  }
+
   private async performInstall(): Promise<void> {
     if (this.snapshot.stage !== 'ready' || !this.snapshot.targetVersion) return
     if (this.options.getGameLaunchPhase() !== 'idle') {
@@ -825,7 +980,10 @@ export class AppUpdateService {
       return
     }
     const targetVersion = this.snapshot.targetVersion
+    const transactionId = randomUUID()
+    this.activeInstallTransactionId = transactionId
     this.installFailureHandled = false
+    this.installerLaunchConfirmed = false
     this.setSnapshot({
       stage: 'installing',
       installScheduled: false,
@@ -847,52 +1005,141 @@ export class AppUpdateService {
           return
         }
       }
-      await rm(this.pendingInstallTempPath, { force: true })
-      await writeFile(
-        this.pendingInstallTempPath,
-        JSON.stringify({ targetVersion, createdAt: Date.now() } satisfies PendingInstall),
-        'utf8'
+      await Promise.all(
+        [this.pendingInstallConfirmationPath, this.pendingInstallConfirmationTempPath].map(
+          (path) => rm(path, { force: true })
+        )
       )
-      await rm(this.pendingInstallPath, { force: true })
-      await rename(this.pendingInstallTempPath, this.pendingInstallPath)
-      await this.options.prepareForInstall()
+      await this.writePendingInstallJournal({
+        targetVersion,
+        createdAt: Date.now(),
+        transactionId,
+        phase: 'launching'
+      })
+      await this.options.prepareForInstall(transactionId)
+      // Persist the full installer ownership window before spawning anything.
+      // If this fails, recovery is still safe because no external installer can
+      // have started yet. A shutdown helper may subsequently extend, but never
+      // shorten, this exact transaction.
+      if (
+        !(await renewBackgroundAgentSuspension(
+          app.getPath('userData'),
+          transactionId,
+          PENDING_INSTALL_MAX_RUNTIME_MS
+        ))
+      ) {
+        throw new Error('ORBIT background service suspension could not be extended')
+      }
+      // Rebase the bounded reconciliation window after preparation completes,
+      // while failure is still fully recoverable and before the external spawn.
+      await this.writePendingInstallJournal({
+        targetVersion,
+        createdAt: Date.now(),
+        transactionId,
+        phase: 'launching'
+      })
       if (this.mode === 'nsis') {
-        this.updater?.quitAndInstall(true, true)
+        // electron-updater 6.8.x quits immediately after scheduling its own
+        // asynchronous spawn. Use its verified download metadata, but own the
+        // spawn so a launch error can fully recover before ORBIT ever quits.
+        const updater = this.updater as (AppUpdater & NsisUpdaterRuntime) | null
+        const downloadedUpdate = updater?.downloadedUpdateHelper
+        const installerPath = downloadedUpdate?.file
+        if (!installerPath || (await fileSize(installerPath)) === 0) {
+          throw new Error('Missing downloaded NSIS installer')
+        }
+        const packagePath = downloadedUpdate.packageFile ?? undefined
+        if (packagePath && (await fileSize(packagePath)) === 0) {
+          throw new Error('Missing downloaded NSIS package')
+        }
+        const launch = await launchNsisInstaller({
+          installerPath,
+          packagePath,
+          installDirectory: updater?.installDirectory,
+          isAdminRightsRequired:
+            downloadedUpdate.downloadedFileInfo?.isAdminRightsRequired === true
+        })
+        this.installerLaunchConfirmed = true
+        await this.writePendingInstallConfirmation({
+          transactionId,
+          installerPath: launch.executablePath,
+          processId: launch.processId,
+          startedAt: launch.startedAt
+        }).catch((error) => {
+          console.warn(
+            '[app-update] NSIS launch confirmation could not be persisted:',
+            error instanceof Error ? error.message : error
+          )
+        })
+        try {
+          electronAutoUpdater.emit('before-quit-for-update')
+        } catch (error) {
+          console.warn(
+            '[app-update] before-quit-for-update listener failed:',
+            error instanceof Error ? error.message : error
+          )
+        }
+        app.quit()
         return
       }
       if (!this.release) throw new Error('Missing AppX update release')
       const setupPath = this.updatePath(this.release.asset.name)
+      const startedAt = Date.now()
       const child = spawn(setupPath, ['/ORBIT-UPDATE=1'], {
         detached: true,
         stdio: 'ignore',
         windowsHide: true
       })
-      child.once('error', () => void this.handleInstallLaunchFailure())
+      await new Promise<void>((resolvePromise, reject) => {
+        child.once('error', reject)
+        child.once('spawn', resolvePromise)
+      })
+      if (!child.pid) throw new Error('AppX installer did not report a process ID')
+      this.installerLaunchConfirmed = true
+      await this.writePendingInstallConfirmation({
+        transactionId,
+        installerPath: setupPath,
+        processId: child.pid,
+        startedAt
+      }).catch((error) => {
+        console.warn(
+          '[app-update] AppX launch confirmation could not be persisted:',
+          error instanceof Error ? error.message : error
+        )
+      })
+      child.once('error', () => void this.handleInstallLaunchFailure(true))
       child.once('exit', (code) => {
         if (code !== 0 && !this.disposed && !this.mainWindow.isDestroyed()) {
-          void this.handleInstallLaunchFailure()
+          void this.handleInstallLaunchFailure(true)
         }
       })
       child.unref()
     } catch {
+      if (this.installerLaunchConfirmed) return
       await this.handleInstallLaunchFailure()
     }
   }
 
-  private async handleInstallLaunchFailure(): Promise<void> {
+  private async handleInstallLaunchFailure(afterConfirmedLaunch = false): Promise<void> {
+    if (this.installerLaunchConfirmed && !afterConfirmedLaunch) return
     if (this.installFailureHandled) return
     this.installFailureHandled = true
-    await rm(this.pendingInstallPath, { force: true })
-    await rm(this.pendingInstallTempPath, { force: true })
+    await this.removePendingInstallFiles()
     await this.recoverBackgroundAfterFailedInstall()
     this.setError('install-failed')
   }
 
-  private async recoverBackgroundAfterFailedInstall(): Promise<void> {
+  private async recoverBackgroundAfterFailedInstall(
+    transactionId = this.activeInstallTransactionId
+  ): Promise<void> {
     try {
-      await this.options.recoverFromFailedInstall()
+      await this.options.recoverFromFailedInstall(transactionId)
     } catch {
       // The update error remains actionable even when the optional service recovery fails.
+    } finally {
+      if (this.activeInstallTransactionId === transactionId) {
+        this.activeInstallTransactionId = undefined
+      }
     }
   }
 

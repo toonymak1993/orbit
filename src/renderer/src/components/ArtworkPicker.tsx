@@ -254,12 +254,19 @@ export function ArtworkPicker({
       ? t('artwork.cover')
       : orientation === 'horizontal'
         ? t('artwork.background')
-        : t('artwork.icon')
+        : orientation === 'logo'
+          ? t('artwork.logo')
+          : t('artwork.icon')
   const optionGridClass =
     orientation === 'vertical'
       ? `grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 ${compact ? 'gap-2' : 'gap-3'}`
       : `grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 ${compact ? 'gap-2.5' : 'gap-4'}`
-  const optionAspectClass = orientation === 'vertical' ? 'aspect-[2/3]' : 'aspect-video'
+  const optionAspectClass =
+    orientation === 'vertical'
+      ? 'aspect-[2/3]'
+      : orientation === 'logo'
+        ? 'aspect-[3/1]'
+        : 'aspect-video'
 
   return createPortal(
     <AnimatePresence>
@@ -311,7 +318,7 @@ export function ArtworkPicker({
                 aria-label={t('artwork.title')}
                 className="flex shrink-0 rounded-full border border-white/10 bg-black/25 p-1"
               >
-                {(['vertical', 'horizontal', 'icon'] as const).map((value) => (
+                {(['vertical', 'horizontal', 'logo', 'icon'] as const).map((value) => (
                   <button
                     key={value}
                     data-focusable
@@ -333,7 +340,9 @@ export function ArtworkPicker({
                       ? t('artwork.cover')
                       : value === 'horizontal'
                         ? t('artwork.background')
-                        : t('artwork.icon')}
+                        : value === 'logo'
+                          ? t('artwork.logo')
+                          : t('artwork.icon')}
                   </button>
                 ))}
               </div>

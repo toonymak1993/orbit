@@ -19,9 +19,10 @@ const ACCENT_GRADIENTS = [
 ]
 
 const resolvedCache = new Map<string, ResolvedImage | null>()
-const listeners = new Map<string, Set<(image: ResolvedImage | null) => void>>()
+const listeners = new Map<string, Set<(image: ResolvedImage | null | undefined) => void>>()
 const inFlight = new Map<string, Promise<ResolvedImage | null>>()
 let isListening = false
+let cacheGeneration = 0
 
 function imageKey(gameId: string, orientation: ImageOrientation): string {
   return `${gameId}:${orientation}`
@@ -38,28 +39,57 @@ function ensureArtworkListener(): void {
   window.api.image.onUpdated((update: ImageUpdate) => {
     publish(imageKey(update.gameId, update.orientation), update.image)
   })
+  window.api.image.onCacheInvalidated(() => {
+    cacheGeneration++
+    resolvedCache.clear()
+    inFlight.clear()
+    const activeKeys = [...listeners.keys()]
+    for (const key of activeKeys) {
+      for (const listener of listeners.get(key) ?? []) listener(undefined)
+      const separator = key.lastIndexOf(':')
+      if (separator <= 0) continue
+      const orientation = key.slice(separator + 1) as ImageOrientation
+      void requestImage(key.slice(0, separator), orientation)
+    }
+  })
 }
 
 function requestImage(gameId: string, orientation: ImageOrientation): Promise<ResolvedImage | null> {
   const key = imageKey(gameId, orientation)
   const current = inFlight.get(key)
   if (current) return current
+  const generation = cacheGeneration
   const request = window.api.image
     .resolve(gameId, orientation)
     .then((image) => {
-      publish(key, image)
+      if (generation === cacheGeneration) publish(key, image)
       return image
     })
     .catch(() => {
+      if (generation !== cacheGeneration) return null
       // An IPC/startup failure is not a durable "missing artwork" result. Show
       // the local fallback now, but let a later mount retry the resolution.
       resolvedCache.delete(key)
       for (const listener of listeners.get(key) ?? []) listener(null)
       return null
     })
-    .finally(() => inFlight.delete(key))
+    .finally(() => {
+      if (inFlight.get(key) === request) inFlight.delete(key)
+    })
   inFlight.set(key, request)
   return request
+}
+
+/** Warm the shared artwork cache without mounting a visible image. Home uses
+ * this for the next slideshow frame so crossfades never wait on IPC or decode. */
+export function preloadGameImage(
+  gameId: string,
+  orientation: ImageOrientation
+): Promise<ResolvedImage | null> {
+  ensureArtworkListener()
+  const key = imageKey(gameId, orientation)
+  if (resolvedCache.has(key)) return Promise.resolve(resolvedCache.get(key) ?? null)
+  return requestImage(gameId, orientation)
 }
 
 function gradientFor(name: string): string {
@@ -132,6 +162,15 @@ export function GameImage({
   }
 
   if (displayed === null) {
+    if (orientation === 'logo') {
+      return (
+        <div className={`flex items-center ${className}`}>
+          <span className="line-clamp-2 text-left text-[clamp(1rem,2vw,2rem)] font-black leading-[0.95] tracking-[-0.035em] text-white drop-shadow-[0_4px_16px_rgba(0,0,0,0.85)]">
+            {name}
+          </span>
+        </div>
+      )
+    }
     return (
       <div
         className={`relative isolate flex items-end overflow-hidden bg-[#090d13] p-[10%] text-white ${className}`}
@@ -163,6 +202,22 @@ export function GameImage({
   }
 
   if (displayed.contain && fit !== 'cover') {
+    if (orientation === 'logo') {
+      return (
+        <div className={`flex items-center justify-start ${className}`}>
+          <img
+            key={displayed.revision}
+            src={displayed.url}
+            alt=""
+            draggable={false}
+            loading="eager"
+            decoding="async"
+            onError={reportResolvedFailure}
+            className="max-h-full max-w-full object-contain object-left drop-shadow-[0_5px_18px_rgba(0,0,0,0.8)]"
+          />
+        </div>
+      )
+    }
     if (orientation === 'icon') {
       return (
         <div

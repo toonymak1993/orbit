@@ -32,6 +32,12 @@ export function findNextFocus(
   const applicationTarget = findApplicationTarget(current, direction)
   if (applicationTarget !== undefined) return applicationTarget
 
+  const rollingTarget = findRollingTarget(current, direction)
+  if (rollingTarget !== undefined) return rollingTarget
+
+  const xModeTarget = findXModeTarget(current, direction)
+  if (xModeTarget !== undefined) return xModeTarget
+
   const coreSenseTarget = findCoreSenseTarget(current, direction)
   if (coreSenseTarget) return coreSenseTarget
 
@@ -61,6 +67,176 @@ export function findNextFocus(
   }
 
   return findNearestCandidate(current, direction, getFocusableElements())
+}
+
+/**
+ * Rolling keeps the library in its durable order and adds a compact discovery
+ * shelf below it. Explicit layer transitions prevent the wide, changing game
+ * geometry from making controller navigation jump between unrelated controls.
+ */
+function findRollingTarget(
+  current: HTMLElement,
+  direction: NavDirection
+): HTMLElement | null | undefined {
+  const rollingHome = document.querySelector<HTMLElement>('[data-home-layout="rolling"]')
+  if (!rollingHome) return undefined
+
+  if (direction === 'down' && current.closest('[data-top-nav]')) {
+    return (
+      rollingHome.querySelector<HTMLElement>('[data-rolling-active="true"]') ??
+      rollingHome.querySelector<HTMLElement>('[data-rolling-game="true"]')
+    )
+  }
+
+  const activeGame =
+    rollingHome.querySelector<HTMLElement>('[data-rolling-active="true"]') ??
+    rollingHome.querySelector<HTMLElement>('[data-rolling-game="true"]')
+  const activeTab =
+    rollingHome.querySelector<HTMLElement>(
+      '[data-rolling-shelf-tab="true"][aria-selected="true"]'
+    ) ?? rollingHome.querySelector<HTMLElement>('[data-rolling-shelf-tab="true"]')
+
+  if (current.matches('[data-rolling-game="true"]')) {
+    if (direction === 'up') return getPreferredTopNavEntry()
+    if (direction === 'down') return activeTab
+    return rollingIndexedNeighbour(
+      current,
+      rollingHome,
+      '[data-rolling-game="true"]',
+      'rollingIndex',
+      direction
+    )
+  }
+
+  if (current.matches('[data-rolling-shelf-tab="true"]')) {
+    if (direction === 'up') return activeGame
+    if (direction === 'down') {
+      return rollingHome.querySelector<HTMLElement>('[data-rolling-shelf-item="true"]')
+    }
+    return rollingIndexedNeighbour(
+      current,
+      rollingHome,
+      '[data-rolling-shelf-tab="true"]',
+      'rollingShelfTabIndex',
+      direction
+    )
+  }
+
+  if (current.matches('[data-rolling-shelf-item="true"]')) {
+    if (direction === 'up') return activeTab
+    if (direction === 'down') return null
+    return rollingIndexedNeighbour(
+      current,
+      rollingHome,
+      '[data-rolling-shelf-item="true"]',
+      'rollingShelfItemIndex',
+      direction
+    )
+  }
+
+  return undefined
+}
+
+function rollingIndexedNeighbour(
+  current: HTMLElement,
+  root: HTMLElement,
+  selector: string,
+  indexKey: keyof DOMStringMap,
+  direction: NavDirection
+): HTMLElement | null {
+  if (direction !== 'left' && direction !== 'right') return null
+  const items = Array.from(root.querySelectorAll<HTMLElement>(selector)).sort(
+    (left, right) => Number(left.dataset[indexKey]) - Number(right.dataset[indexKey])
+  )
+  const index = items.indexOf(current)
+  if (index < 0) return null
+  return items[index + (direction === 'right' ? 1 : -1)] ?? null
+}
+
+/**
+ * XMODE has a narrow launcher row above a two-column feature grid. Depending
+ * on viewport height and the feature-card rotation phase, those rows can be
+ * separated by more than one screen. Explicit vertical hand-offs keep Down
+ * deterministic while the existing grid logic continues to own movement
+ * within each row.
+ */
+function findXModeTarget(
+  current: HTMLElement,
+  direction: NavDirection
+): HTMLElement | undefined {
+  const xModeHome = document.querySelector<HTMLElement>(
+    '.xmode-home[data-home-layout="xmode"]'
+  )
+  if (!xModeHome) return undefined
+
+  const search = xModeHome.querySelector<HTMLElement>('[data-xmode-search="true"]')
+  const launcherItems = Array.from(
+    xModeHome.querySelectorAll<HTMLElement>(
+      '[data-xmode-launcher], [data-xmode-library="true"]'
+    )
+  ).filter(isVisibleFocusTarget)
+  const featureGrid = xModeHome.querySelector<HTMLElement>('.xmode-feature-grid')
+  const featureItems = featureGrid
+    ? Array.from(
+        featureGrid.querySelectorAll<HTMLElement>('[data-focusable][data-grid-index]')
+      ).filter(isVisibleFocusTarget)
+    : []
+  const featureColumns = Number(featureGrid?.dataset.gridColumns ?? 2)
+  const topFeatureItems = featureItems.filter(
+    (item) => Number(item.dataset.gridIndex) < featureColumns
+  )
+
+  if (direction === 'down' && current.closest('[data-top-nav]')) {
+    return search ?? launcherItems[0] ?? topFeatureItems[0] ?? featureItems[0]
+  }
+
+  if (current.matches('[data-xmode-search="true"]')) {
+    if (direction === 'up') return getPreferredTopNavEntry() ?? undefined
+    if (direction === 'down') {
+      return launcherItems[0] ?? topFeatureItems[0] ?? featureItems[0]
+    }
+    return undefined
+  }
+
+  if (current.matches('[data-xmode-launcher], [data-xmode-library="true"]')) {
+    if (direction === 'up') return search ?? getPreferredTopNavEntry() ?? undefined
+    if (direction === 'down') {
+      return nearestHorizontalTarget(
+        current,
+        topFeatureItems.length > 0 ? topFeatureItems : featureItems
+      ) ?? undefined
+    }
+    return undefined
+  }
+
+  if (
+    direction === 'up' &&
+    featureGrid?.contains(current) &&
+    Number(current.dataset.gridIndex) < featureColumns
+  ) {
+    return nearestHorizontalTarget(current, launcherItems) ?? search ?? undefined
+  }
+
+  return undefined
+}
+
+function isVisibleFocusTarget(element: HTMLElement): boolean {
+  return element.offsetParent !== null && !element.closest('[inert]')
+}
+
+function nearestHorizontalTarget(
+  current: HTMLElement,
+  candidates: HTMLElement[]
+): HTMLElement | null {
+  const currentCenter = centerX(current.getBoundingClientRect())
+  return (
+    [...candidates].sort(
+      (left, right) =>
+        Math.abs(centerX(left.getBoundingClientRect()) - currentCenter) -
+          Math.abs(centerX(right.getBoundingClientRect()) - currentCenter) ||
+        centerX(left.getBoundingClientRect()) - centerX(right.getBoundingClientRect())
+    )[0] ?? null
+  )
 }
 
 interface ApplicationNavigationItem {
@@ -479,6 +655,10 @@ const activeScrollAnimations = new WeakMap<HTMLElement, ScrollAnimation>()
 const scrollParentCache = new WeakMap<HTMLElement, HTMLElement[]>()
 
 function ensureFocusedElementVisible(el: HTMLElement): void {
+  // Rolling owns its horizontal alignment while the active card changes size.
+  // A second generic scroll animation here would fight that transition.
+  if (el.matches('[data-rolling-game="true"]')) return
+
   const scrollParents = findScrollParents(el)
   if (scrollParents.length === 0) {
     el.scrollIntoView({ block: 'nearest', inline: 'nearest' })

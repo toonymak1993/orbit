@@ -22,11 +22,15 @@ export type DockMotion = (typeof DOCK_MOTIONS)[number]
 export const STARTUP_ANIMATION_MODES = ['orbit', 'custom', 'off'] as const
 export type StartupAnimationMode = (typeof STARTUP_ANIMATION_MODES)[number]
 export const CUSTOM_STARTUP_VIDEO_URL = 'orbit-media://startup.mp4'
-export type HomeLayoutId = 'orbit' | 'float' | 'coresense' | 'xmode'
+export type HomeLayoutId = 'orbit' | 'rolling' | 'float' | 'coresense' | 'xmode'
 export type GameCardSize = 'compact' | 'standard' | 'large'
 export const LIBRARY_GRID_COLUMN_OPTIONS = [4, 5, 6, 7, 8] as const
 export type LibraryGridColumns = (typeof LIBRARY_GRID_COLUMN_OPTIONS)[number]
 export type BackdropIntensity = 'subtle' | 'balanced' | 'vivid'
+export const HOME_BACKDROP_MODES = ['focus', 'pinned', 'slideshow', 'custom'] as const
+export type HomeBackdropMode = (typeof HOME_BACKDROP_MODES)[number]
+export const HOME_BACKDROP_MOTIONS = ['still', 'drift', 'cinematic'] as const
+export type HomeBackdropMotion = (typeof HOME_BACKDROP_MOTIONS)[number]
 export const PROFILE_AVATAR_IDS = [
   'orbit',
   'nova',
@@ -332,8 +336,11 @@ export interface OrbitBackgroundServiceStatus {
   lastActivationResult?: 'focused' | 'launched' | 'failed'
   reason?:
     | 'unsupported-platform'
+    | 'unsupported-package'
     | 'login-item-disabled'
     | 'configuration-mismatch'
+    | 'machine-login-item'
+    | 'machine-configuration-mismatch'
     | 'agent-unreachable'
 }
 
@@ -348,6 +355,9 @@ export interface OrbitSettings {
   /** Games hidden from launcher surfaces by durable `<provider>:<providerGameId>` identity. */
   excludedGameIds: string[]
   backdropIntensity: BackdropIntensity
+  homeBackdropMode: HomeBackdropMode
+  homeBackdropMotion: HomeBackdropMotion
+  pinnedBackdropGameId?: string
   homeCardBubbleEffect: boolean
   startupAnimationMode: StartupAnimationMode
   dockTheme: DockThemeId
@@ -357,7 +367,6 @@ export interface OrbitSettings {
   language: Language
   audioPreset: AudioPreset
   hasCompletedOnboarding: boolean
-  steamGridDbApiKey?: string
   steamWebApiKey?: string
   storeRegion: StoreRegionId
   showStoreTab: boolean
@@ -604,6 +613,8 @@ export interface GameArtworkCandidates {
   vertical?: string[]
   horizontal?: string[]
   icon?: string[]
+  /** Transparent or tightly cropped game wordmark/title treatment. */
+  logo?: string[]
 }
 
 export interface GameCompletionTimes {
@@ -1141,7 +1152,7 @@ export interface StoreSearchResponse {
   products: StoreProduct[]
 }
 
-export type ImageOrientation = 'vertical' | 'horizontal' | 'icon'
+export type ImageOrientation = 'vertical' | 'horizontal' | 'icon' | 'logo'
 
 export interface ResolvedImage {
   url: string
@@ -1161,6 +1172,28 @@ export interface SteamGridDbArtworkOption {
   width?: number
   height?: number
   authorName?: string
+}
+
+export type SteamGridDbTokenState =
+  | 'not-configured'
+  | 'valid'
+  | 'expired'
+  | 'invalid'
+  | 'unavailable'
+
+/** Credential metadata only. The SteamGridDB token itself stays out of this
+ * dedicated status contract. */
+export interface SteamGridDbTokenStatus {
+  state: SteamGridDbTokenState
+  checkedAt?: number
+  expiresAt?: number
+}
+
+export interface ArtworkMaintenanceResult {
+  clearedEntries: number
+  clearedFiles: number
+  freedBytes: number
+  queuedAssets: number
 }
 
 export type ArtworkSearchSource = 'steam-store' | 'steamgriddb'
@@ -1282,6 +1315,9 @@ export const IPC = {
   retroAchievementsCredentialClear: 'retro-achievements:credential:clear',
   profileAvatarGetCustom: 'profile-avatar:custom:get',
   profileAvatarSelectCustom: 'profile-avatar:custom:select',
+  homeWallpaperGet: 'home-wallpaper:get',
+  homeWallpaperSelect: 'home-wallpaper:select',
+  homeWallpaperClear: 'home-wallpaper:clear',
   startupVideoGet: 'startup-video:get',
   startupVideoSelect: 'startup-video:select',
   applicationsGet: 'applications:get',
@@ -1319,6 +1355,12 @@ export const IPC = {
   imageResetCustom: 'image:custom:reset',
   imageHasCustom: 'image:custom:has',
   imageReportFailure: 'image:failure:report',
+  imageTokenStatusGet: 'image:token-status:get',
+  imageTokenSet: 'image:token:set',
+  imageTokenClear: 'image:token:clear',
+  imageCacheClear: 'image:cache:clear',
+  imageArtworkReload: 'image:artwork:reload',
+  imageCacheInvalidated: 'image:cache:invalidated',
   imageUpdated: 'image:updated',
   storeGet: 'store:get',
   storeRefresh: 'store:refresh',

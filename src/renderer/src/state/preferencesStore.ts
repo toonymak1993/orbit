@@ -1,5 +1,7 @@
 import { create } from 'zustand'
 import {
+  HOME_BACKDROP_MODES,
+  HOME_BACKDROP_MOTIONS,
   LIBRARY_GRID_COLUMN_OPTIONS,
   type AudioPreset,
   type BackdropIntensity,
@@ -10,6 +12,8 @@ import {
   type HomeLayoutId,
   type HardwareControlButton,
   type HardwareControlHoldSeconds,
+  type HomeBackdropMode,
+  type HomeBackdropMotion,
   type LibraryGridColumns,
   type NotificationMotion,
   type NotificationPosition,
@@ -35,6 +39,10 @@ interface PreferencesState {
   gameCardSize: GameCardSize
   libraryGridColumns: LibraryGridColumns
   backdropIntensity: BackdropIntensity
+  homeBackdropMode: HomeBackdropMode
+  homeBackdropMotion: HomeBackdropMotion
+  pinnedBackdropGameId?: string
+  customHomeWallpaperUrl?: string
   homeCardBubbleEffect: boolean
   startupAnimationMode: StartupAnimationMode
   customStartupVideoUrl?: string
@@ -64,6 +72,11 @@ interface PreferencesState {
   setGameCardSize: (gameCardSize: GameCardSize) => Promise<void>
   setLibraryGridColumns: (libraryGridColumns: LibraryGridColumns) => Promise<void>
   setBackdropIntensity: (backdropIntensity: BackdropIntensity) => Promise<void>
+  setHomeBackdropMode: (homeBackdropMode: HomeBackdropMode) => Promise<void>
+  setHomeBackdropMotion: (homeBackdropMotion: HomeBackdropMotion) => Promise<void>
+  setPinnedBackdropGameId: (pinnedBackdropGameId: string) => Promise<void>
+  selectCustomHomeWallpaper: () => Promise<boolean>
+  clearCustomHomeWallpaper: () => Promise<void>
   setHomeCardBubbleEffect: (enabled: boolean) => Promise<void>
   setStartupAnimationMode: (mode: StartupAnimationMode) => Promise<boolean>
   selectCustomStartupVideo: () => Promise<boolean>
@@ -104,6 +117,7 @@ export const THEME_OPTIONS: { id: ThemeId; label: string }[] = [
 
 export const HOME_LAYOUT_OPTIONS: { id: HomeLayoutId; label: string }[] = [
   { id: 'orbit', label: 'ORBIT' },
+  { id: 'rolling', label: 'Rolling' },
   { id: 'float', label: 'FLOAT' },
   { id: 'coresense', label: 'CoreSense' },
   { id: 'xmode', label: 'XMODE' }
@@ -117,6 +131,8 @@ export const BACKDROP_INTENSITY_OPTIONS: BackdropIntensity[] = [
   'balanced',
   'vivid'
 ]
+export const HOME_BACKDROP_MODE_OPTIONS: HomeBackdropMode[] = [...HOME_BACKDROP_MODES]
+export const HOME_BACKDROP_MOTION_OPTIONS: HomeBackdropMotion[] = [...HOME_BACKDROP_MOTIONS]
 
 export const LANGUAGE_OPTIONS: { id: Language; label: string }[] = [
   { id: 'en', label: 'English' },
@@ -149,6 +165,10 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
   gameCardSize: 'standard',
   libraryGridColumns: 6,
   backdropIntensity: 'balanced',
+  homeBackdropMode: 'focus',
+  homeBackdropMotion: 'drift',
+  pinnedBackdropGameId: undefined,
+  customHomeWallpaperUrl: undefined,
   homeCardBubbleEffect: true,
   startupAnimationMode: readCachedStartupAnimationMode(),
   customStartupVideoUrl: undefined,
@@ -172,17 +192,29 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
   hydrated: false,
 
   hydrate: async () => {
-    const [settings, customAvatarUrl, customStartupVideoUrl] = await Promise.all([
-      window.api.settings.get(),
-      window.api.profileAvatar.getCustom(),
-      window.api.startupVideo.get()
-    ])
+    const [settings, customAvatarUrl, customStartupVideoUrl, customHomeWallpaperUrl] =
+      await Promise.all([
+        window.api.settings.get(),
+        window.api.profileAvatar.getCustom(),
+        window.api.startupVideo.get(),
+        window.api.homeWallpaper.get()
+      ])
     const homeLayout = settings.homeLayout ?? 'orbit'
     const gameCardSize = settings.gameCardSize ?? 'standard'
     const libraryGridColumns = LIBRARY_GRID_COLUMN_OPTIONS.includes(settings.libraryGridColumns)
       ? settings.libraryGridColumns
       : 6
     const backdropIntensity = settings.backdropIntensity ?? 'balanced'
+    const requestedHomeBackdropMode = HOME_BACKDROP_MODES.includes(settings.homeBackdropMode)
+      ? settings.homeBackdropMode
+      : 'focus'
+    const homeBackdropMode =
+      requestedHomeBackdropMode === 'custom' && !customHomeWallpaperUrl
+        ? 'focus'
+        : requestedHomeBackdropMode
+    const homeBackdropMotion = HOME_BACKDROP_MOTIONS.includes(settings.homeBackdropMotion)
+      ? settings.homeBackdropMotion
+      : 'drift'
     const homeCardBubbleEffect = settings.homeCardBubbleEffect ?? true
     const requestedStartupAnimationMode = settings.startupAnimationMode ?? 'orbit'
     const startupAnimationMode =
@@ -194,6 +226,9 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
     cacheStartupVideoUrl(customStartupVideoUrl ?? undefined)
     if (startupAnimationMode !== requestedStartupAnimationMode) {
       void window.api.settings.set({ startupAnimationMode })
+    }
+    if (homeBackdropMode !== requestedHomeBackdropMode) {
+      void window.api.settings.set({ homeBackdropMode })
     }
     document.documentElement.lang = settings.language
     applyDomAttributes(
@@ -216,6 +251,10 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
       gameCardSize,
       libraryGridColumns,
       backdropIntensity,
+      homeBackdropMode,
+      homeBackdropMotion,
+      pinnedBackdropGameId: settings.pinnedBackdropGameId,
+      customHomeWallpaperUrl: customHomeWallpaperUrl ?? undefined,
       homeCardBubbleEffect,
       startupAnimationMode,
       customStartupVideoUrl: customStartupVideoUrl ?? undefined,
@@ -306,6 +345,37 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
     )
     set({ backdropIntensity })
     await window.api.settings.set({ backdropIntensity })
+  },
+
+  setHomeBackdropMode: async (homeBackdropMode) => {
+    if (homeBackdropMode === 'custom' && !get().customHomeWallpaperUrl) return
+    set({ homeBackdropMode })
+    await window.api.settings.set({ homeBackdropMode })
+  },
+
+  setHomeBackdropMotion: async (homeBackdropMotion) => {
+    set({ homeBackdropMotion })
+    await window.api.settings.set({ homeBackdropMotion })
+  },
+
+  setPinnedBackdropGameId: async (pinnedBackdropGameId) => {
+    set({ pinnedBackdropGameId })
+    await window.api.settings.set({ pinnedBackdropGameId })
+  },
+
+  selectCustomHomeWallpaper: async () => {
+    const customHomeWallpaperUrl = await window.api.homeWallpaper.select()
+    if (!customHomeWallpaperUrl) return false
+    set({ customHomeWallpaperUrl, homeBackdropMode: 'custom' })
+    await window.api.settings.set({ homeBackdropMode: 'custom' })
+    return true
+  },
+
+  clearCustomHomeWallpaper: async () => {
+    await window.api.homeWallpaper.clear()
+    const homeBackdropMode = get().homeBackdropMode === 'custom' ? 'focus' : get().homeBackdropMode
+    set({ customHomeWallpaperUrl: undefined, homeBackdropMode })
+    await window.api.settings.set({ homeBackdropMode })
   },
 
   setHomeCardBubbleEffect: async (homeCardBubbleEffect) => {

@@ -309,6 +309,7 @@ export class UnifiedLibraryService extends EventEmitter {
     await Promise.all([
       customArtworkService.reset(gameId, 'vertical'),
       customArtworkService.reset(gameId, 'horizontal'),
+      customArtworkService.reset(gameId, 'logo'),
       customArtworkService.reset(gameId, 'icon')
     ])
     if (!gameRepository.removeLocalGame(gameId)) throw new Error('Custom game is not available')

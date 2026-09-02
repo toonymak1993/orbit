@@ -6,6 +6,7 @@ import {
   Check,
   CheckCircle2,
   CircleAlert,
+  Database,
   Download,
   DownloadCloud,
   ExternalLink,
@@ -28,6 +29,7 @@ import {
   RotateCcw,
   ShieldCheck,
   SlidersHorizontal,
+  Trash2,
   Trophy,
   Undo2,
   UserRound
@@ -40,6 +42,8 @@ import {
   GAME_CARD_SIZE_OPTIONS,
   LIBRARY_GRID_COLUMN_OPTIONS,
   BACKDROP_INTENSITY_OPTIONS,
+  HOME_BACKDROP_MODE_OPTIONS,
+  HOME_BACKDROP_MOTION_OPTIONS,
   LANGUAGE_OPTIONS
 } from '@renderer/state/preferencesStore'
 import { useAuthStore } from '@renderer/state/authStore'
@@ -60,7 +64,7 @@ import {
 import { OrbitBackgroundServicePanel } from '@renderer/components/OrbitBackgroundServicePanel'
 import { OrbitWallpaperPanel } from '@renderer/components/OrbitWallpaperPanel'
 import { ControllerButtonHint } from '@renderer/components/ControllerButtonHint'
-import { GameImage } from '@renderer/components/GameImage'
+import { GameImage, preloadGameImage } from '@renderer/components/GameImage'
 import {
   PROFILE_AVATAR_OPTIONS,
   ProfileAvatarPicker
@@ -69,6 +73,7 @@ import { useControllerButtonLabels } from '@renderer/state/controllerStore'
 import { useT } from '@renderer/i18n/useT'
 import { focusElement } from '@renderer/lib/spatialNavigation'
 import { notify } from '@renderer/state/notificationStore'
+import { latestLibraryActivity, normalizeLibraryTimestamp } from '@shared/libraryTime'
 import { useLibraryCollectionsStore } from '@renderer/state/libraryCollectionsStore'
 import { useAppUpdateStore } from '@renderer/state/appUpdateStore'
 import { useSyncStore } from '@renderer/state/syncStore'
@@ -76,11 +81,14 @@ import type { TranslationKey } from '@renderer/i18n/translations'
 import type {
   AudioPreset,
   AppUpdateSnapshot,
+  ArtworkMaintenanceResult,
   BackdropIntensity,
   DockMotion,
   DockSize,
   DockThemeId,
   GameCardSize,
+  HomeBackdropMode,
+  HomeBackdropMotion,
   HomeLayoutId,
   LibraryDetectionMethod,
   LibraryGame,
@@ -96,6 +104,8 @@ import type {
   PlayStationRemotePlayPreference,
   PlayStationRemotePlayStatus,
   StoreRegionId,
+  SteamGridDbTokenState,
+  SteamGridDbTokenStatus,
   StartupAnimationMode,
   SystemUpdateSnapshot,
   ThemeId,
@@ -120,6 +130,7 @@ const themeSwatch: Record<ThemeId, string> = {
 
 const HOME_LAYOUT_BODY_KEYS: Record<HomeLayoutId, TranslationKey> = {
   orbit: 'settings.homeLayout.orbitBody',
+  rolling: 'settings.homeLayout.rollingBody',
   float: 'settings.homeLayout.floatBody',
   coresense: 'settings.homeLayout.coresenseBody',
   xmode: 'settings.homeLayout.xmodeBody'
@@ -262,6 +273,46 @@ const BACKDROP_INTENSITY_COPY: Record<
   }
 }
 
+const HOME_BACKDROP_MODE_COPY: Record<
+  HomeBackdropMode,
+  { labelKey: TranslationKey; bodyKey: TranslationKey }
+> = {
+  focus: {
+    labelKey: 'settings.backdrop.mode.focus',
+    bodyKey: 'settings.backdrop.mode.focusBody'
+  },
+  pinned: {
+    labelKey: 'settings.backdrop.mode.pinned',
+    bodyKey: 'settings.backdrop.mode.pinnedBody'
+  },
+  slideshow: {
+    labelKey: 'settings.backdrop.mode.slideshow',
+    bodyKey: 'settings.backdrop.mode.slideshowBody'
+  },
+  custom: {
+    labelKey: 'settings.backdrop.mode.custom',
+    bodyKey: 'settings.backdrop.mode.customBody'
+  }
+}
+
+const HOME_BACKDROP_MOTION_COPY: Record<
+  HomeBackdropMotion,
+  { labelKey: TranslationKey; bodyKey: TranslationKey }
+> = {
+  still: {
+    labelKey: 'settings.backdrop.motion.still',
+    bodyKey: 'settings.backdrop.motion.stillBody'
+  },
+  drift: {
+    labelKey: 'settings.backdrop.motion.drift',
+    bodyKey: 'settings.backdrop.motion.driftBody'
+  },
+  cinematic: {
+    labelKey: 'settings.backdrop.motion.cinematic',
+    bodyKey: 'settings.backdrop.motion.cinematicBody'
+  }
+}
+
 const AUDIO_PRESET_OPTIONS: Array<{
   id: AudioPreset
   labelKey: TranslationKey
@@ -368,6 +419,14 @@ const LIBRARY_STATE_KEYS: Record<LibraryProviderState, TranslationKey> = {
   error: 'settings.libraryStatus.state.error'
 }
 
+const STEAM_GRID_DB_TOKEN_STATE_KEYS: Record<SteamGridDbTokenState, TranslationKey> = {
+  'not-configured': 'settings.images.token.notConfigured',
+  valid: 'settings.images.token.valid',
+  expired: 'settings.images.token.expired',
+  invalid: 'settings.images.token.invalid',
+  unavailable: 'settings.images.token.unavailable'
+}
+
 const LIBRARY_METHOD_KEYS: Record<LibraryDetectionMethod, TranslationKey> = {
   'local-manifests': 'settings.libraryStatus.method.localManifests',
   'account-api': 'settings.libraryStatus.method.accountApi',
@@ -433,6 +492,10 @@ export function SettingsView(): JSX.Element {
     gameCardSize,
     libraryGridColumns,
     backdropIntensity,
+    homeBackdropMode,
+    homeBackdropMotion,
+    pinnedBackdropGameId,
+    customHomeWallpaperUrl,
     homeCardBubbleEffect,
     startupAnimationMode,
     customStartupVideoUrl,
@@ -460,6 +523,11 @@ export function SettingsView(): JSX.Element {
     setGameCardSize,
     setLibraryGridColumns,
     setBackdropIntensity,
+    setHomeBackdropMode,
+    setHomeBackdropMotion,
+    setPinnedBackdropGameId,
+    selectCustomHomeWallpaper,
+    clearCustomHomeWallpaper,
     setHomeCardBubbleEffect,
     setStartupAnimationMode,
     selectCustomStartupVideo,
@@ -500,6 +568,7 @@ export function SettingsView(): JSX.Element {
   const librarySnapshot = useLibraryStore((s) => s.snapshot)
   const isRefreshingLibrary = useLibraryStore((s) => s.isRefreshing)
   const achievementSync = useSyncStore((s) => s.status.pipelines.achievements)
+  const artworkSync = useSyncStore((s) => s.status.pipelines.artwork)
   const steamLibraryStatus = providerStatusOrFallback(
     librarySnapshot.providerStatuses,
     librarySnapshot.providerGames,
@@ -569,9 +638,20 @@ export function SettingsView(): JSX.Element {
   >('idle')
   const [retroAchievementsApiKeyConfigured, setRetroAchievementsApiKeyConfigured] =
     useState(false)
+  const [steamGridDbTokenStatus, setSteamGridDbTokenStatus] =
+    useState<SteamGridDbTokenStatus | null>(null)
+  const [steamGridDbTokenChecking, setSteamGridDbTokenChecking] = useState(false)
+  const [artworkMaintenanceAction, setArtworkMaintenanceAction] = useState<
+    'clear' | 'reload' | null
+  >(null)
+  const [artworkMaintenanceResult, setArtworkMaintenanceResult] =
+    useState<ArtworkMaintenanceResult | null>(null)
+  const [artworkMaintenanceError, setArtworkMaintenanceError] = useState(false)
   const [remotePlaySaving, setRemotePlaySaving] = useState(false)
   const [startupVideoBusy, setStartupVideoBusy] = useState(false)
   const [startupVideoError, setStartupVideoError] = useState(false)
+  const [homeWallpaperBusy, setHomeWallpaperBusy] = useState(false)
+  const [homeWallpaperError, setHomeWallpaperError] = useState(false)
   const [regionSaveState, setRegionSaveState] = useState<'idle' | 'saving' | 'error'>('idle')
   const [restoringGameId, setRestoringGameId] = useState<string | null>(null)
   const [restoreErrorGameId, setRestoreErrorGameId] = useState<string | null>(null)
@@ -597,6 +677,22 @@ export function SettingsView(): JSX.Element {
     [language, librarySnapshot.excludedGames]
   )
   const visibleExcludedGames = excludedGames.slice(0, excludedRenderLimit)
+  const pinnedBackdropGames = useMemo(() => {
+    const sorted = librarySnapshot.games
+      .filter((game) => game.installed)
+      .sort(
+        (left, right) =>
+          latestLibraryActivity(right) - latestLibraryActivity(left) ||
+          normalizeLibraryTimestamp(right.addedAt) - normalizeLibraryTimestamp(left.addedAt) ||
+          left.name.localeCompare(right.name, language === 'de' ? 'de-DE' : 'en-US')
+      )
+    const recent = sorted.slice(0, 12)
+    const selected = pinnedBackdropGameId
+      ? sorted.find((game) => game.id === pinnedBackdropGameId)
+      : undefined
+    if (!selected || recent.some((game) => game.id === selected.id)) return recent
+    return [selected, ...recent.slice(0, 11)]
+  }, [language, librarySnapshot.games, pinnedBackdropGameId])
   const { steamAchievementGameCount, retroAchievementGameCount } = useMemo(
     () =>
       librarySnapshot.games.reduce(
@@ -766,6 +862,11 @@ export function SettingsView(): JSX.Element {
   }, [page, refreshRemotePlay, remotePlayStatus])
 
   useEffect(() => {
+    if (page !== 'libraries' || steamGridDbTokenStatus || steamGridDbTokenChecking) return
+    void refreshSteamGridDbTokenStatus()
+  }, [page, steamGridDbTokenChecking, steamGridDbTokenStatus])
+
+  useEffect(() => {
     const frame = requestAnimationFrame(() => {
       const activeTab = containerRef.current?.querySelector<HTMLElement>(
         `[data-settings-page="${page}"]`
@@ -810,6 +911,36 @@ export function SettingsView(): JSX.Element {
       await window.api.game.syncAchievements()
     } catch {
       setAchievementSyncError(true)
+    }
+  }
+
+  async function refreshSteamGridDbTokenStatus(): Promise<void> {
+    if (steamGridDbTokenChecking) return
+    setSteamGridDbTokenChecking(true)
+    try {
+      setSteamGridDbTokenStatus(await window.api.image.getTokenStatus())
+    } catch {
+      setSteamGridDbTokenStatus({ state: 'unavailable', checkedAt: Date.now() })
+    } finally {
+      setSteamGridDbTokenChecking(false)
+    }
+  }
+
+  async function maintainArtwork(action: 'clear' | 'reload'): Promise<void> {
+    if (artworkMaintenanceAction) return
+    setArtworkMaintenanceAction(action)
+    setArtworkMaintenanceResult(null)
+    setArtworkMaintenanceError(false)
+    try {
+      const result =
+        action === 'clear'
+          ? await window.api.image.clearCache()
+          : await window.api.image.reloadAll()
+      setArtworkMaintenanceResult(result)
+    } catch {
+      setArtworkMaintenanceError(true)
+    } finally {
+      setArtworkMaintenanceAction(null)
     }
   }
 
@@ -913,6 +1044,53 @@ export function SettingsView(): JSX.Element {
       setUpdateCheckState('error')
     } finally {
       updateCheckInFlight.current = false
+    }
+  }
+
+  async function chooseHomeBackdropMode(mode: HomeBackdropMode): Promise<void> {
+    if (mode === 'custom') {
+      if (customHomeWallpaperUrl) {
+        await setHomeBackdropMode('custom')
+      } else {
+        await chooseCustomHomeWallpaper()
+      }
+      return
+    }
+    if (mode === 'pinned' && !pinnedBackdropGameId && pinnedBackdropGames[0]) {
+      await setPinnedBackdropGameId(pinnedBackdropGames[0].id)
+    }
+    if (mode === 'slideshow' && pinnedBackdropGames.length > 0) {
+      const first = pinnedBackdropGames[1] ?? pinnedBackdropGames[0]
+      const following = pinnedBackdropGames[2] ?? pinnedBackdropGames[0]
+      void preloadGameImage(first.id, 'horizontal')
+      if (following.id !== first.id) void preloadGameImage(following.id, 'horizontal')
+    }
+    await setHomeBackdropMode(mode)
+  }
+
+  async function chooseCustomHomeWallpaper(): Promise<void> {
+    if (homeWallpaperBusy) return
+    setHomeWallpaperBusy(true)
+    setHomeWallpaperError(false)
+    try {
+      await selectCustomHomeWallpaper()
+    } catch {
+      setHomeWallpaperError(true)
+    } finally {
+      setHomeWallpaperBusy(false)
+    }
+  }
+
+  async function removeCustomHomeWallpaper(): Promise<void> {
+    if (homeWallpaperBusy) return
+    setHomeWallpaperBusy(true)
+    setHomeWallpaperError(false)
+    try {
+      await clearCustomHomeWallpaper()
+    } catch {
+      setHomeWallpaperError(true)
+    } finally {
+      setHomeWallpaperBusy(false)
     }
   }
 
@@ -1188,7 +1366,7 @@ export function SettingsView(): JSX.Element {
                   <p className="mb-4 max-w-3xl text-xs leading-relaxed text-muted">
                     {t('settings.presentation.body')}
                   </p>
-                  <div className="grid grid-cols-1 gap-3 xl:grid-cols-3">
+                  <div className="grid grid-cols-1 gap-3 xl:grid-cols-2 2xl:grid-cols-3">
                     <PresentationGroup
                       eyebrow={t('settings.cardSize.title')}
                       description={t('settings.cardSize.body')}
@@ -1201,6 +1379,38 @@ export function SettingsView(): JSX.Element {
                           description={t(GAME_CARD_SIZE_COPY[option].bodyKey)}
                           onClick={() => void setGameCardSize(option)}
                           preview={<CardSizePreview size={option} />}
+                        />
+                      ))}
+                    </PresentationGroup>
+
+                    <PresentationGroup
+                      eyebrow={t('settings.backdrop.mode.title')}
+                      description={t('settings.backdrop.mode.body')}
+                    >
+                      {HOME_BACKDROP_MODE_OPTIONS.map((option) => (
+                        <PresentationChoice
+                          key={option}
+                          active={homeBackdropMode === option}
+                          title={t(HOME_BACKDROP_MODE_COPY[option].labelKey)}
+                          description={t(HOME_BACKDROP_MODE_COPY[option].bodyKey)}
+                          onClick={() => void chooseHomeBackdropMode(option)}
+                          preview={<BackdropModePreview mode={option} />}
+                        />
+                      ))}
+                    </PresentationGroup>
+
+                    <PresentationGroup
+                      eyebrow={t('settings.backdrop.motion.title')}
+                      description={t('settings.backdrop.motion.body')}
+                    >
+                      {HOME_BACKDROP_MOTION_OPTIONS.map((option) => (
+                        <PresentationChoice
+                          key={option}
+                          active={homeBackdropMotion === option}
+                          title={t(HOME_BACKDROP_MOTION_COPY[option].labelKey)}
+                          description={t(HOME_BACKDROP_MOTION_COPY[option].bodyKey)}
+                          onClick={() => void setHomeBackdropMotion(option)}
+                          preview={<BackdropMotionPreview motionMode={option} />}
                         />
                       ))}
                     </PresentationGroup>
@@ -1241,13 +1451,145 @@ export function SettingsView(): JSX.Element {
                       ))}
                     </PresentationGroup>
                   </div>
+
+                  <AnimatePresence initial={false}>
+                    {homeBackdropMode === 'pinned' && (
+                      <motion.div
+                        key="pinned-backdrop-picker"
+                        initial={{ opacity: 0, y: -8 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -8 }}
+                        transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
+                        className="mt-3 rounded-2xl border border-white/[0.07] bg-black/20 p-3"
+                      >
+                        <div className="mb-3 px-1">
+                          <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-accent">
+                            {t('settings.backdrop.pinned.title')}
+                          </p>
+                          <p className="mt-1 text-[11px] leading-relaxed text-white/42">
+                            {t('settings.backdrop.pinned.body')}
+                          </p>
+                        </div>
+
+                        {pinnedBackdropGames.length > 0 ? (
+                          <div className="scrollbar-none flex gap-2 overflow-x-auto px-1 pb-2 pt-1">
+                            {pinnedBackdropGames.map((game) => {
+                              const active = pinnedBackdropGameId === game.id
+                              return (
+                                <motion.button
+                                  key={game.id}
+                                  data-focusable
+                                  data-pinned-backdrop-game={game.id}
+                                  type="button"
+                                  aria-pressed={active}
+                                  aria-label={t('settings.backdrop.pinned.select', { name: game.name })}
+                                  onClick={() => void setPinnedBackdropGameId(game.id)}
+                                  whileHover={{ y: -2 }}
+                                  whileFocus={{ y: -2 }}
+                                  whileTap={{ scale: 0.985 }}
+                                  className={`group relative h-24 w-44 shrink-0 overflow-hidden rounded-xl border text-left outline-none transition-colors ${
+                                    active
+                                      ? 'border-accent/80 shadow-[0_0_0_2px_rgb(var(--color-accent)/0.18)]'
+                                      : 'border-white/10 hover:border-white/30'
+                                  }`}
+                                >
+                                  <GameImage
+                                    gameId={game.id}
+                                    name={game.name}
+                                    orientation="horizontal"
+                                    className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-[1.035] group-data-[focused=true]:scale-[1.035] motion-reduce:transition-none"
+                                  />
+                                  <span className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/12 to-black/10" />
+                                  <span className="absolute inset-x-0 bottom-0 flex items-end justify-between gap-2 p-2.5">
+                                    <span className="min-w-0 truncate text-xs font-bold text-white">
+                                      {game.name}
+                                    </span>
+                                    <span
+                                      className={`h-2.5 w-2.5 shrink-0 rounded-full border ${
+                                        active
+                                          ? 'border-accent bg-accent shadow-[0_0_10px_rgb(var(--color-accent)/0.7)]'
+                                          : 'border-white/35 bg-black/30'
+                                      }`}
+                                    />
+                                  </span>
+                                </motion.button>
+                              )
+                            })}
+                          </div>
+                        ) : (
+                          <p className="rounded-xl border border-dashed border-white/10 px-4 py-5 text-sm text-muted">
+                            {t('settings.backdrop.pinned.empty')}
+                          </p>
+                        )}
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+
+                  <AnimatePresence initial={false}>
+                    {homeBackdropMode === 'custom' && customHomeWallpaperUrl && (
+                      <motion.div
+                        key="custom-home-wallpaper-picker"
+                        initial={{ opacity: 0, y: -8 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -8 }}
+                        transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
+                        className="mt-3 flex flex-col gap-3 rounded-2xl border border-white/[0.07] bg-black/20 p-3 md:flex-row md:items-center"
+                      >
+                        <div className="relative h-28 overflow-hidden rounded-xl border border-white/10 md:w-52 md:shrink-0">
+                          <img
+                            src={customHomeWallpaperUrl}
+                            alt={t('settings.backdrop.custom.alt')}
+                            draggable={false}
+                            className="h-full w-full object-cover"
+                          />
+                          <span className="absolute inset-0 bg-gradient-to-t from-black/55 to-transparent" />
+                          <ImageIcon
+                            size={15}
+                            className="absolute bottom-2.5 left-2.5 text-white/75"
+                          />
+                        </div>
+                        <div className="min-w-0 flex-1 px-1">
+                          <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-accent">
+                            {t('settings.backdrop.custom.title')}
+                          </p>
+                          <p className="mt-1 max-w-2xl text-[11px] leading-relaxed text-white/42">
+                            {homeWallpaperError
+                              ? t('settings.backdrop.custom.error')
+                              : t('settings.backdrop.custom.body')}
+                          </p>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            <FocusableButton
+                              type="button"
+                              disabled={homeWallpaperBusy}
+                              aria-busy={homeWallpaperBusy}
+                              onClick={() => void chooseCustomHomeWallpaper()}
+                              className="px-4 py-2 text-xs"
+                            >
+                              {homeWallpaperBusy
+                                ? t('settings.backdrop.custom.preparing')
+                                : t('settings.backdrop.custom.replace')}
+                            </FocusableButton>
+                            <FocusableButton
+                              type="button"
+                              variant="ghost"
+                              disabled={homeWallpaperBusy}
+                              onClick={() => void removeCustomHomeWallpaper()}
+                              className="px-4 py-2 text-xs"
+                            >
+                              {t('settings.backdrop.custom.remove')}
+                            </FocusableButton>
+                          </div>
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
                 </SettingsSection>
 
                 <SettingsSection index="07" icon={LayoutTemplate} title={t('settings.homeLayout.title')}>
                   <p className="mb-4 text-xs leading-relaxed text-muted">
                     {t('settings.homeLayout.body')}
                   </p>
-                  <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">
                     {HOME_LAYOUT_OPTIONS.map((option) => {
                       const active = homeLayout === option.id
                       return (
@@ -2087,19 +2429,191 @@ export function SettingsView(): JSX.Element {
                     <>
                       <ApiKeyField
                         label={t('settings.images.apiKeyLabel')}
-                        value={settings.steamGridDbApiKey ?? ''}
+                        value=""
                         placeholder={t('settings.images.apiKeyPlaceholder')}
                         getKeyLabel={t('settings.images.getKey')}
                         getKeyUrl="https://www.steamgriddb.com/profile/preferences/api"
+                        configured={
+                          steamGridDbTokenStatus
+                            ? steamGridDbTokenStatus.state !== 'not-configured'
+                            : undefined
+                        }
+                        configuredLabel={t('settings.images.apiKeyConfigured')}
+                        notConfiguredLabel={t('settings.images.token.notConfigured')}
+                        clearLabel={t('settings.images.clearApiKey')}
                         onSave={async (value) => {
-                          await window.api.settings.set({ steamGridDbApiKey: value || undefined })
-                          setSettings((current) =>
-                            current
-                              ? { ...current, steamGridDbApiKey: value || undefined }
-                              : current
-                          )
+                          setSteamGridDbTokenStatus(await window.api.image.setToken(value))
+                        }}
+                        onClear={async () => {
+                          setSteamGridDbTokenStatus(await window.api.image.clearToken())
                         }}
                       />
+                      <div className="mt-5 grid grid-cols-1 gap-3 xl:grid-cols-2">
+                        <div className="rounded-2xl border border-white/[0.07] bg-black/25 p-4">
+                          <div className="flex flex-wrap items-start justify-between gap-3">
+                            <div>
+                              <p className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.14em] text-white/70">
+                                <ShieldCheck size={14} className="text-accent" />
+                                {t('settings.images.token.title')}
+                              </p>
+                              <p
+                                className={`mt-2 flex items-center gap-2 text-sm font-semibold ${steamGridDbTokenClass(
+                                  steamGridDbTokenStatus?.state,
+                                  steamGridDbTokenChecking
+                                )}`}
+                                role="status"
+                                aria-live="polite"
+                              >
+                                {steamGridDbTokenChecking && (
+                                  <Loader2 size={14} className="animate-spin" />
+                                )}
+                                {steamGridDbTokenChecking
+                                  ? t('settings.images.token.checking')
+                                  : t(
+                                      STEAM_GRID_DB_TOKEN_STATE_KEYS[
+                                        steamGridDbTokenStatus?.state ?? 'not-configured'
+                                      ]
+                                    )}
+                              </p>
+                            </div>
+                            <FocusableButton
+                              variant="ghost"
+                              disabled={steamGridDbTokenChecking}
+                              data-disabled={steamGridDbTokenChecking ? 'true' : undefined}
+                              onClick={() => void refreshSteamGridDbTokenStatus()}
+                              className="shrink-0 px-3 py-2 text-[11px] disabled:opacity-45"
+                            >
+                              <span className="flex items-center gap-2">
+                                <RefreshCw
+                                  size={13}
+                                  className={steamGridDbTokenChecking ? 'animate-spin' : ''}
+                                />
+                                {t('settings.images.token.check')}
+                              </span>
+                            </FocusableButton>
+                          </div>
+                          {steamGridDbTokenStatus?.state !== 'not-configured' &&
+                            steamGridDbTokenStatus && (
+                              <div className="mt-3 space-y-1 border-t border-white/[0.06] pt-3 text-[11px] text-white/45">
+                                <p>
+                                  {steamGridDbTokenStatus.expiresAt
+                                    ? t('settings.images.token.expiresAt', {
+                                        date: formatArtworkTimestamp(
+                                          steamGridDbTokenStatus.expiresAt,
+                                          language
+                                        )
+                                      })
+                                    : t('settings.images.token.noExpiry')}
+                                </p>
+                                {steamGridDbTokenStatus.checkedAt && (
+                                  <p>
+                                    {t('settings.images.token.checkedAt', {
+                                      date: formatArtworkTimestamp(
+                                        steamGridDbTokenStatus.checkedAt,
+                                        language
+                                      )
+                                    })}
+                                  </p>
+                                )}
+                              </div>
+                            )}
+                        </div>
+
+                        <div className="rounded-2xl border border-white/[0.07] bg-black/25 p-4">
+                          <p className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.14em] text-white/70">
+                            <Database size={14} className="text-accent" />
+                            {t('settings.images.maintenance.title')}
+                          </p>
+                          <p className="mt-2 text-xs leading-relaxed text-muted">
+                            {t('settings.images.maintenance.body')}
+                          </p>
+                          <div className="mt-4 flex flex-wrap gap-3">
+                            <FocusableButton
+                              variant="ghost"
+                              disabled={artworkMaintenanceAction !== null}
+                              data-disabled={
+                                artworkMaintenanceAction !== null ? 'true' : undefined
+                              }
+                              onClick={() => void maintainArtwork('clear')}
+                              className="disabled:opacity-45"
+                            >
+                              <span className="flex items-center gap-2">
+                                {artworkMaintenanceAction === 'clear' ? (
+                                  <Loader2 size={14} className="animate-spin" />
+                                ) : (
+                                  <Trash2 size={14} />
+                                )}
+                                {t(
+                                  artworkMaintenanceAction === 'clear'
+                                    ? 'settings.images.maintenance.clearing'
+                                    : 'settings.images.maintenance.clear'
+                                )}
+                              </span>
+                            </FocusableButton>
+                            <FocusableButton
+                              disabled={artworkMaintenanceAction !== null}
+                              data-disabled={
+                                artworkMaintenanceAction !== null ? 'true' : undefined
+                              }
+                              onClick={() => void maintainArtwork('reload')}
+                              className="disabled:opacity-45"
+                            >
+                              <span className="flex items-center gap-2">
+                                <RefreshCw
+                                  size={14}
+                                  className={
+                                    artworkMaintenanceAction === 'reload' ||
+                                    artworkSync.state === 'running'
+                                      ? 'animate-spin'
+                                      : ''
+                                  }
+                                />
+                                {t(
+                                  artworkMaintenanceAction === 'reload'
+                                    ? 'settings.images.maintenance.reloading'
+                                    : 'settings.images.maintenance.reload'
+                                )}
+                              </span>
+                            </FocusableButton>
+                          </div>
+                          <div className="mt-3 text-[11px] leading-relaxed" aria-live="polite">
+                            {artworkSync.state === 'running' && artworkSync.total > 0 ? (
+                              <p className="text-accent">
+                                {t('settings.images.maintenance.progress', {
+                                  completed: artworkSync.completed,
+                                  total: artworkSync.total
+                                })}
+                              </p>
+                            ) : artworkMaintenanceError ? (
+                              <p className="flex items-center gap-2 text-amber-300">
+                                <CircleAlert size={12} />
+                                {t('settings.images.maintenance.error')}
+                              </p>
+                            ) : artworkMaintenanceResult ? (
+                              <p className="flex items-center gap-2 text-emerald-300">
+                                <Check size={12} />
+                                {t(
+                                  artworkMaintenanceResult.queuedAssets > 0
+                                    ? 'settings.images.maintenance.reloadResult'
+                                    : 'settings.images.maintenance.clearResult',
+                                  {
+                                    count: artworkMaintenanceResult.clearedFiles,
+                                    size: formatArtworkCacheSize(
+                                      artworkMaintenanceResult.freedBytes,
+                                      language
+                                    ),
+                                    total: artworkMaintenanceResult.queuedAssets
+                                  }
+                                )}
+                              </p>
+                            ) : (
+                              <p className="text-white/40">
+                                {t('settings.images.maintenance.preserve')}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      </div>
                     </>
                   ) : (
                     <div className="flex items-center gap-2 text-sm text-muted">
@@ -2968,6 +3482,28 @@ function DockMotionPreview({ motionMode }: { motionMode: DockMotion }): JSX.Elem
 }
 
 function HomeLayoutPreview({ layout }: { layout: HomeLayoutId }): JSX.Element {
+  if (layout === 'rolling') {
+    return (
+      <span className="relative flex w-full flex-col justify-end gap-2 overflow-hidden">
+        <span className="absolute right-0 top-0 flex gap-1">
+          {[0, 1, 2, 3].map((index) => (
+            <span key={index} className="h-1.5 w-1.5 rounded-full bg-white/35" />
+          ))}
+        </span>
+        <span className="flex h-12 items-stretch gap-1.5">
+          <span className="w-[58%] rounded-[5px] border border-accent/70 bg-gradient-to-br from-accent/70 via-accent-2/35 to-black/30" />
+          {[0, 1, 2].map((index) => (
+            <span
+              key={index}
+              className="aspect-[2/3] rounded-[4px] border border-white/10 bg-white/10"
+            />
+          ))}
+        </span>
+        <span className="h-1.5 w-2/5 rounded-full bg-white/25" />
+      </span>
+    )
+  }
+
   if (layout === 'xmode') {
     return (
       <span className="flex w-full flex-col gap-1.5">
@@ -3094,6 +3630,58 @@ function BackdropPreview({ intensity }: { intensity: BackdropIntensity }): JSX.E
       />
       <span className="absolute inset-x-0 bottom-0 h-7 bg-gradient-to-t from-black/90 to-transparent" />
       <span className="absolute bottom-1.5 left-2 h-1.5 w-7 rounded-full bg-white/70" />
+    </span>
+  )
+}
+
+function BackdropModePreview({ mode }: { mode: HomeBackdropMode }): JSX.Element {
+  return (
+    <span className="relative block h-full w-full overflow-hidden">
+      <span className="absolute inset-0 bg-[linear-gradient(135deg,rgb(var(--color-accent)/0.55),rgb(var(--color-accent-2)/0.22),rgba(0,0,0,0.7))]" />
+      {mode === 'focus' && (
+        <>
+          <span className="absolute bottom-1.5 left-2 h-2 w-4 rounded-sm border border-white/35 bg-white/15" />
+          <span className="absolute bottom-1.5 left-7 h-2 w-4 rounded-sm border border-accent/70 bg-accent/30" />
+        </>
+      )}
+      {mode === 'pinned' && (
+        <>
+          <span className="absolute inset-2 rounded border border-accent/55 bg-black/15" />
+          <span className="absolute right-2 top-2 h-2.5 w-2.5 rounded-full bg-accent shadow-[0_0_8px_rgb(var(--color-accent)/0.65)]" />
+        </>
+      )}
+      {mode === 'slideshow' && (
+        <>
+          <span className="absolute bottom-2 left-2 top-2 w-7 rounded border border-white/18 bg-white/10" />
+          <span className="absolute bottom-2 left-7 top-2 w-7 rounded border border-accent/55 bg-accent/18" />
+          <span className="absolute bottom-2 left-12 top-2 w-7 rounded border border-white/18 bg-white/10" />
+        </>
+      )}
+      {mode === 'custom' && (
+        <>
+          <span className="absolute inset-2 rounded border border-white/25 bg-[radial-gradient(circle_at_70%_30%,rgba(255,255,255,0.34),transparent_28%),linear-gradient(145deg,rgb(var(--color-accent)/0.45),rgb(var(--color-accent-2)/0.18))]" />
+          <span className="absolute bottom-3 left-3 flex h-4 w-4 items-center justify-center rounded-full bg-accent text-[10px] font-black text-black">
+            +
+          </span>
+        </>
+      )}
+    </span>
+  )
+}
+
+function BackdropMotionPreview({
+  motionMode
+}: {
+  motionMode: HomeBackdropMotion
+}): JSX.Element {
+  return (
+    <span
+      aria-hidden="true"
+      data-backdrop-motion-preview={motionMode}
+      className="relative block h-full w-full overflow-hidden"
+    >
+      <span className="backdrop-motion-preview-art absolute -inset-1 bg-[radial-gradient(circle_at_28%_34%,rgb(var(--color-accent)/0.92),transparent_38%),linear-gradient(135deg,rgb(var(--color-accent-2)/0.65),rgba(0,0,0,0.72))]" />
+      <span className="absolute inset-x-0 bottom-0 h-5 bg-gradient-to-t from-black/80 to-transparent" />
     </span>
   )
 }
@@ -3397,6 +3985,34 @@ function formatLibraryCheck(
     hour: '2-digit',
     minute: '2-digit'
   }).format(timestamp)
+}
+
+function formatArtworkTimestamp(
+  timestamp: number,
+  language: OrbitSettings['language']
+): string {
+  return new Intl.DateTimeFormat(language === 'de' ? 'de-DE' : 'en-US', {
+    dateStyle: 'medium',
+    timeStyle: 'short'
+  }).format(timestamp)
+}
+
+function formatArtworkCacheSize(bytes: number, language: OrbitSettings['language']): string {
+  const locale = language === 'de' ? 'de-DE' : 'en-US'
+  const size = bytes >= 1024 * 1024 ? bytes / (1024 * 1024) : bytes / 1024
+  const unit = bytes >= 1024 * 1024 ? 'MB' : 'KB'
+  return `${new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(size)} ${unit}`
+}
+
+function steamGridDbTokenClass(
+  state: SteamGridDbTokenState | undefined,
+  checking: boolean
+): string {
+  if (checking) return 'text-accent'
+  if (state === 'valid') return 'text-emerald-300'
+  if (state === 'invalid' || state === 'expired') return 'text-rose-300'
+  if (state === 'unavailable') return 'text-amber-300'
+  return 'text-white/50'
 }
 
 function LibraryProviderCard({

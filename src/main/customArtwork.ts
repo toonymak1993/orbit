@@ -9,6 +9,7 @@ import { settingsStore } from './settingsStore'
 import { fetchWithElectronNet } from './networkFetch'
 import { isSteamGridDbAssetUrl } from './steamGridDb'
 import { isPublicSteamArtworkUrl } from './publicArtworkSearchPolicy'
+import { trimTransparentImage } from './transparentImage'
 
 const CACHE_DIR = join(app.getPath('userData'), 'artwork-v2')
 const MAX_SOURCE_BYTES = 25 * 1024 * 1024
@@ -23,7 +24,8 @@ const ARTWORK_TARGETS: Record<
 > = {
   vertical: { width: 600, height: 900, filePrefix: 'custom-cover-' },
   horizontal: { width: 1600, height: 900, filePrefix: 'custom-background-' },
-  icon: { width: 512, height: 512, filePrefix: 'custom-icon-' }
+  icon: { width: 512, height: 512, filePrefix: 'custom-icon-' },
+  logo: { width: 1200, height: 400, filePrefix: 'custom-logo-' }
 }
 
 interface CustomArtworkEntry {
@@ -83,7 +85,7 @@ function toResolved(
 ): ResolvedImage {
   return {
     url: `orbit-image://${entry.fileName}`,
-    contain: orientation === 'icon',
+    contain: orientation === 'icon' || orientation === 'logo',
     revision: entry.revision
   }
 }
@@ -93,6 +95,16 @@ function normalizeArtworkImage(
   orientation: CustomArtworkOrientation
 ): NativeImage {
   const target = ARTWORK_TARGETS[orientation]
+  if (orientation === 'logo') {
+    const trimmed = trimTransparentImage(image)
+    const size = trimmed.getSize()
+    const scale = Math.min(target.width / size.width, target.height / size.height)
+    return trimmed.resize({
+      width: Math.max(1, Math.round(size.width * scale)),
+      height: Math.max(1, Math.round(size.height * scale)),
+      quality: 'best'
+    })
+  }
   const { width, height } = image.getSize()
   if (orientation === 'icon') {
     return width >= height
@@ -183,6 +195,7 @@ class CustomArtworkService {
         (fileName) =>
           isSafeFileName(fileName, 'vertical') ||
           isSafeFileName(fileName, 'horizontal') ||
+          isSafeFileName(fileName, 'logo') ||
           isSafeFileName(fileName, 'icon')
       )
   }
@@ -215,11 +228,13 @@ class CustomArtworkService {
       ? {
           vertical: ['ORBIT · Cover auswählen', 'Cover verwenden'],
           horizontal: ['ORBIT · Hintergrund auswählen', 'Hintergrund verwenden'],
+          logo: ['ORBIT · Logo auswählen', 'Logo verwenden'],
           icon: ['ORBIT · Icon auswählen', 'Icon verwenden']
         }
       : {
           vertical: ['ORBIT · Select cover', 'Use cover'],
           horizontal: ['ORBIT · Select background', 'Use background'],
+          logo: ['ORBIT · Select logo', 'Use logo'],
           icon: ['ORBIT · Select icon', 'Use icon']
         }
     const result = await dialog.showOpenDialog(mainWindow, {
