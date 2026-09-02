@@ -19,7 +19,7 @@ import { useEpicAuthStore } from '@renderer/state/epicAuthStore'
 import { usePlayStationStore } from '@renderer/state/playstationStore'
 import { useStoreStore } from '@renderer/state/storeStore'
 import { useStoreNavigationStore } from '@renderer/state/storeNavigationStore'
-import { GameImage } from '@renderer/components/GameImage'
+import { GameImage, preloadGameImage } from '@renderer/components/GameImage'
 import { GameCard } from '@renderer/components/GameCard'
 import { GameCardMenuHint } from '@renderer/components/GameCardMenuHint'
 import {
@@ -48,6 +48,7 @@ import { LIBRARY_SEARCH_EVENT } from '@renderer/lib/librarySearch'
 const HOME_ACHIEVEMENTS_DELAY_MS = 5_000
 const WISHLIST_ROTATION_MS = 15_000
 const XMODE_RECOMMENDATION_ROTATION_MS = 18_000
+const HOME_BACKDROP_SLIDESHOW_MS = 14_000
 
 function formatHours(minutes: number, language: 'en' | 'de'): string {
   const hours = minutes / 60
@@ -102,6 +103,9 @@ export function HomeView(): JSX.Element {
   const launchGame = useLaunchGame()
   const language = usePreferencesStore((state) => state.language)
   const homeLayout = usePreferencesStore((state) => state.homeLayout)
+  const homeBackdropMode = usePreferencesStore((state) => state.homeBackdropMode)
+  const customHomeWallpaperUrl = usePreferencesStore((state) => state.customHomeWallpaperUrl)
+  const pinnedBackdropGameId = usePreferencesStore((state) => state.pinnedBackdropGameId)
   const configuredShowHomeBanners = usePreferencesStore((state) => state.showHomeBanners)
   const showHomeBanners = homeLayout === 'orbit' && configuredShowHomeBanners
   const detailGameId = useGameDetailStore((state) => state.gameId)
@@ -117,6 +121,9 @@ export function HomeView(): JSX.Element {
   const [featuredCompletionTimes, setFeaturedCompletionTimes] =
     useState<GameCompletionTimes | null>(null)
   const [backdropGame, setBackdropGame] = useState<LibraryGame | null>(null)
+  // Start one step after the regular featured game so enabling Library Flow is
+  // visible immediately instead of initially presenting the same artwork.
+  const [backdropSlideshowIndex, setBackdropSlideshowIndex] = useState(1)
 
   const installedGames = useMemo(
     () =>
@@ -140,6 +147,23 @@ export function HomeView(): JSX.Element {
     }
     return installedGames[0] ?? null
   }, [activity?.continueGameId, installedGames, recentGameIds])
+  const backdropRotationGames = installedGames.length > 0 ? installedGames : games
+  const backdropRotationSignature = backdropRotationGames.map((game) => game.id).join('|')
+  const pinnedBackdropGame = pinnedBackdropGameId
+    ? games.find((game) => game.id === pinnedBackdropGameId) ?? null
+    : null
+  const slideshowBackdropGame =
+    backdropRotationGames[
+      backdropSlideshowIndex % Math.max(backdropRotationGames.length, 1)
+    ] ?? null
+  const resolvedHomeBackdrop =
+    homeBackdropMode === 'custom'
+      ? null
+      : homeBackdropMode === 'pinned'
+      ? pinnedBackdropGame ?? featured
+      : homeBackdropMode === 'slideshow'
+        ? slideshowBackdropGame ?? featured
+        : backdropGame ?? focusedGame ?? featured
   const featuredHasActivity = Boolean(featured && latestLibraryActivity(featured) > 0)
   const focusedGameIndex = focusedGame
     ? installedGames.findIndex((game) => game.id === focusedGame.id)
@@ -321,6 +345,43 @@ export function HomeView(): JSX.Element {
     return () => clearTimeout(timer)
   }, [detailGameId, featured?.id, focusedGame?.id])
 
+  useEffect(() => {
+    setBackdropSlideshowIndex((current) =>
+      backdropRotationGames.length > 0 ? current % backdropRotationGames.length : current
+    )
+  }, [backdropRotationGames.length, backdropRotationSignature])
+
+  useEffect(() => {
+    if (
+      homeBackdropMode !== 'slideshow' ||
+      backdropRotationGames.length <= 1 ||
+      detailGameId
+    ) {
+      return undefined
+    }
+
+    const preloadFollowingFrame = (index: number): void => {
+      const following = backdropRotationGames[(index + 1) % backdropRotationGames.length]
+      if (following) void preloadGameImage(following.id, 'horizontal')
+    }
+
+    preloadFollowingFrame(backdropSlideshowIndex)
+    const timer = window.setInterval(() => {
+      if (document.hidden) return
+      setBackdropSlideshowIndex((current) => {
+        const next = (current + 1) % backdropRotationGames.length
+        preloadFollowingFrame(next)
+        return next
+      })
+    }, HOME_BACKDROP_SLIDESHOW_MS)
+    return () => window.clearInterval(timer)
+  }, [
+    backdropRotationSignature,
+    backdropSlideshowIndex,
+    detailGameId,
+    homeBackdropMode
+  ])
+
   function showWishlist(): void {
     setStorePage('wishlist')
     setMainView('store')
@@ -375,13 +436,30 @@ export function HomeView(): JSX.Element {
     )
   }
 
+  if (homeLayout === 'rolling') {
+    return (
+      <RollingHome
+        containerRef={containerRef}
+        installedGames={installedGames}
+        libraryGameCount={games.length}
+        selectedGame={focusedGame ?? featured}
+        backdropGame={resolvedHomeBackdrop}
+        customBackdropUrl={homeBackdropMode === 'custom' ? customHomeWallpaperUrl : undefined}
+        onSelectGame={activateGame}
+        onLaunchGame={(game) => launchGame(game.id)}
+        t={t}
+      />
+    )
+  }
+
   if (homeLayout === 'xmode') {
     return (
       <XModeHome
         containerRef={containerRef}
         installedGames={installedGames}
         libraryGames={games}
-        backdropGame={backdropGame ?? featured}
+        backdropGame={resolvedHomeBackdrop}
+        customBackdropUrl={homeBackdropMode === 'custom' ? customHomeWallpaperUrl : undefined}
         deals={xModeDeals}
         onSelectGame={activateGame}
         onLaunchGame={(game) => launchGame(game.id)}
@@ -404,7 +482,8 @@ export function HomeView(): JSX.Element {
         installedGames={installedGames}
         libraryGames={games}
         selectedGame={focusedGame ?? featured}
-        backdropGame={backdropGame ?? focusedGame ?? featured}
+        backdropGame={resolvedHomeBackdrop}
+        customBackdropUrl={homeBackdropMode === 'custom' ? customHomeWallpaperUrl : undefined}
         storeProducts={storeProducts}
         activity={activity}
         language={language}
@@ -424,7 +503,10 @@ export function HomeView(): JSX.Element {
     >
       <div className="absolute inset-0">
         <div className="home-backdrop-art absolute inset-0">
-          <HomeBackdrop game={backdropGame} />
+          <HomeBackdrop
+            game={resolvedHomeBackdrop}
+            customUrl={homeBackdropMode === 'custom' ? customHomeWallpaperUrl : undefined}
+          />
         </div>
         <div className="absolute inset-0 bg-gradient-to-b from-black/20 via-black/38 to-black/15" />
         <div className="home-backdrop-dim absolute inset-0" />
@@ -510,18 +592,26 @@ export function HomeView(): JSX.Element {
                   )}
                   <div className="flex items-end justify-between gap-4">
                     <div className="flex min-w-0 items-end gap-[clamp(0.75rem,1.4vw,1.1rem)]">
-                      <div className="h-[clamp(3.25rem,5vw,4.75rem)] w-[clamp(3.25rem,5vw,4.75rem)] shrink-0 overflow-hidden rounded-[24%] border border-white/15 bg-black/40 shadow-xl backdrop-blur-md">
+                      <div className="h-[clamp(3.25rem,5vw,4.75rem)] w-[clamp(9rem,16vw,15rem)] shrink-0">
                         <GameImage
                           gameId={featured.id}
                           name={featured.name}
-                          orientation="icon"
-                          className="h-full w-full object-cover"
+                          orientation="logo"
+                          className="h-full w-full"
                         />
                       </div>
                       <div className="min-w-0 pb-0.5">
                         <h2 className="truncate text-[clamp(1.25rem,2.2vw,1.8rem)] font-bold text-white drop-shadow-lg">
                           {featured.name}
                         </h2>
+                        {(featured.metadata.publishers?.[0] ?? featured.metadata.developers?.[0]) && (
+                          <p className="mt-1 flex items-center gap-1.5 truncate text-[10px] font-bold uppercase tracking-[0.12em] text-white/48">
+                            <Building2 size={11} className="shrink-0 text-accent" />
+                            <span className="truncate">
+                              {featured.metadata.publishers?.[0] ?? featured.metadata.developers?.[0]}
+                            </span>
+                          </p>
+                        )}
                         <div className="mt-2 flex flex-wrap items-center gap-2">
                           <span className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-black/35 px-2.5 py-1 text-[11px] font-medium text-white/75 backdrop-blur-md">
                             <Timer size={12} className="text-accent" />
@@ -607,6 +697,225 @@ export function HomeView(): JSX.Element {
   )
 }
 
+function RollingHome({
+  containerRef,
+  installedGames,
+  libraryGameCount,
+  selectedGame,
+  backdropGame,
+  customBackdropUrl,
+  onSelectGame,
+  onLaunchGame,
+  t
+}: {
+  containerRef: RefObject<HTMLDivElement>
+  installedGames: LibraryGame[]
+  libraryGameCount: number
+  selectedGame: LibraryGame | null
+  backdropGame: LibraryGame | null
+  customBackdropUrl?: string
+  onSelectGame: (game: LibraryGame) => void
+  onLaunchGame: (game: LibraryGame) => void
+  t: TFunction
+}): JSX.Element {
+  const reduceMotion = Boolean(useReducedMotion())
+  const rowRef = useRef<HTMLDivElement>(null)
+  const selectedIndex = Math.max(
+    0,
+    installedGames.findIndex((game) => game.id === selectedGame?.id)
+  )
+  const activeGame = installedGames[selectedIndex] ?? null
+
+  useEffect(() => {
+    const row = rowRef.current
+    const activeCard = row?.querySelector<HTMLElement>('[data-rolling-active="true"]')
+    if (!row || !activeCard) return
+
+    let frame = 0
+    const startedAt = performance.now()
+    const movementDuration = 380
+    const settleDuration = 90
+    const rowRect = row.getBoundingClientRect()
+    const initialViewportOffset = activeCard.getBoundingClientRect().left - rowRect.left
+
+    const alignToViewportOffset = (viewportOffset: number): void => {
+      const currentRowRect = row.getBoundingClientRect()
+      const currentCardRect = activeCard.getBoundingClientRect()
+      const contentOffset = row.scrollLeft + currentCardRect.left - currentRowRect.left
+      const maxLeft = Math.max(0, row.scrollWidth - row.clientWidth)
+      row.scrollLeft = Math.min(maxLeft, Math.max(0, contentOffset - viewportOffset))
+    }
+
+    if (reduceMotion) {
+      alignToViewportOffset(0)
+      return
+    }
+
+    const alignActiveCard = (now: number): void => {
+      const elapsed = now - startedAt
+      const progress = Math.min(1, elapsed / movementDuration)
+      const eased = 1 - Math.pow(1 - progress, 3)
+      alignToViewportOffset(initialViewportOffset * (1 - eased))
+
+      if (elapsed < movementDuration + settleDuration) {
+        frame = requestAnimationFrame(alignActiveCard)
+      } else {
+        alignToViewportOffset(0)
+      }
+    }
+
+    frame = requestAnimationFrame(alignActiveCard)
+    return () => cancelAnimationFrame(frame)
+  }, [activeGame?.id, reduceMotion])
+
+  useEffect(() => {
+    const row = rowRef.current
+    if (!row) return
+
+    let frame = 0
+    const realignAfterResize = (): void => {
+      cancelAnimationFrame(frame)
+      const startedAt = performance.now()
+      const align = (now: number): void => {
+        const activeCard = row.querySelector<HTMLElement>('[data-rolling-active="true"]')
+        if (!activeCard) return
+        const rowRect = row.getBoundingClientRect()
+        const cardRect = activeCard.getBoundingClientRect()
+        const contentOffset = row.scrollLeft + cardRect.left - rowRect.left
+        const maxLeft = Math.max(0, row.scrollWidth - row.clientWidth)
+        row.scrollLeft = Math.min(maxLeft, Math.max(0, contentOffset))
+        if (now - startedAt < 500) frame = requestAnimationFrame(align)
+      }
+      frame = requestAnimationFrame(align)
+    }
+
+    window.addEventListener('resize', realignAfterResize)
+    return () => {
+      window.removeEventListener('resize', realignAfterResize)
+      cancelAnimationFrame(frame)
+    }
+  }, [activeGame?.id])
+
+  return (
+    <div
+      data-home-layout="rolling"
+      className="home-layout rolling-home relative flex h-full flex-col overflow-hidden"
+    >
+      <div className="absolute inset-0 overflow-hidden">
+        <div className="rolling-backdrop-art home-backdrop-art absolute -inset-[4%]">
+          <HomeBackdrop game={backdropGame} customUrl={customBackdropUrl} />
+        </div>
+        <div className="rolling-backdrop-veil absolute inset-0" />
+      </div>
+
+      <div
+        ref={containerRef}
+        className="relative z-10 flex h-full min-h-0 flex-col overflow-hidden px-[clamp(1.5rem,4vw,5rem)] pb-[clamp(2.5rem,5vh,3.5rem)] pt-[clamp(5rem,11vh,7.75rem)]"
+      >
+        {installedGames.length > 0 ? (
+          <>
+            <p className="rolling-heading mb-[clamp(0.75rem,1.7vh,1.25rem)] shrink-0 text-[clamp(0.85rem,1.25vw,1.15rem)] font-black uppercase tracking-[0.16em] text-white/58">
+              {t('home.jumpBack')}
+            </p>
+            <div
+              ref={rowRef}
+              data-rolling-row="true"
+              className="rolling-game-row scrollbar-none flex min-h-0 shrink-0 items-start gap-[clamp(0.75rem,1.15vw,1.35rem)] overflow-x-auto overflow-y-hidden pb-2"
+            >
+              {installedGames.map((game, index) => {
+                const active = index === selectedIndex
+                const preloadHorizontal = Math.abs(index - selectedIndex) <= 3
+                const playtime = formatPlaytime(game, t)
+                const publisher =
+                  game.metadata.publishers?.find(Boolean) ??
+                  game.metadata.developers?.find(Boolean)
+                const genre = game.metadata.genres?.find(Boolean)
+                return (
+                  <button
+                    key={game.id}
+                    data-focusable
+                    data-game-card="true"
+                    data-game-id={game.id}
+                    data-rolling-game="true"
+                    data-rolling-index={index}
+                    data-rolling-active={active ? 'true' : 'false'}
+                    data-view-entry={active ? 'true' : undefined}
+                    aria-label={game.name}
+                    onClick={() => onLaunchGame(game)}
+                    onFocus={() => onSelectGame(game)}
+                    className="rolling-game-card group relative flex shrink-0 flex-col text-left outline-none"
+                  >
+                    <span className="rolling-game-art relative block w-full overflow-hidden rounded-xl2 border border-white/10 bg-surface-2 shadow-card">
+                      <GameImage
+                        gameId={game.id}
+                        name={game.name}
+                        orientation="vertical"
+                        className="rolling-game-image rolling-game-image-poster absolute inset-0 h-full w-full object-cover object-top"
+                      />
+                      {preloadHorizontal && (
+                        <GameImage
+                          gameId={game.id}
+                          name={game.name}
+                          orientation="horizontal"
+                          className="rolling-game-image rolling-game-image-hero absolute inset-0 h-full w-full object-cover"
+                        />
+                      )}
+                      <span className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/40 via-transparent to-black/10 opacity-70" />
+                      <GameCardMenuHint
+                        size={active ? 'large' : 'default'}
+                        className="absolute bottom-3 right-3 z-20 opacity-0 transition-opacity group-hover:opacity-100 group-data-[focused=true]:opacity-100"
+                      />
+                    </span>
+                    <AnimatePresence initial={false}>
+                      {active && (
+                        <motion.span
+                          key={`${game.id}-caption`}
+                          initial={reduceMotion ? false : { opacity: 0, y: -5 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          exit={reduceMotion ? undefined : { opacity: 0, y: -5 }}
+                          transition={{ duration: reduceMotion ? 0 : 0.18 }}
+                          className="rolling-game-caption mt-[clamp(0.65rem,1.4vh,1rem)] block min-w-0 max-w-[min(34rem,72vw)]"
+                        >
+                          <GameImage
+                            gameId={game.id}
+                            name={game.name}
+                            orientation="logo"
+                            className="rolling-game-logo h-[clamp(2.6rem,5.25vh,3.6rem)] w-[clamp(10rem,24vw,21rem)]"
+                          />
+                          <span className="rolling-game-meta mt-2 flex min-w-0 items-center gap-2 text-[clamp(0.58rem,0.72vw,0.72rem)] font-bold uppercase tracking-[0.11em] text-white/48">
+                            {publisher && (
+                              <span className="flex min-w-0 items-center gap-1.5">
+                                <Building2 size={12} className="shrink-0 text-accent" />
+                                <span className="truncate">{publisher}</span>
+                              </span>
+                            )}
+                            <span className="shrink-0 text-white/24">{game.provider}</span>
+                            {genre && <span className="truncate text-white/32">{genre}</span>}
+                          </span>
+                          {playtime && (
+                            <span className="mt-1 block text-[clamp(0.56rem,0.66vw,0.68rem)] font-semibold uppercase tracking-[0.1em] text-white/34">
+                              {t('details.yourPlaytime')}: {playtime}
+                            </span>
+                          )}
+                        </motion.span>
+                      )}
+                    </AnimatePresence>
+                  </button>
+                )
+              })}
+              <span className="rolling-game-tail" aria-hidden="true" />
+            </div>
+          </>
+        ) : (
+          <p className="m-auto text-sm text-muted">
+            {libraryGameCount > 0 ? t('home.noInstalledGames') : t('home.libraryLoading')}
+          </p>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function nextRandomIndex(current: number, length: number): number {
   if (length <= 1) return 0
   return (current + 1 + Math.floor(Math.random() * (length - 1))) % length
@@ -617,6 +926,7 @@ function XModeHome({
   installedGames,
   libraryGames,
   backdropGame,
+  customBackdropUrl,
   deals,
   onSelectGame,
   onLaunchGame,
@@ -630,6 +940,7 @@ function XModeHome({
   installedGames: LibraryGame[]
   libraryGames: LibraryGame[]
   backdropGame: LibraryGame | null
+  customBackdropUrl?: string
   deals: StoreProduct[]
   onSelectGame: (game: LibraryGame) => void
   onLaunchGame: (game: LibraryGame) => void
@@ -674,7 +985,10 @@ function XModeHome({
     >
       <div className="absolute inset-0">
         <div className="home-backdrop-art absolute inset-0">
-          <HomeBackdrop game={backdropGame ?? recommendationPool[0] ?? null} />
+          <HomeBackdrop
+            game={customBackdropUrl ? null : backdropGame ?? recommendationPool[0] ?? null}
+            customUrl={customBackdropUrl}
+          />
         </div>
         <div className="xmode-backdrop-veil absolute inset-0" />
         <div className="home-backdrop-dim absolute inset-0" />
@@ -687,6 +1001,7 @@ function XModeHome({
         <button
           data-focusable
           data-view-entry="true"
+          data-xmode-search="true"
           type="button"
           onClick={onOpenSearch}
           aria-label={t('home.xmode.search')}
@@ -737,8 +1052,13 @@ function XModeHome({
                       className="h-full w-full object-cover object-top transition-transform duration-500 group-hover:scale-[1.04] group-data-[focused=true]:scale-[1.04] motion-reduce:transition-none"
                     />
                     <span className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/88 via-black/5 to-white/[0.06]" />
-                    <span className="pointer-events-none absolute inset-x-0 bottom-0 line-clamp-2 p-[clamp(0.45rem,0.8vw,0.75rem)] text-[clamp(0.65rem,0.82vw,0.82rem)] font-semibold leading-tight text-white drop-shadow-lg">
-                      {game.name}
+                    <span className="pointer-events-none absolute inset-x-0 bottom-0 block p-[clamp(0.45rem,0.8vw,0.75rem)]">
+                      <GameImage
+                        gameId={game.id}
+                        name={game.name}
+                        orientation="logo"
+                        className="xmode-game-logo h-[clamp(1.6rem,3.4vh,2.5rem)] w-full"
+                      />
                     </span>
                     <GameCardMenuHint
                       size="compact"
@@ -1143,6 +1463,7 @@ function CoreSenseHome({
   libraryGames,
   selectedGame,
   backdropGame,
+  customBackdropUrl,
   storeProducts,
   activity,
   language,
@@ -1156,6 +1477,7 @@ function CoreSenseHome({
   libraryGames: LibraryGame[]
   selectedGame: LibraryGame | null
   backdropGame: LibraryGame | null
+  customBackdropUrl?: string
   storeProducts: StoreProduct[]
   activity?: LibraryActivitySummary
   language: 'en' | 'de'
@@ -1257,7 +1579,7 @@ function CoreSenseHome({
     >
       <div className="absolute inset-0">
         <div className="home-backdrop-art absolute inset-0">
-          <HomeBackdrop game={backdropGame} />
+          <HomeBackdrop game={backdropGame} customUrl={customBackdropUrl} />
         </div>
         <div className="coresense-backdrop-veil absolute inset-0" />
         <div className="home-backdrop-dim absolute inset-0" />
@@ -1403,12 +1725,12 @@ function CoreSenseHome({
                   transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
                   className="coresense-identity group flex max-w-[min(48rem,82vw)] items-center gap-[clamp(0.8rem,1.6vw,1.35rem)] rounded-[clamp(0.9rem,1.4vw,1.25rem)] border border-white/10 bg-black/35 p-[clamp(0.7rem,1.3vw,1rem)] pr-[clamp(1rem,2vw,1.6rem)] text-left shadow-[0_18px_50px_rgba(0,0,0,0.28)] backdrop-blur-xl"
                 >
-                  <span className="coresense-identity-icon block shrink-0 overflow-hidden rounded-[24%] border border-white/15 bg-black/40 shadow-2xl">
+                  <span className="coresense-identity-logo block shrink-0">
                     <GameImage
                       gameId={selectedGame.id}
                       name={selectedGame.name}
-                      orientation="icon"
-                      className="h-full w-full object-cover"
+                      orientation="logo"
+                      className="h-full w-full"
                     />
                   </span>
                   <span className="min-w-0 flex-1">
@@ -1568,54 +1890,93 @@ function ActivityInline({
   )
 }
 
-function HomeBackdrop({ game }: { game: LibraryGame | null }): JSX.Element {
-  const [current, setCurrent] = useState<LibraryGame | null>(game)
-  const [outgoing, setOutgoing] = useState<LibraryGame | null>(null)
+type HomeBackdropFrame =
+  | { key: string; type: 'game'; game: LibraryGame }
+  | { key: string; type: 'custom'; url: string }
+
+function createHomeBackdropFrame(
+  game: LibraryGame | null,
+  customUrl?: string
+): HomeBackdropFrame | null {
+  if (customUrl) return { key: `custom:${customUrl}`, type: 'custom', url: customUrl }
+  if (game) return { key: `game:${game.id}`, type: 'game', game }
+  return null
+}
+
+function HomeBackdrop({
+  game,
+  customUrl
+}: {
+  game: LibraryGame | null
+  customUrl?: string
+}): JSX.Element {
+  const homeBackdropMode = usePreferencesStore((state) => state.homeBackdropMode)
+  const homeBackdropMotion = usePreferencesStore((state) => state.homeBackdropMotion)
+  const reduceMotion = Boolean(useReducedMotion())
+  const incoming = createHomeBackdropFrame(game, customUrl)
+  const [current, setCurrent] = useState<HomeBackdropFrame | null>(incoming)
+  const [outgoing, setOutgoing] = useState<HomeBackdropFrame | null>(null)
+  const transitionMs = homeBackdropMode === 'slideshow' ? 1_100 : 240
+  const transitionSeconds = transitionMs / 1_000
+  const effectiveMotion = reduceMotion ? 'still' : homeBackdropMotion
 
   useEffect(() => {
-    if (game?.id === current?.id) return undefined
+    if (incoming?.key === current?.key) return undefined
     setOutgoing(current)
-    setCurrent(game)
-    const timer = setTimeout(() => setOutgoing(null), 220)
+    setCurrent(incoming)
+    const timer = setTimeout(() => setOutgoing(null), transitionMs + 80)
     return () => clearTimeout(timer)
     // `current` is intentionally captured from the render that received the new game.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [game?.id])
+  }, [incoming?.key])
+
+  const renderArtwork = (frame: HomeBackdropFrame): JSX.Element =>
+    frame.type === 'custom' ? (
+      <img
+        src={frame.url}
+        alt=""
+        draggable={false}
+        className="h-full w-full object-cover"
+      />
+    ) : (
+      <GameImage
+        gameId={frame.game.id}
+        name={frame.game.name}
+        orientation="horizontal"
+        className="h-full w-full object-cover"
+      />
+    )
 
   return (
     <>
       {outgoing && (
         <motion.div
-          key={`out:${outgoing.id}`}
+          key={`out:${outgoing.key}`}
           initial={{ opacity: 1 }}
           animate={{ opacity: 0 }}
-          transition={{ duration: 0.2, ease: 'easeOut' }}
-          className="absolute inset-0"
-          style={{ willChange: 'opacity' }}
+          transition={{ duration: transitionSeconds, ease: [0.22, 1, 0.36, 1] }}
+          data-home-backdrop-frame="outgoing"
+          data-backdrop-motion={effectiveMotion}
+          className="home-backdrop-frame absolute inset-0"
+          style={{ willChange: 'opacity, transform' }}
         >
-          <GameImage
-            gameId={outgoing.id}
-            name={outgoing.name}
-            orientation="horizontal"
-            className="h-full w-full object-cover"
-          />
+          {renderArtwork(outgoing)}
         </motion.div>
       )}
       {current && (
         <motion.div
-          key={`current:${current.id}`}
-          initial={{ opacity: outgoing ? 0.2 : 1 }}
+          key={`current:${current.key}`}
+          initial={{ opacity: outgoing ? 0.08 : 1 }}
           animate={{ opacity: 1 }}
-          transition={{ duration: 0.2, ease: 'easeOut' }}
-          className="absolute inset-0"
-          style={{ willChange: 'opacity' }}
+          transition={{ duration: transitionSeconds, ease: [0.22, 1, 0.36, 1] }}
+          data-home-backdrop-frame="current"
+          data-backdrop-source={current.type}
+          data-backdrop-game-id={current.type === 'game' ? current.game.id : undefined}
+          data-backdrop-motion={effectiveMotion}
+          className="home-backdrop-frame absolute inset-0"
+          style={{ willChange: 'opacity, transform' }}
         >
-          <GameImage
-            gameId={current.id}
-            name={current.name}
-            orientation="horizontal"
-            className="h-full w-full object-cover"
-          />
+          {renderArtwork(current)}
         </motion.div>
       )}
     </>
@@ -1737,12 +2098,12 @@ function GameFocusSummary({
               className="home-focus-view"
             >
               <div className="home-focus-identity flex min-w-0 items-center gap-[clamp(0.9rem,1.8vw,1.4rem)]">
-                <div className="home-focus-icon h-[clamp(4.5rem,7vw,6.5rem)] w-[clamp(4.5rem,7vw,6.5rem)] shrink-0 overflow-hidden rounded-[25%] border border-white/15 bg-black/40 shadow-2xl">
+                <div className="home-focus-logo h-[clamp(3.8rem,6vw,5.5rem)] w-[clamp(9rem,18vw,16rem)] shrink-0">
                   <GameImage
                     gameId={game.id}
                     name={game.name}
-                    orientation="icon"
-                    className="h-full w-full object-cover"
+                    orientation="logo"
+                    className="h-full w-full"
                   />
                 </div>
                 <div className="min-w-0">

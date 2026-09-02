@@ -8,7 +8,7 @@ import type {
 } from '@shared/ipc'
 import { getBuiltinSteamGridDbKey } from './builtinKeys'
 import { customArtworkService } from './customArtwork'
-import { settingsStore } from './settingsStore'
+import { steamGridDbCredentials } from './steamGridDbCredentials'
 import {
   fetchSteamGridDbArtworkCandidates,
   type SteamGridDbArtworkCandidate
@@ -35,9 +35,10 @@ const MAX_QUERY_LENGTH = 120
 const MAX_PICKER_OPTIONS = 30
 const pickerCache = new Map<string, PickerCacheEntry>()
 const pickerInFlight = new Map<string, Promise<CandidateLoadResult>>()
+let pickerCacheGeneration = 0
 
 function apiKey(): string {
-  return settingsStore.get('steamGridDbApiKey')?.trim() || getBuiltinSteamGridDbKey().trim()
+  return steamGridDbCredentials.getToken() || getBuiltinSteamGridDbKey().trim()
 }
 
 function normalizeQuery(value?: string): string {
@@ -108,6 +109,7 @@ async function loadCandidates(
   const current = pickerInFlight.get(id)
   if (current) return current
 
+  const generation = pickerCacheGeneration
   const request = Promise.all([
     searchPublicSteamArtwork(effectiveQuery, orientation),
     key
@@ -131,10 +133,12 @@ async function loadCandidates(
         ? { state: 'unavailable', candidates: [] }
         : { state: 'missing', candidates: [] }
     }
-    cacheCandidates(id, {
-      expiresAt: Date.now() + CACHE_TTL_MS,
-      candidates
-    })
+    if (generation === pickerCacheGeneration) {
+      cacheCandidates(id, {
+        expiresAt: Date.now() + CACHE_TTL_MS,
+        candidates
+      })
+    }
     return { state: 'ready', candidates }
   })
   pickerInFlight.set(id, request)
@@ -146,6 +150,12 @@ async function loadCandidates(
 }
 
 class ArtworkPickerService {
+  clearCache(): void {
+    pickerCacheGeneration++
+    pickerCache.clear()
+    pickerInFlight.clear()
+  }
+
   async list(
     game: LibraryGame,
     orientation: ArtworkPickerOrientation = 'vertical',

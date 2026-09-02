@@ -8,6 +8,8 @@ import {
   DOCK_THEME_IDS,
   HARDWARE_CONTROL_BUTTONS,
   HARDWARE_CONTROL_HOLD_SECONDS,
+  HOME_BACKDROP_MODES,
+  HOME_BACKDROP_MOTIONS,
   FRIENDS_PROVIDERS,
   IPC,
   LIBRARY_GRID_COLUMN_OPTIONS,
@@ -39,6 +41,7 @@ import {
   type RetroSystemId,
   type StoreRegionId,
   type SteamAccount,
+  type SteamGridDbTokenStatus,
   type SteamLoginStatus,
   type SystemPowerAction,
   type SystemSettingsTarget,
@@ -60,7 +63,10 @@ import { getDisplayVersion } from './releaseManifest'
 import { OrbitBackgroundServiceManager } from './orbitBackgroundServiceManager'
 import { customArtworkService } from './customArtwork'
 import { artworkPickerService } from './artworkPickerService'
+import { clearSteamGridDbCache, getSteamGridDbTokenStatus } from './steamGridDb'
+import { steamGridDbCredentials } from './steamGridDbCredentials'
 import { profileAvatarService } from './profileAvatarService'
+import { homeWallpaperService } from './homeWallpaperService'
 import { startupVideoService } from './startupVideoService'
 import { systemUpdateService } from './systemUpdateService'
 import { SystemStatusService } from './systemStatusService'
@@ -93,7 +99,7 @@ const BACKGROUND_SERVICE_ACTIONS: readonly OrbitBackgroundServiceAction[] = [
 ]
 const CUSTOM_GAME_IMPORT_SOURCES: readonly CustomGameImportSource[] = ['executable', 'folder']
 const CUSTOM_GAME_SAVE_SOURCES: readonly CustomGameSaveSource[] = ['file', 'folder']
-const IMAGE_ORIENTATIONS: readonly ImageOrientation[] = ['vertical', 'horizontal', 'icon']
+const IMAGE_ORIENTATIONS: readonly ImageOrientation[] = ['vertical', 'horizontal', 'logo', 'icon']
 const RETRO_SYSTEM_IDS = new Set(RETRO_SYSTEMS.map((system) => system.id))
 
 function validatedShortString(value: unknown, label: string, maxLength = 512): string {
@@ -222,6 +228,9 @@ function validateSettingsPartial(value: unknown): asserts value is Partial<Orbit
     throw new Error('Invalid settings payload')
   }
   const partial = value as Record<string, unknown>
+  if ('steamGridDbApiKey' in partial) {
+    throw new Error('SteamGridDB credentials require the secure credential API')
+  }
   if (
     'steamWebApiKey' in partial &&
     partial.steamWebApiKey !== undefined &&
@@ -386,6 +395,31 @@ function validateSettingsPartial(value: unknown): asserts value is Partial<Orbit
     throw new Error('Invalid Home card bubble effect state')
   }
   if (
+    'homeBackdropMode' in partial &&
+    !HOME_BACKDROP_MODES.includes(
+      partial.homeBackdropMode as (typeof HOME_BACKDROP_MODES)[number]
+    )
+  ) {
+    throw new Error('Invalid Home backdrop mode')
+  }
+  if (
+    'homeBackdropMotion' in partial &&
+    !HOME_BACKDROP_MOTIONS.includes(
+      partial.homeBackdropMotion as (typeof HOME_BACKDROP_MOTIONS)[number]
+    )
+  ) {
+    throw new Error('Invalid Home backdrop motion')
+  }
+  if (
+    'pinnedBackdropGameId' in partial &&
+    partial.pinnedBackdropGameId !== undefined &&
+    (typeof partial.pinnedBackdropGameId !== 'string' ||
+      !partial.pinnedBackdropGameId.trim() ||
+      partial.pinnedBackdropGameId.length > 512)
+  ) {
+    throw new Error('Invalid pinned Home backdrop game')
+  }
+  if (
     'notificationPosition' in partial &&
     !NOTIFICATION_POSITIONS.includes(
       partial.notificationPosition as (typeof NOTIFICATION_POSITIONS)[number]
@@ -482,7 +516,8 @@ function findArtworkGame(gameId: string): LibraryGame | null {
           release?.heroUrl,
           release?.capsuleUrl
         ].filter((url): url is string => Boolean(url)),
-        icon: []
+        icon: [],
+        logo: []
       }
     },
     metadataRevision: 1,
@@ -576,7 +611,6 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     mainWindow,
     () => settingsStore.store.hardwareControlEnabled
   )
-  backgroundServiceManager.start()
   const disposeBackgroundService = (): void => backgroundServiceManager.dispose()
   app.once('before-quit', disposeBackgroundService)
   mainWindow.once('closed', disposeBackgroundService)
@@ -586,11 +620,14 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
       launcherHasActiveDownload(
         launcherDownloadMonitor.getSnapshot().activities.map((activity) => activity.phase)
       ),
-    prepareForInstall: () => backgroundServiceManager.prepareForAppUpdate(),
-    recoverFromFailedInstall: () => backgroundServiceManager.recoverFromFailedAppUpdate(),
+    prepareForInstall: (transactionId) =>
+      backgroundServiceManager.prepareForAppUpdate(transactionId),
+    recoverFromFailedInstall: (transactionId) =>
+      backgroundServiceManager.recoverFromFailedAppUpdate(transactionId),
     getAutoDownloadEnabled: () => settingsStore.store.appUpdateAutoDownload
   })
-  appUpdateService.start()
+  const appUpdateStartup = appUpdateService.start()
+  backgroundServiceManager.start(appUpdateStartup)
   let appUpdateDisposed = false
   const disposeAppUpdate = (): void => {
     if (appUpdateDisposed) return
@@ -643,6 +680,10 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
       image: customArtwork ?? update.image
     })
   })
+  artworkService.on('invalidated', () => {
+    if (mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return
+    mainWindow.webContents.send(IPC.imageCacheInvalidated)
+  })
   syncCoordinator.on('updated', (status) => {
     mainWindow.webContents.send(IPC.syncUpdated, status)
   })
@@ -659,6 +700,9 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
 
   ipcMain.handle(IPC.profileAvatarGetCustom, () => profileAvatarService.resolve())
   ipcMain.handle(IPC.profileAvatarSelectCustom, () => profileAvatarService.select(mainWindow))
+  ipcMain.handle(IPC.homeWallpaperGet, () => homeWallpaperService.resolveUrl())
+  ipcMain.handle(IPC.homeWallpaperSelect, () => homeWallpaperService.select(mainWindow))
+  ipcMain.handle(IPC.homeWallpaperClear, () => homeWallpaperService.clear())
   ipcMain.handle(IPC.startupVideoGet, () => startupVideoService.resolveUrl())
   ipcMain.handle(IPC.startupVideoSelect, () => startupVideoService.select(mainWindow))
 
@@ -1072,6 +1116,34 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
       return game ? resolveImage(game, orientation) : null
     }
   )
+
+  ipcMain.handle(IPC.imageTokenStatusGet, () =>
+    getSteamGridDbTokenStatus(steamGridDbCredentials.getToken() ?? '')
+  )
+
+  ipcMain.handle(IPC.imageTokenSet, async (_event, token: unknown) => {
+    steamGridDbCredentials.setToken(token)
+    artworkPickerService.clearCache()
+    clearSteamGridDbCache()
+    return getSteamGridDbTokenStatus(steamGridDbCredentials.getToken() ?? '')
+  })
+
+  ipcMain.handle(IPC.imageTokenClear, () => {
+    steamGridDbCredentials.clear()
+    artworkPickerService.clearCache()
+    clearSteamGridDbCache()
+    return { state: 'not-configured' } satisfies SteamGridDbTokenStatus
+  })
+
+  ipcMain.handle(IPC.imageCacheClear, async () => {
+    artworkPickerService.clearCache()
+    return artworkService.clearAutomaticCache()
+  })
+
+  ipcMain.handle(IPC.imageArtworkReload, async () => {
+    artworkPickerService.clearCache()
+    return artworkService.reloadAll(libraryService.getSnapshot().games)
+  })
 
   ipcMain.handle(IPC.imageArtworkSearchList, (
     _e,

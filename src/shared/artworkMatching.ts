@@ -73,7 +73,7 @@ export function shareArtworkIdentity(
   return leftDevelopers.size > 0 && [...leftDevelopers].some((name) => rightDevelopers.has(name))
 }
 
-export type AutomaticArtworkOrientation = 'vertical' | 'horizontal' | 'icon'
+export type AutomaticArtworkOrientation = 'vertical' | 'horizontal' | 'icon' | 'logo'
 export type LibretroArtworkFolder = 'Named_Boxarts' | 'Named_Snaps' | 'Named_Titles'
 
 /**
@@ -99,7 +99,8 @@ export function libretroArtworkFolderPriority(
 const TARGET_RATIOS: Record<AutomaticArtworkOrientation, number> = {
   vertical: 2 / 3,
   horizontal: 16 / 9,
-  icon: 1
+  icon: 1,
+  logo: 3
 }
 
 const TARGET_DIMENSIONS: Record<AutomaticArtworkOrientation, { width: number; height: number }> = {
@@ -108,7 +109,8 @@ const TARGET_DIMENSIONS: Record<AutomaticArtworkOrientation, { width: number; he
   // it retains roughly 1100 useful horizontal pixels, which is ample beneath
   // ORBIT's Home treatment and must outrank larger gameplay screenshots.
   horizontal: { width: 1000, height: 500 },
-  icon: { width: 128, height: 128 }
+  icon: { width: 128, height: 128 },
+  logo: { width: 600, height: 200 }
 }
 
 const MIN_HIGH_QUALITY_ASPECT_SUITABILITY: Record<AutomaticArtworkOrientation, number> = {
@@ -116,7 +118,9 @@ const MIN_HIGH_QUALITY_ASPECT_SUITABILITY: Record<AutomaticArtworkOrientation, n
   // but they must not stop the search for an actual 2:3 cover.
   vertical: 0.75,
   horizontal: 0.55,
-  icon: 0.65
+  icon: 0.65,
+  // Wordmarks vary widely from compact emblems to very long title treatments.
+  logo: 0.32
 }
 
 function aspectSuitability(

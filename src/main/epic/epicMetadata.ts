@@ -8,7 +8,7 @@ import type { EpicApiClient, EpicCatalogItem } from './epicApi'
 const POSITIVE_TTL_MS = 30 * 24 * 60 * 60 * 1000
 const NEGATIVE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 const REQUEST_GAP_MS = 250
-const METADATA_SCHEMA_VERSION = 2
+const METADATA_SCHEMA_VERSION = 3
 
 export interface EpicMetadataSyncTarget {
   providerGameId: string
@@ -102,7 +102,7 @@ function normalizeImageUrl(value: string | undefined): string | undefined {
   return value.startsWith('https://') ? value : undefined
 }
 
-function imageScore(type: string, orientation: 'vertical' | 'horizontal' | 'icon'): number {
+function imageScore(type: string, orientation: 'vertical' | 'horizontal' | 'icon' | 'logo'): number {
   const normalized = type.toLowerCase()
   if (orientation === 'vertical') {
     if (normalized.includes('tall') || normalized.includes('portrait')) return 100
@@ -116,14 +116,18 @@ function imageScore(type: string, orientation: 'vertical' | 'horizontal' | 'icon
     if (normalized.includes('storefront')) return 70
     return 0
   }
-  if (normalized.includes('logo') || normalized.includes('icon')) return 100
+  if (orientation === 'logo') {
+    if (normalized.includes('logo')) return 100
+    return 0
+  }
+  if (normalized.includes('icon')) return 100
   if (normalized.includes('thumbnail')) return 50
   return 0
 }
 
 function artworkCandidates(
   item: EpicCatalogItem,
-  orientation: 'vertical' | 'horizontal' | 'icon'
+  orientation: 'vertical' | 'horizontal' | 'icon' | 'logo'
 ): string[] | undefined {
   const candidates = (item.keyImages ?? [])
     .map((image, index) => ({
@@ -156,6 +160,7 @@ function catalogMetadata(item: EpicCatalogItem): GameMetadata {
   const vertical = artworkCandidates(item, 'vertical')
   const horizontal = artworkCandidates(item, 'horizontal')
   const icon = artworkCandidates(item, 'icon')
+  const logo = artworkCandidates(item, 'logo')
   const platforms = unique((item.releaseInfo ?? []).flatMap((release) => release.platform ?? []))
   const normalizedPlatforms: GamePlatform[] = []
   if (platforms?.some((platform) => /win/i.test(platform))) normalizedPlatforms.push('windows')
@@ -187,7 +192,7 @@ function catalogMetadata(item: EpicCatalogItem): GameMetadata {
     backgroundUrl: horizontal?.[0],
     storeHeaderUrl: horizontal?.[0],
     iconUrl: icon?.[0],
-    artwork: { vertical, horizontal, icon }
+    artwork: { vertical, horizontal, icon, logo }
   }
 }
 

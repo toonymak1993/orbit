@@ -5,6 +5,7 @@ import {
   type AppControlAction,
   type ApplicationLaunchResult,
   type AppUpdateSnapshot,
+  type ArtworkMaintenanceResult,
   type ArtworkSearchOptions,
   type CustomGameCommitInput,
   type CustomGameDraft,
@@ -57,6 +58,7 @@ import {
   type RetroSystemDirectoryResult,
   type RetroSystemId,
   type SteamAccount,
+  type SteamGridDbTokenStatus,
   type SteamLoginStatus,
   type StoreRegionId,
   type StoreSearchResponse,
@@ -77,6 +79,11 @@ const orbitApi = {
   profileAvatar: {
     getCustom: (): Promise<string | null> => ipcRenderer.invoke(IPC.profileAvatarGetCustom),
     selectCustom: (): Promise<string | null> => ipcRenderer.invoke(IPC.profileAvatarSelectCustom)
+  },
+  homeWallpaper: {
+    get: (): Promise<string | null> => ipcRenderer.invoke(IPC.homeWallpaperGet),
+    select: (): Promise<string | null> => ipcRenderer.invoke(IPC.homeWallpaperSelect),
+    clear: (): Promise<void> => ipcRenderer.invoke(IPC.homeWallpaperClear)
   },
   retroAchievements: {
     credentials: {
@@ -361,6 +368,16 @@ const orbitApi = {
     syncAchievements: (): Promise<void> => ipcRenderer.invoke(IPC.gameAchievementsSync)
   },
   image: {
+    getTokenStatus: (): Promise<SteamGridDbTokenStatus> =>
+      ipcRenderer.invoke(IPC.imageTokenStatusGet),
+    setToken: (token: string): Promise<SteamGridDbTokenStatus> =>
+      ipcRenderer.invoke(IPC.imageTokenSet, token),
+    clearToken: (): Promise<SteamGridDbTokenStatus> =>
+      ipcRenderer.invoke(IPC.imageTokenClear),
+    clearCache: (): Promise<ArtworkMaintenanceResult> =>
+      ipcRenderer.invoke(IPC.imageCacheClear),
+    reloadAll: (): Promise<ArtworkMaintenanceResult> =>
+      ipcRenderer.invoke(IPC.imageArtworkReload),
     resolve: (gameId: string, orientation: ImageOrientation): Promise<ResolvedImage | null> =>
       ipcRenderer.invoke(IPC.imageResolve, gameId, orientation),
     searchArtwork: (
@@ -402,6 +419,11 @@ const orbitApi = {
       const listener = (_e: Electron.IpcRendererEvent, update: ImageUpdate): void => callback(update)
       ipcRenderer.on(IPC.imageUpdated, listener)
       return () => ipcRenderer.removeListener(IPC.imageUpdated, listener)
+    },
+    onCacheInvalidated: (callback: () => void): (() => void) => {
+      const listener = (): void => callback()
+      ipcRenderer.on(IPC.imageCacheInvalidated, listener)
+      return () => ipcRenderer.removeListener(IPC.imageCacheInvalidated, listener)
     }
   },
   store: {

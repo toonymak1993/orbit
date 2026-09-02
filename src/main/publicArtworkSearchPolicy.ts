@@ -12,7 +12,7 @@ export interface PublicSteamArtworkCandidate extends ArtworkSearchOption {
   downloadUrl: string
 }
 
-const STEAM_ARTWORK_FILE = /^(?:header|library_600x900(?:_2x)?|library_hero)\.(?:jpe?g|png|webp)$/i
+const STEAM_ARTWORK_FILE = /^(?:header|library_600x900(?:_2x)?|library_hero|library_logo|logo)\.(?:jpe?g|png|webp)$/i
 
 export function parsePublicSteamSearchItems(value: unknown): PublicSteamSearchItem[] {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return []
@@ -57,14 +57,23 @@ export function publicSteamArtworkUrls(
           `${legacyRoot}/library_600x900.jpg`
         ]
       ]
-    : [
-        [
-          `${fastlyRoot}/library_hero.jpg`,
-          `${legacyRoot}/library_hero.jpg`
-        ],
-        [storePageBackground],
-        [`${fastlyRoot}/header.jpg`, `${legacyRoot}/header.jpg`]
-      ]
+    : orientation === 'logo'
+      ? [
+          [
+            `${fastlyRoot}/library_logo.png`,
+            `${fastlyRoot}/logo.png`,
+            `${legacyRoot}/library_logo.png`,
+            `${legacyRoot}/logo.png`
+          ]
+        ]
+      : [
+          [
+            `${fastlyRoot}/library_hero.jpg`,
+            `${legacyRoot}/library_hero.jpg`
+          ],
+          [storePageBackground],
+          [`${fastlyRoot}/header.jpg`, `${legacyRoot}/header.jpg`]
+        ]
 }
 
 export function isPublicSteamArtworkUrl(value: string): boolean {

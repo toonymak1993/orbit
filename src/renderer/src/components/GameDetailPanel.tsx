@@ -53,6 +53,7 @@ interface Props {
 const EDITABLE_ARTWORK_ORIENTATIONS: readonly ImageOrientation[] = [
   'vertical',
   'horizontal',
+  'logo',
   'icon'
 ]
 
@@ -98,6 +99,7 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
   const [hasArtworkOverrides, setHasArtworkOverrides] = useState({
     vertical: false,
     horizontal: false,
+    logo: false,
     icon: false
   })
   const [artworkFeedback, setArtworkFeedback] = useState<'updated' | 'reset' | 'failed' | null>(null)
@@ -186,10 +188,11 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
     const generations: Record<ImageOrientation, number> = {
       vertical: 0,
       horizontal: 0,
+      logo: 0,
       icon: 0
     }
     setArtworkFeedback(null)
-    setHasArtworkOverrides({ vertical: false, horizontal: false, icon: false })
+    setHasArtworkOverrides({ vertical: false, horizontal: false, logo: false, icon: false })
     const refreshOrientation = (orientation: ImageOrientation): void => {
       const generation = ++generations[orientation]
       void window.api.image
@@ -480,12 +483,16 @@ export function GameDetailPanel({ game }: Props): JSX.Element {
             <div className="game-detail-overview grid min-h-0 items-start">
               <div className="min-w-0">
               <div className="game-detail-identity flex items-end gap-[clamp(0.8rem,1.4vw,1.35rem)]">
-                <div className="h-[clamp(4rem,6vw,6rem)] w-[clamp(4rem,6vw,6rem)] shrink-0 overflow-hidden rounded-[26%] border border-white/15 bg-black/35 shadow-2xl">
+                <div className="relative h-[clamp(4.25rem,6.6vw,6.5rem)] aspect-[2/3] shrink-0 overflow-hidden rounded-[clamp(0.65rem,1vw,1rem)] border border-white/20 bg-black/35 shadow-[0_16px_40px_rgba(0,0,0,0.48)]">
                   <GameImage
                     gameId={game.id}
                     name={game.name}
-                    orientation="icon"
+                    orientation="vertical"
                     className="h-full w-full object-cover"
+                  />
+                  <span
+                    aria-hidden="true"
+                    className="pointer-events-none absolute inset-0 rounded-[inherit] ring-1 ring-inset ring-white/10"
                   />
                 </div>
                 <div className="min-w-0 pb-1">

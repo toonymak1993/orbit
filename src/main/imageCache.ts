@@ -7,9 +7,14 @@ import { readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/prom
 import { extname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import Store from 'electron-store'
-import type { ImageOrientation, ImageUpdate, LibraryGame, ResolvedImage } from '@shared/ipc'
-import { settingsStore } from './settingsStore'
-import { fetchSteamGridDbArtworkCandidates } from './steamGridDb'
+import type {
+  ArtworkMaintenanceResult,
+  ImageOrientation,
+  ImageUpdate,
+  LibraryGame,
+  ResolvedImage
+} from '@shared/ipc'
+import { clearSteamGridDbCache, fetchSteamGridDbArtworkCandidates } from './steamGridDb'
 import { fetchWithElectronNet } from './networkFetch'
 import {
   isTransientArtworkStatus,
@@ -18,10 +23,13 @@ import {
 } from './artworkNetworkPolicy'
 import { resolveLocalIconDataUrl } from './localIcon'
 import { getBuiltinSteamGridDbKey } from './builtinKeys'
+import { steamGridDbCredentials } from './steamGridDbCredentials'
 import { getSteamInstallPath } from './steam/steamInstall'
 import { syncCoordinator } from './sync/syncCoordinator'
 import { customArtworkService } from './customArtwork'
+import { trimTransparentImage } from './transparentImage'
 import {
+  clearArtworkDiscoveryCaches,
   discoverExactStoreArtwork,
   discoverLibretroArtwork
 } from './artworkFallback'
@@ -49,15 +57,15 @@ const QUALITY_UPGRADE_RETRY_BASE_MS = 6 * 60 * 60 * 1000
 const QUALITY_UPGRADE_RETRY_MAX_MS = 7 * 24 * 60 * 60 * 1000
 const ORPHAN_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_ORPHAN_DELETIONS_PER_RUN = 25
-const GENERATED_CACHE_FILE = /-(?:vertical|horizontal|icon)-[a-f0-9]{16}\.(?:ico|jpg|png|webp)$/i
-const CUSTOM_CACHE_FILE = /^custom-(?:cover|background|icon)-[a-f0-9]{12}-[a-f0-9]{16}\.png$/i
+const GENERATED_CACHE_FILE = /-(?:vertical|horizontal|icon|logo)-[a-f0-9]{16}\.(?:ico|jpg|png|webp)$/i
+const CUSTOM_CACHE_FILE = /^custom-(?:cover|background|icon|logo)-[a-f0-9]{12}-[a-f0-9]{16}\.png$/i
 // Keep background artwork decoding below the point where it competes with the
 // controller UI on handheld CPUs. Delta sync is continuous, so latency matters
 // less here than stable frame times.
 const MAX_CONCURRENCY = 3
 const LIBRETRO_ARTWORK_ROLE_POLICY_VERSION = 15
-const PIPELINE_VERSION = 15
-const ARTWORK_ORIENTATIONS: ImageOrientation[] = ['vertical', 'horizontal', 'icon']
+const PIPELINE_VERSION = 17
+const ARTWORK_ORIENTATIONS: ImageOrientation[] = ['vertical', 'horizontal', 'logo', 'icon']
 
 type ArtworkSource =
   | 'steam-local'
@@ -277,6 +285,28 @@ function validateImage(
     }
   }
 
+  if (orientation === 'logo') {
+    const logo = trimTransparentImage(image)
+    const logoSize = logo.getSize()
+    const logoRatio = logoSize.width / logoSize.height
+    if (
+      logoRatio < 0.65 ||
+      logoRatio > 12 ||
+      logoSize.width < 64 ||
+      logoSize.height < 16
+    ) {
+      return null
+    }
+    return {
+      buffer: logo === image ? buffer : logo.toPNG(),
+      width: logoSize.width,
+      height: logoSize.height,
+      extension: logo === image ? extension : 'png',
+      quality: automaticArtworkQuality(logoSize.width, logoSize.height, orientation),
+      contain: true
+    }
+  }
+
   if (orientation === 'vertical') {
     if (ratio < 0.55 || ratio > 0.8 || width < 300 || height < 450) return null
     return {
@@ -306,7 +336,7 @@ function validateImageFallback(
   extension: string,
   contain: boolean
 ): ValidatedImage | null {
-  if (orientation === 'icon') return null
+  if (orientation === 'icon' || orientation === 'logo') return null
   if (buffer.byteLength === 0 || buffer.byteLength > MAX_DOWNLOAD_BYTES) return null
   const image = nativeImage.createFromBuffer(buffer)
   if (image.isEmpty()) return null
@@ -476,7 +506,9 @@ function localSteamCandidates(
           : tier === 'fallback'
             ? ['page_bg_generated_v6b.jpg']
             : ['library_hero.jpg', 'page_bg_generated_v6b.jpg']
-        : ['icon.jpg']
+        : orientation === 'logo'
+          ? ['logo.png', 'library_logo.png', 'logo_2x.png']
+          : ['icon.jpg']
   let hashedRoots: string[] = []
   if (existsSync(appRoot)) {
     try {
@@ -491,7 +523,10 @@ function localSteamCandidates(
     ...names.map((name) => join(appRoot, name)),
     ...hashedRoots.flatMap((root) => names.map((name) => join(root, name))),
     ...names.map((name) => join(cacheRoot, `${appId}_${name}`)),
-    ...(orientation === 'icon' ? [join(cacheRoot, `${appId}_icon.jpg`)] : [])
+    ...(orientation === 'icon' ? [join(cacheRoot, `${appId}_icon.jpg`)] : []),
+    ...(orientation === 'logo'
+      ? [join(cacheRoot, `${appId}_logo.png`), join(cacheRoot, `${appId}_library_logo.png`)]
+      : [])
   ]
 }
 
@@ -501,6 +536,16 @@ function steamCdnCandidates(
   tier: SteamArtworkTier = 'all'
 ): string[] {
   if (orientation === 'icon') return []
+  if (orientation === 'logo') {
+    const fastlyRoot = `https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/${appId}`
+    return [
+      `${fastlyRoot}/library_logo.png`,
+      `${fastlyRoot}/logo.png`,
+      ...['library_logo.png', 'logo.png'].flatMap((path) =>
+        CDN_HOSTS.map((host) => `https://${host}/steam/apps/${appId}/${path}`)
+      )
+    ]
+  }
   if (orientation === 'horizontal') {
     const fastlyRoot = `https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/${appId}`
     const primary = [
@@ -529,7 +574,9 @@ function providerMetadataCandidates(game: LibraryGame, orientation: ImageOrienta
       ? []
       : orientation === 'horizontal'
         ? [game.metadata.backgroundUrl, game.metadata.storeHeaderUrl]
-        : [game.metadata.iconUrl]
+        : orientation === 'icon'
+          ? [game.metadata.iconUrl]
+          : []
   return [...new Set([...explicit, ...legacy].filter((url): url is string => Boolean(url)))]
 }
 
@@ -549,11 +596,12 @@ function providerMetadataFallbackCandidates(
           game.metadata.storeHeaderUrl,
           game.metadata.backgroundUrl
         ]
-      : [
-          // A large Landscape slot must not silently adopt a portrait cover or
-          // square icon. The keyless store lookup below is a better fallback;
-          // if it also fails, ORBIT keeps the neutral missing-art state.
-        ]
+      : orientation === 'logo'
+        ? []
+        : [
+            // A large Landscape slot must not silently adopt a portrait cover
+            // or square icon. The keyless store lookup is the safer fallback.
+          ]
   return [
     ...new Set(
       alternatives.filter(
@@ -695,10 +743,69 @@ class ArtworkService extends EventEmitter {
   private knownGamesByTitle = new Map<string, LibraryGame[]>()
   private artworkRetryTimer: ReturnType<typeof setTimeout> | undefined
   private artworkRetryWakeAt: number | undefined
+  private maintenanceGeneration = 0
 
   constructor() {
     super()
     app.on('before-quit', () => this.clearArtworkRetryTimer())
+  }
+
+  async clearAutomaticCache(): Promise<ArtworkMaintenanceResult> {
+    this.maintenanceGeneration++
+    this.queue = []
+    this.pending.clear()
+    this.clearArtworkRetryTimer()
+    for (const provider of new Set(this.syncProviderByKey.values())) {
+      syncCoordinator.complete('artwork', provider, provider)
+    }
+    this.syncKeys.clear()
+    this.completedSyncKeys.clear()
+    this.syncProviderByKey.clear()
+    this.syncTotalsByProvider.clear()
+    this.syncCompletedByProvider.clear()
+    clearSteamGridDbCache()
+    clearArtworkDiscoveryCaches()
+
+    const clearedEntries = Object.keys(manifestEntries).length
+    for (const key of Object.keys(manifestEntries)) delete manifestEntries[key]
+    persistManifestEntries()
+
+    let clearedFiles = 0
+    let freedBytes = 0
+    let cacheReadError: unknown
+    try {
+      ensureCacheDir()
+      const files = await readdir(CACHE_DIR, { withFileTypes: true })
+      for (const file of files) {
+        if (!file.isFile() || !GENERATED_CACHE_FILE.test(file.name)) continue
+        const filePath = join(CACHE_DIR, file.name)
+        const fileStats = await stat(filePath).catch(() => null)
+        try {
+          await unlink(filePath)
+          clearedFiles++
+          freedBytes += fileStats?.size ?? 0
+        } catch {
+          // Concurrent artwork workers and antivirus scanners may briefly own a
+          // file. Unreferenced leftovers are removed by the orphan cleanup.
+        }
+      }
+    } catch (error) {
+      cacheReadError = error
+    }
+
+    this.emit('invalidated')
+    if (cacheReadError) throw cacheReadError
+    return { clearedEntries, clearedFiles, freedBytes, queuedAssets: 0 }
+  }
+
+  async reloadAll(games: Iterable<LibraryGame>): Promise<ArtworkMaintenanceResult> {
+    const uniqueGames = [...new Map([...games].map((game) => [game.id, game])).values()]
+    const result = await this.clearAutomaticCache()
+    this.syncLibrary(uniqueGames)
+    return {
+      ...result,
+      queuedAssets: uniqueGames.length * ARTWORK_ORIENTATIONS.length
+    }
   }
 
   beginSyncSession(): void {
@@ -728,12 +835,12 @@ class ArtworkService extends EventEmitter {
   syncProvider(games: Iterable<LibraryGame>, provider: string): void {
     const providerGames = [...games].filter((game) => game.provider === provider)
     this.rememberProviderGames(providerGames, provider)
-    // Fill the library's visible covers first. Backgrounds and icons follow in
-    // later queue slices, so large libraries improve progressively instead of
-    // resolving all three slots for the first game before showing the next.
+    // Fill the library's visible covers first. Backgrounds, logos and icons
+    // follow in later queue slices so large libraries improve progressively.
     const targets = [
       ...providerGames.map((game) => ({ game, orientation: 'vertical' as const })),
       ...providerGames.map((game) => ({ game, orientation: 'horizontal' as const })),
+      ...providerGames.map((game) => ({ game, orientation: 'logo' as const })),
       ...providerGames.map((game) => ({ game, orientation: 'icon' as const }))
     ]
     for (const { game, orientation } of targets) {
@@ -832,11 +939,25 @@ class ArtworkService extends EventEmitter {
       const item = this.queue.shift() as QueueItem
       const key = artworkKey(item.game.id, item.orientation)
       const generation = item.generation
+      const maintenanceGeneration = this.maintenanceGeneration
       this.active++
-      void this.refresh(item.game, item.orientation, () => item.generation === generation)
+      void this.refresh(
+        item.game,
+        item.orientation,
+        () =>
+          item.generation === generation &&
+          maintenanceGeneration === this.maintenanceGeneration
+      )
         .catch(() => undefined)
         .finally(() => {
           this.active--
+          if (
+            maintenanceGeneration !== this.maintenanceGeneration ||
+            this.pending.get(key) !== item
+          ) {
+            this.pump()
+            return
+          }
           if (item.generation !== generation) {
             this.queue.push(item)
           } else {
@@ -874,7 +995,7 @@ class ArtworkService extends EventEmitter {
             contain:
               previous.pipelineVersion >= LIBRETRO_ARTWORK_ROLE_POLICY_VERSION
                 ? previous.contain
-                : orientation === 'icon',
+                : orientation === 'icon' || orientation === 'logo',
             // Quality thresholds evolve with the pipeline. Never carry an old
             // classification across versions just because the cached pixels
             // remain usable as a visual fallback.
@@ -1122,7 +1243,7 @@ class ArtworkService extends EventEmitter {
     }
 
     if (orientation !== 'icon') {
-      const gridDbKey = settingsStore.get('steamGridDbApiKey') || getBuiltinSteamGridDbKey()
+      const gridDbKey = steamGridDbCredentials.getToken() || getBuiltinSteamGridDbKey()
       if (gridDbKey) {
         const steamAppId = game.provider === 'steam' ? game.appId : undefined
         const gridResult = await fetchSteamGridDbArtworkCandidates(

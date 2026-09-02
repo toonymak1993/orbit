@@ -195,6 +195,8 @@ export function HardwareControlPanel(): JSX.Element {
           await window.api.backgroundService.control('install')
         } else if (service.installation === 'repair-needed') {
           await window.api.backgroundService.control('repair')
+        } else if (service.installation === 'unsupported') {
+          throw new Error('Background service is unavailable for this package')
         }
       }
       await setHardwareControlEnabled(!hardwareControlEnabled)

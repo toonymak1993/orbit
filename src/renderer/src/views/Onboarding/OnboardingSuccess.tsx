@@ -91,6 +91,7 @@ const THEME_SWATCH: Record<ThemeId, string> = {
 
 const HOME_LAYOUT_SHORT_KEYS: Record<HomeLayoutId, TranslationKey> = {
   orbit: 'settings.homeLayout.orbitShort',
+  rolling: 'settings.homeLayout.rollingShort',
   float: 'settings.homeLayout.floatShort',
   coresense: 'settings.homeLayout.coresenseShort',
   xmode: 'settings.homeLayout.xmodeShort'
@@ -926,7 +927,7 @@ function PersonalizePage({
           </SetupPanel>
 
           <SetupPanel icon={<LayoutTemplate size={16} />} title={t('settings.homeLayout.title')}>
-            <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+            <div className="grid grid-cols-2 gap-2 lg:grid-cols-5">
               {HOME_LAYOUT_OPTIONS.map((option) => {
                 const active = homeLayout === option.id
                 return (
@@ -1164,13 +1165,59 @@ function HomePreview({
       )}
       <div className="absolute inset-0 bg-gradient-to-t from-base via-base/55 to-base/25" />
       <div className={`absolute inset-0 ${uiDensity === 'compact' ? 'p-[3%]' : 'p-[4%]'}`}>
-        <div className="mx-auto flex w-fit items-center gap-3 rounded-full bg-black/45 px-4 py-1.5 text-[7px] text-white/50">
+        <div
+          className={`${
+            homeLayout === 'rolling'
+              ? 'ml-auto bg-transparent px-0'
+              : 'mx-auto bg-black/45 px-4'
+          } flex w-fit items-center gap-3 rounded-full py-1.5 text-[7px] text-white/50`}
+        >
           <span className="rounded-full bg-accent px-2 py-0.5 font-bold text-black">Home</span>
           <span>Library</span>
           <span>Store</span>
           <span>Settings</span>
         </div>
-        {homeLayout === 'xmode' ? (
+        {homeLayout === 'rolling' ? (
+          <div className="mt-[8%] flex h-[68%] flex-col justify-center">
+            <span className="mb-[2%] text-[7px] font-black uppercase tracking-[0.18em] text-white/50">
+              Jump Back
+            </span>
+            <div className="flex min-h-0 flex-1 items-start gap-2 overflow-hidden">
+              <div className="h-full w-[58%] shrink-0 overflow-hidden rounded-[calc(var(--radius-card)*0.55)] border border-accent/65 shadow-glow">
+                {featured && (
+                  <GameImage
+                    gameId={featured.id}
+                    name={featured.name}
+                    orientation="horizontal"
+                    previewUrl={previewUrl(featured)}
+                    fit="cover"
+                    className="h-full w-full object-cover"
+                  />
+                )}
+              </div>
+              {cards.slice(1, 4).map((game, index) => (
+                <div
+                  key={game?.id ?? index}
+                  className="h-full aspect-[2/3] shrink-0 overflow-hidden rounded-[calc(var(--radius-card)*0.45)] border border-white/10 bg-surface-2"
+                >
+                  {game && (
+                    <GameImage
+                      gameId={game.id}
+                      name={game.name}
+                      orientation="vertical"
+                      previewUrl={game.metadata.artwork?.vertical?.[0]}
+                      fit="cover"
+                      className="h-full w-full object-cover"
+                    />
+                  )}
+                </div>
+              ))}
+            </div>
+            <span className="mt-[2%] max-w-[58%] truncate text-[8px] font-bold">
+              {featured?.name ?? 'Your latest adventure'}
+            </span>
+          </div>
+        ) : homeLayout === 'xmode' ? (
           <div className="mt-[3.5%] flex h-[74%] flex-col gap-[5%]">
             <div className="mx-auto h-[12%] w-[58%] rounded-full border border-white/10 bg-black/35" />
             <div

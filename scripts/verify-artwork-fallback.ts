@@ -247,6 +247,16 @@ assert.equal(
   'canonical Steam library hero key art must beat a larger gameplay screenshot'
 )
 assert.equal(automaticArtworkQuality(1920, 1080, 'horizontal'), 'high')
+assert.equal(automaticArtworkQuality(600, 200, 'logo'), 'high')
+assert.equal(
+  automaticArtworkQuality(512, 512, 'logo'),
+  'low',
+  'a square app icon must not satisfy the game-logo quality target'
+)
+assert.ok(
+  automaticArtworkScore(900, 300, 'logo') > automaticArtworkScore(1024, 1024, 'logo'),
+  'a title wordmark must outrank a larger square app icon for a logo slot'
+)
 
 assert.equal(
   canonicalArtworkTitle("Assassin's Creed II"),
@@ -321,9 +331,12 @@ assert.deepEqual(
 
 const publicPoster = publicSteamArtworkUrls(33230, 'vertical')[0][0]
 const publicHero = publicSteamArtworkUrls(33230, 'horizontal')[0][0]
+const publicLogo = publicSteamArtworkUrls(33230, 'logo')[0][0]
 assert.equal(isPublicSteamArtworkUrl(publicPoster), true)
 assert.equal(isPublicSteamArtworkUrl(publicHero), true)
+assert.equal(isPublicSteamArtworkUrl(publicLogo), true)
 assert.match(publicHero, /library_hero\.jpg$/)
+assert.match(publicLogo, /library_logo\.png$/)
 assert.ok(
   publicSteamArtworkUrls(33230, 'horizontal').flat().some((url) =>
     url.includes('/storepagebackground/app/33230')

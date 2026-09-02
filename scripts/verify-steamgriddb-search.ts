@@ -1,9 +1,75 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import {
   selectSteamGridDbGame,
   steamGridDbSearchKey,
   stripSteamGridDbEditionWords
 } from '../src/main/steamGridDbSearch.ts'
+import {
+  normalizeSteamGridDbToken,
+  SteamGridDbCredentialVault,
+  steamGridDbTokenExpiresAt
+} from '../src/main/steamGridDbCredential.ts'
+
+function jwt(payload: Record<string, unknown>): string {
+  return `header.${Buffer.from(JSON.stringify(payload)).toString('base64url')}.signature`
+}
+
+assert.equal(steamGridDbTokenExpiresAt(jwt({ exp: 1_800_000_000 })), 1_800_000_000_000)
+assert.equal(steamGridDbTokenExpiresAt(jwt({ exp: '1800000000' })), undefined)
+assert.equal(steamGridDbTokenExpiresAt('opaque-api-key'), undefined)
+assert.equal(normalizeSteamGridDbToken('  personal-token  '), 'personal-token')
+assert.throws(() => normalizeSteamGridDbToken('bad\ntoken'))
+
+let encryptionAvailable = false
+let encryptedToken: string | undefined
+let legacyToken: unknown = 'legacy-personal-token'
+const credentialVault = new SteamGridDbCredentialVault({
+  encryptionAvailable: () => encryptionAvailable,
+  encrypt: (value) => `encrypted:${value}`,
+  decrypt: (payload) => payload.replace(/^encrypted:/, ''),
+  readEncrypted: () => encryptedToken,
+  writeEncrypted: (payload) => {
+    encryptedToken = payload
+  },
+  clearEncrypted: () => {
+    encryptedToken = undefined
+  },
+  readLegacy: () => legacyToken,
+  clearLegacy: () => {
+    legacyToken = undefined
+  }
+})
+
+assert.equal(credentialVault.getToken(), undefined)
+assert.equal(legacyToken, 'legacy-personal-token')
+encryptionAvailable = true
+assert.equal(credentialVault.getToken(), 'legacy-personal-token')
+assert.equal(encryptedToken, 'encrypted:legacy-personal-token')
+assert.equal(legacyToken, undefined)
+credentialVault.setToken('replacement-token')
+assert.equal(credentialVault.getToken(), 'replacement-token')
+credentialVault.clear()
+assert.equal(credentialVault.isConfigured(), false)
+
+const settingsStoreSource = readFileSync(
+  new URL('../src/main/settingsStore.ts', import.meta.url),
+  'utf8'
+)
+const settingsViewSource = readFileSync(
+  new URL('../src/renderer/src/views/Settings/SettingsView.tsx', import.meta.url),
+  'utf8'
+)
+const sharedIpcSource = readFileSync(new URL('../src/shared/ipc.ts', import.meta.url), 'utf8')
+const credentialSource = readFileSync(
+  new URL('../src/main/steamGridDbCredentials.ts', import.meta.url),
+  'utf8'
+)
+assert.match(settingsStoreSource, /delete snapshot\[LEGACY_STEAM_GRID_DB_TOKEN\]/)
+assert.doesNotMatch(settingsViewSource, /settings\.steamGridDbApiKey/)
+assert.doesNotMatch(sharedIpcSource, /steamGridDbApiKey\?: string/)
+assert.match(credentialSource, /safeStorage\.encryptString/)
+assert.match(credentialSource, /safeStorage\.decryptString/)
 
 const forzaResults = [
   { id: 1, name: 'Forza' },

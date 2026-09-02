@@ -120,7 +120,8 @@ function playedGame(game: PlayedTitle): ImportedGame | undefined {
       artwork: {
         vertical: [...vertical, ...(icon ? [icon] : []), ...fallbackConceptImages],
         horizontal: [...horizontal, ...fallbackConceptImages],
-        icon: icon ? [icon] : fallbackConceptImages
+        icon: icon ? [icon] : fallbackConceptImages,
+        logo: []
       }
     }
   }
@@ -140,7 +141,8 @@ function mergeMetadata(left: GameMetadata, right: GameMetadata): GameMetadata {
     artwork: {
       vertical: mergeImages(left.artwork?.vertical, right.artwork?.vertical),
       horizontal: mergeImages(left.artwork?.horizontal, right.artwork?.horizontal),
-      icon: mergeImages(left.artwork?.icon, right.artwork?.icon)
+      icon: mergeImages(left.artwork?.icon, right.artwork?.icon),
+      logo: mergeImages(left.artwork?.logo, right.artwork?.logo)
     }
   }
 }

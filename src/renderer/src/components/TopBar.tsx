@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import { Home, LayoutGrid, Library, ShoppingBag, Settings, UsersRound } from 'lucide-react'
 import {
@@ -35,6 +35,9 @@ const DOCK_SCALE: Record<DockSize, number> = {
   large: 1.16
 }
 
+const TOP_BAR_AVATAR_SIZE = 36
+const ROLLING_DOCK_AVATAR_GAP = 16
+
 function effectiveDockMotion(dockMotion: DockMotion, reduceMotion: boolean): DockMotion {
   return reduceMotion ? 'calm' : dockMotion
 }
@@ -52,9 +55,15 @@ export function TopBar(): JSX.Element {
   const dockTheme = usePreferencesStore((state) => state.dockTheme)
   const dockSize = usePreferencesStore((state) => state.dockSize)
   const dockMotion = usePreferencesStore((state) => state.dockMotion)
+  const homeLayout = usePreferencesStore((state) => state.homeLayout)
   const reduceMotion = Boolean(useReducedMotion())
   const unreadCount = useDiscordChatStore((state) => totalDiscordUnread(state.unreadByUser))
+  const headerRef = useRef<HTMLElement>(null)
   const navRef = useRef<HTMLElement>(null)
+  const [topBarGeometry, setTopBarGeometry] = useState({
+    avatarOffset: 0,
+    dockOffset: 0
+  })
 
   useEffect(() => {
     if (
@@ -82,24 +91,82 @@ export function TopBar(): JSX.Element {
   const activeLift = motionMode === 'lively' ? -3 : motionMode === 'standard' ? -1 : 0
   const activeScale = motionMode === 'lively' ? 1.09 : motionMode === 'standard' ? 1.045 : 1
   const idleOpacity = motionMode === 'lively' ? 0.66 : 0.72
+  const rollingHome = mainView === 'home' && homeLayout === 'rolling'
+
+  useLayoutEffect(() => {
+    const header = headerRef.current
+    const dock = navRef.current
+    if (!header || !dock) return
+
+    const updateGeometry = (): void => {
+      const headerStyle = getComputedStyle(header)
+      const paddingLeft = Number.parseFloat(headerStyle.paddingLeft) || 0
+      const paddingRight = Number.parseFloat(headerStyle.paddingRight) || 0
+      const headerWidth = header.clientWidth
+      const avatarLeft = headerWidth - paddingRight - TOP_BAR_AVATAR_SIZE
+      const dockWidth = dock.offsetWidth * DOCK_SCALE[dockSize]
+      const dockCenter = avatarLeft - ROLLING_DOCK_AVATAR_GAP - dockWidth / 2
+
+      setTopBarGeometry({
+        avatarOffset: avatarLeft - paddingLeft,
+        // Individual CSS scale composes before the transform translation, so
+        // compensate here to keep the visual dock edge at the measured gap.
+        dockOffset: (dockCenter - headerWidth / 2) / DOCK_SCALE[dockSize]
+      })
+    }
+
+    updateGeometry()
+    const observer = new ResizeObserver(updateGeometry)
+    observer.observe(header)
+    observer.observe(dock)
+    window.addEventListener('resize', updateGeometry)
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', updateGeometry)
+    }
+  }, [dockSize, showFriendsHub, showStoreTab])
 
   return (
-    <header className="absolute inset-x-0 top-0 z-40 flex h-16 items-center px-4 xl:px-8">
-      <ProfileAvatar
-        avatarId={profileAvatar}
-        steamAvatarUrl={account?.avatarUrl}
-        customAvatarUrl={customAvatarUrl}
-        label={t(
-          PROFILE_AVATAR_OPTIONS.find((option) => option.id === profileAvatar)?.labelKey ??
-            'settings.avatar.orbit'
-        )}
-        className="relative z-10 h-9 w-9 text-base"
-      />
+    <header
+      ref={headerRef}
+      data-top-bar-layout={rollingHome ? 'rolling' : 'standard'}
+      className="absolute inset-x-0 top-0 z-40 h-16 px-4 xl:px-8"
+    >
+      <div
+        data-top-bar-avatar
+        className={`absolute left-4 top-1/2 z-10 will-change-transform xl:left-8 ${
+          reduceMotion
+            ? ''
+            : 'transition-transform duration-[480ms] ease-[cubic-bezier(0.22,1,0.36,1)]'
+        }`}
+        style={{
+          translate: '0 -50%',
+          transform: `translate3d(${rollingHome ? topBarGeometry.avatarOffset : 0}px, 0, 0)`
+        }}
+      >
+        <ProfileAvatar
+          avatarId={profileAvatar}
+          steamAvatarUrl={account?.avatarUrl}
+          customAvatarUrl={customAvatarUrl}
+          label={t(
+            PROFILE_AVATAR_OPTIONS.find((option) => option.id === profileAvatar)?.labelKey ??
+              'settings.avatar.orbit'
+          )}
+          className="h-9 w-9 text-base"
+        />
+      </div>
 
       <div
-        className={`absolute left-1/2 top-1/2 z-10 origin-center ${reduceMotion ? '' : 'transition-transform duration-300'}`}
+        data-top-bar-dock
+        className={`absolute left-1/2 top-1/2 z-10 origin-center will-change-transform ${
+          reduceMotion
+            ? ''
+            : 'transition-[transform,scale] duration-[480ms] ease-[cubic-bezier(0.22,1,0.36,1)]'
+        }`}
         style={{
-          transform: `translate(-50%, -50%) scale(${DOCK_SCALE[dockSize]})`
+          translate: '-50% -50%',
+          scale: String(DOCK_SCALE[dockSize]),
+          transform: `translate3d(${rollingHome ? topBarGeometry.dockOffset : 0}px, 0, 0)`
         }}
       >
         <motion.nav

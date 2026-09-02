@@ -64,6 +64,7 @@ export type LibretroThumbnailFolder = 'Named_Boxarts' | 'Named_Snaps' | 'Named_T
 export interface DiscoveredArtwork {
   vertical: string[]
   horizontal: string[]
+  logo: string[]
 }
 
 interface SteamSearchItem {
@@ -81,6 +82,15 @@ const storeCache = new Map<string, CachedDiscovery<DiscoveredArtwork>>()
 const storeInFlight = new Map<string, Promise<ArtworkNetworkAttempt<DiscoveredArtwork>>>()
 const libretroIndexCache = new Map<string, CachedDiscovery<string[]>>()
 const libretroIndexInFlight = new Map<string, Promise<ArtworkNetworkAttempt<string[]>>>()
+let discoveryCacheGeneration = 0
+
+export function clearArtworkDiscoveryCaches(): void {
+  discoveryCacheGeneration++
+  storeCache.clear()
+  storeInFlight.clear()
+  libretroIndexCache.clear()
+  libretroIndexInFlight.clear()
+}
 
 function cacheDuration<T>(result: ArtworkNetworkAttempt<T>): number {
   return result.state === 'success' ? SUCCESS_CACHE_MS : MISSING_CACHE_MS
@@ -131,6 +141,12 @@ function steamArtwork(appId: number): DiscoveredArtwork {
       `https://store.akamai.steamstatic.com/images/storepagebackground/app/${appId}`,
       `${root}/header.jpg`,
       `https://cdn.cloudflare.steamstatic.com/steam/apps/${appId}/header.jpg`
+    ],
+    logo: [
+      `${root}/library_logo.png`,
+      `${root}/logo.png`,
+      `https://cdn.cloudflare.steamstatic.com/steam/apps/${appId}/library_logo.png`,
+      `https://cdn.cloudflare.steamstatic.com/steam/apps/${appId}/logo.png`
     ]
   }
 }
@@ -153,6 +169,7 @@ export async function discoverExactStoreArtwork(
   const active = storeInFlight.get(key)
   if (active) return active
 
+  const generation = discoveryCacheGeneration
   const request = runArtworkNetworkAttempt<DiscoveredArtwork>(
     'artwork-discovery:store.steampowered.com',
     async () => {
@@ -192,12 +209,14 @@ export async function discoverExactStoreArtwork(
     }
   )
     .then((result) => {
-      if (result.state !== 'unavailable') {
+      if (generation === discoveryCacheGeneration && result.state !== 'unavailable') {
         storeCache.set(key, { expiresAt: Date.now() + cacheDuration(result), result })
       }
       return result
     })
-    .finally(() => storeInFlight.delete(key))
+    .finally(() => {
+      if (storeInFlight.get(key) === request) storeInFlight.delete(key)
+    })
   storeInFlight.set(key, request)
   return request
 }
@@ -244,6 +263,7 @@ async function fetchLibretroIndex(
   const active = libretroIndexInFlight.get(key)
   if (active) return active
 
+  const generation = discoveryCacheGeneration
   const request = runArtworkNetworkAttempt<string[]>('artwork-discovery:thumbnails.libretro.com', async () => {
     const url = `https://thumbnails.libretro.com/${encodeURIComponent(playlist)}/${folder}/`
     const response = await fetchWithElectronNet(url, {
@@ -261,12 +281,14 @@ async function fetchLibretroIndex(
     return files.length > 0 ? { state: 'success', value: files } : { state: 'missing' }
   })
     .then((result) => {
-      if (result.state !== 'unavailable') {
+      if (generation === discoveryCacheGeneration && result.state !== 'unavailable') {
         libretroIndexCache.set(key, { expiresAt: Date.now() + cacheDuration(result), result })
       }
       return result
     })
-    .finally(() => libretroIndexInFlight.delete(key))
+    .finally(() => {
+      if (libretroIndexInFlight.get(key) === request) libretroIndexInFlight.delete(key)
+    })
   libretroIndexInFlight.set(key, request)
   return request
 }

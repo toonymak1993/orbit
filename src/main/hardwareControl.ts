@@ -5,11 +5,27 @@ import { unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  HARDWARE_CONTROL_BUTTONS,
+  HARDWARE_CONTROL_HOLD_SECONDS,
   type HardwareControlButton,
   type HardwareControlStatus,
   type OrbitSettings
 } from '@shared/ipc'
 import { createDualSenseMonitorScript } from './dualsenseMonitor'
+
+export const HARDWARE_MONITOR_RESTART_BASE_MS = 750
+export const HARDWARE_MONITOR_RESTART_MAX_MS = 30_000
+export const HARDWARE_MONITOR_START_TIMEOUT_MS = 10_000
+export const HARDWARE_MONITOR_HEARTBEAT_TIMEOUT_MS = 20_000
+export const HARDWARE_MONITOR_STABLE_MS = 30_000
+
+export function hardwareMonitorRestartDelayMs(attempt: number): number {
+  const normalizedAttempt = Math.max(0, Math.min(16, Math.trunc(attempt)))
+  return Math.min(
+    HARDWARE_MONITOR_RESTART_MAX_MS,
+    HARDWARE_MONITOR_RESTART_BASE_MS * 2 ** normalizedAttempt
+  )
+}
 
 type HardwareControlSettings = Pick<
   OrbitSettings,
@@ -133,6 +149,7 @@ const MONITOR_SCRIPT = [
   '$releaseGraceMilliseconds = 180',
   '$lastConnectedCount = -1',
   '$clock = [Diagnostics.Stopwatch]::StartNew()',
+  '$lastHeartbeatAt = -5000L',
   '',
   'while ($true) {',
   '  $now = $clock.ElapsedMilliseconds',
@@ -188,16 +205,48 @@ const MONITOR_SCRIPT = [
   '    [Console]::WriteLine("controllers:" + $connectedCount)',
   '    [Console]::Out.Flush()',
   '  }',
+  '  if (($now - $lastHeartbeatAt) -ge 5000) {',
+  '    $lastHeartbeatAt = $now',
+  '    [Console]::WriteLine("heartbeat")',
+  '    [Console]::Out.Flush()',
+  '  }',
   '',
   '  Start-Sleep -Milliseconds 40',
   '}'
 ].join('\n')
 
-function removeMonitorScript(scriptPath: string): void {
-  void unlink(scriptPath).catch((error: NodeJS.ErrnoException) => {
+const WINDOWS_POWERSHELL_PATH = join(
+  process.env.SystemRoot ?? 'C:\\Windows',
+  'System32',
+  'WindowsPowerShell',
+  'v1.0',
+  'powershell.exe'
+)
+
+async function removeMonitorScript(scriptPath: string): Promise<void> {
+  await unlink(scriptPath).catch((error: NodeJS.ErrnoException) => {
     if (error.code !== 'ENOENT') {
       console.warn('[hardware-control] could not remove controller monitor script:', error.message)
     }
+  })
+}
+
+function waitForMonitorExit(
+  child: ChildProcessWithoutNullStreams,
+  timeoutMs = 2_000
+): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve()
+  return new Promise((resolve) => {
+    let timer: NodeJS.Timeout | null = null
+    const finish = (): void => {
+      if (timer) clearTimeout(timer)
+      child.removeListener('close', finish)
+      child.removeListener('error', finish)
+      resolve()
+    }
+    child.once('close', finish)
+    child.once('error', finish)
+    timer = setTimeout(finish, timeoutMs)
   })
 }
 
@@ -209,10 +258,37 @@ function settingsSignature(settings: HardwareControlSettings): string {
   ].join(':')
 }
 
+function normalizedHardwareControlSettings(settings: OrbitSettings): HardwareControlSettings {
+  const unsafe = settings as unknown as Partial<Record<keyof OrbitSettings, unknown>>
+  const button = HARDWARE_CONTROL_BUTTONS.includes(
+    unsafe.hardwareControlButton as HardwareControlButton
+  )
+    ? (unsafe.hardwareControlButton as HardwareControlButton)
+    : 'menu'
+  const holdSeconds = HARDWARE_CONTROL_HOLD_SECONDS.includes(
+    unsafe.hardwareControlHoldSeconds as (typeof HARDWARE_CONTROL_HOLD_SECONDS)[number]
+  )
+    ? (unsafe.hardwareControlHoldSeconds as (typeof HARDWARE_CONTROL_HOLD_SECONDS)[number])
+    : 2
+  return {
+    hardwareControlEnabled: unsafe.hardwareControlEnabled === true,
+    hardwareControlButton: button,
+    hardwareControlHoldSeconds: holdSeconds
+  }
+}
+
 export class HardwareControlWatcher extends EventEmitter {
   private monitor: ChildProcessWithoutNullStreams | null = null
   private monitorScriptPath: string | null = null
   private monitorGeneration = 0
+  private monitorLaunchPending = false
+  private restartTimer: NodeJS.Timeout | null = null
+  private startTimer: NodeJS.Timeout | null = null
+  private watchdogTimer: NodeJS.Timeout | null = null
+  private monitorStartedAt = 0
+  private lastMonitorSignalAt = 0
+  private monitorReady = false
+  private restartAttempts = 0
   private settings: HardwareControlSettings
   private signature = ''
   private disposed = false
@@ -232,15 +308,24 @@ export class HardwareControlWatcher extends EventEmitter {
   }
 
   updateSettings(settings: OrbitSettings): void {
-    const next: HardwareControlSettings = {
-      hardwareControlEnabled: settings.hardwareControlEnabled,
-      hardwareControlButton: settings.hardwareControlButton,
-      hardwareControlHoldSeconds: settings.hardwareControlHoldSeconds
-    }
+    const next = normalizedHardwareControlSettings(settings)
     const nextSignature = settingsSignature(next)
     this.settings = next
-    if (nextSignature === this.signature || this.disposed) return
+    if (this.disposed) return
+    if (nextSignature === this.signature) {
+      if (
+        next.hardwareControlEnabled &&
+        process.platform === 'win32' &&
+        !this.monitor &&
+        !this.monitorLaunchPending &&
+        !this.restartTimer
+      ) {
+        this.scheduleRestart(true)
+      }
+      return
+    }
     this.signature = nextSignature
+    this.restartAttempts = 0
     this.stopMonitor()
 
     if (!next.hardwareControlEnabled) {
@@ -265,7 +350,44 @@ export class HardwareControlWatcher extends EventEmitter {
     this.stopMonitor()
   }
 
+  async shutdown(): Promise<void> {
+    if (this.disposed) return
+    const child = this.monitor
+    const scriptPath = this.monitorScriptPath
+    const childExit = child ? waitForMonitorExit(child) : Promise.resolve()
+    this.disposed = true
+    this.stopMonitor()
+    await childExit
+    if (scriptPath) await removeMonitorScript(scriptPath)
+  }
+
+  /** Recreate native controller resources after sleep, unlock, or another
+   * Windows device-session transition. Those transitions can leave an
+   * otherwise live PowerShell process with stale XInput/Raw Input handles. */
+  recover(): void {
+    if (
+      this.disposed ||
+      !this.settings.hardwareControlEnabled ||
+      process.platform !== 'win32'
+    ) {
+      return
+    }
+    this.restartAttempts = 0
+    this.stopMonitor()
+    this.startMonitor()
+  }
+
   private startMonitor(): void {
+    if (
+      this.disposed ||
+      !this.settings.hardwareControlEnabled ||
+      process.platform !== 'win32' ||
+      this.monitor ||
+      this.monitorLaunchPending
+    ) {
+      return
+    }
+    this.monitorLaunchPending = true
     const generation = this.monitorGeneration
     const holdMilliseconds = Math.round(this.settings.hardwareControlHoldSeconds * 1_000)
     const button = this.settings.hardwareControlButton
@@ -283,6 +405,7 @@ export class HardwareControlWatcher extends EventEmitter {
       .replace('__TRIGGER_SIDE__', BUTTON_INPUTS[button].trigger)
       .replace('__HOLD_MILLISECONDS__', String(holdMilliseconds))
     const encoded = Buffer.from(script, 'utf16le').toString('base64')
+    this.monitorLaunchPending = false
     this.launchMonitor(
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
       generation
@@ -297,8 +420,9 @@ export class HardwareControlWatcher extends EventEmitter {
     try {
       await writeFile(scriptPath, script, { encoding: 'utf8', flag: 'wx', mode: 0o600 })
     } catch (error) {
-      removeMonitorScript(scriptPath)
+      void removeMonitorScript(scriptPath)
       if (this.disposed || generation !== this.monitorGeneration) return
+      this.monitorLaunchPending = false
       console.warn(
         '[hardware-control] could not prepare DualSense controller monitor:',
         error instanceof Error ? error.message : error
@@ -308,14 +432,16 @@ export class HardwareControlWatcher extends EventEmitter {
         connectedControllers: 0,
         reason: 'monitor-failed'
       })
+      this.scheduleRestart()
       return
     }
 
     if (this.disposed || generation !== this.monitorGeneration) {
-      removeMonitorScript(scriptPath)
+      void removeMonitorScript(scriptPath)
       return
     }
 
+    this.monitorLaunchPending = false
     this.launchMonitor(
       [
         '-NoLogo',
@@ -333,15 +459,17 @@ export class HardwareControlWatcher extends EventEmitter {
 
   private launchMonitor(args: string[], generation: number, scriptPath?: string): void {
     if (this.disposed || generation !== this.monitorGeneration) {
-      if (scriptPath) removeMonitorScript(scriptPath)
+      if (scriptPath) void removeMonitorScript(scriptPath)
       return
     }
 
+    this.monitorLaunchPending = false
+
     let child: ChildProcessWithoutNullStreams
     try {
-      child = spawn('powershell.exe', args, { windowsHide: true })
+      child = spawn(WINDOWS_POWERSHELL_PATH, args, { windowsHide: true })
     } catch (error) {
-      if (scriptPath) removeMonitorScript(scriptPath)
+      if (scriptPath) void removeMonitorScript(scriptPath)
       console.warn(
         '[hardware-control] controller monitor failed to start:',
         error instanceof Error ? error.message : error
@@ -351,19 +479,52 @@ export class HardwareControlWatcher extends EventEmitter {
         connectedControllers: 0,
         reason: 'monitor-failed'
       })
+      this.scheduleRestart()
       return
     }
 
     this.monitor = child
     this.monitorScriptPath = scriptPath ?? null
+    this.monitorStartedAt = Date.now()
+    this.lastMonitorSignalAt = this.monitorStartedAt
+    this.monitorReady = false
+    this.startTimer = setTimeout(() => {
+      if (this.monitor !== child || this.monitorReady) return
+      console.warn('[hardware-control] controller monitor did not become ready in time')
+      if (!child.killed) child.kill()
+    }, HARDWARE_MONITOR_START_TIMEOUT_MS)
+    this.watchdogTimer = setInterval(() => {
+      if (
+        this.monitor !== child ||
+        Date.now() - this.lastMonitorSignalAt <= HARDWARE_MONITOR_HEARTBEAT_TIMEOUT_MS
+      ) {
+        return
+      }
+      console.warn('[hardware-control] controller monitor stopped responding; restarting')
+      if (!child.killed) child.kill()
+    }, Math.floor(HARDWARE_MONITOR_HEARTBEAT_TIMEOUT_MS / 2))
     child.stdout.setEncoding('utf8')
     let stdoutBuffer = ''
 
     child.stdout.on('data', (chunk: string) => {
+      if (this.monitor !== child) return
       stdoutBuffer += chunk
       const lines = stdoutBuffer.split(/\r?\n/)
       stdoutBuffer = lines.pop() ?? ''
-      for (const line of lines) this.handleMonitorLine(line.trim())
+      for (const line of lines) {
+        const normalizedLine = line.trim()
+        if (normalizedLine === 'heartbeat') {
+          this.lastMonitorSignalAt = Date.now()
+          if (
+            this.monitorReady &&
+            this.restartAttempts > 0 &&
+            this.lastMonitorSignalAt - this.monitorStartedAt >= HARDWARE_MONITOR_STABLE_MS
+          ) {
+            this.restartAttempts = 0
+          }
+        }
+        this.handleMonitorLine(normalizedLine)
+      }
     })
 
     child.stderr.setEncoding('utf8')
@@ -375,47 +536,87 @@ export class HardwareControlWatcher extends EventEmitter {
     })
 
     child.once('error', (error) => {
-      if (scriptPath) removeMonitorScript(scriptPath)
+      if (scriptPath) void removeMonitorScript(scriptPath)
       if (this.monitor !== child) return
-      this.monitor = null
-      this.monitorScriptPath = null
       console.warn('[hardware-control] controller monitor failed to start:', error.message)
-      this.setStatus({
-        state: 'unavailable',
-        connectedControllers: 0,
-        reason: 'monitor-failed'
-      })
+      this.handleMonitorEnd(child, scriptPath)
     })
 
     child.once('exit', (code, signal) => {
-      if (scriptPath) removeMonitorScript(scriptPath)
+      if (scriptPath) void removeMonitorScript(scriptPath)
       if (this.monitor !== child) return
-      this.monitor = null
-      this.monitorScriptPath = null
-      if (this.disposed || !this.settings.hardwareControlEnabled) return
       console.warn(
         `[hardware-control] controller monitor exited (code ${code ?? 'none'}, signal ${signal ?? 'none'})`
       )
-      this.setStatus({
-        state: 'unavailable',
-        connectedControllers: 0,
-        reason: 'monitor-failed'
-      })
+      this.handleMonitorEnd(child, scriptPath)
     })
   }
 
   private stopMonitor(): void {
     this.monitorGeneration += 1
+    this.monitorLaunchPending = false
+    if (this.restartTimer) clearTimeout(this.restartTimer)
+    this.restartTimer = null
+    this.clearMonitorTimers()
     const child = this.monitor
     this.monitor = null
     const scriptPath = this.monitorScriptPath
     this.monitorScriptPath = null
     if (child && !child.killed) child.kill()
-    if (scriptPath && !child) removeMonitorScript(scriptPath)
+    if (scriptPath) void removeMonitorScript(scriptPath)
+  }
+
+  private handleMonitorEnd(
+    child: ChildProcessWithoutNullStreams,
+    scriptPath?: string
+  ): void {
+    if (this.monitor !== child) return
+    this.monitor = null
+    this.monitorScriptPath = null
+    this.monitorReady = false
+    this.clearMonitorTimers()
+    if (scriptPath) void removeMonitorScript(scriptPath)
+    if (this.disposed || !this.settings.hardwareControlEnabled) return
+    this.setStatus({
+      state: 'unavailable',
+      connectedControllers: 0,
+      reason: 'monitor-failed'
+    })
+    this.scheduleRestart()
+  }
+
+  private scheduleRestart(immediate = false): void {
+    if (
+      this.disposed ||
+      !this.settings.hardwareControlEnabled ||
+      process.platform !== 'win32' ||
+      this.monitor ||
+      this.monitorLaunchPending ||
+      this.restartTimer
+    ) {
+      return
+    }
+    const delay = immediate ? 0 : hardwareMonitorRestartDelayMs(this.restartAttempts)
+    if (!immediate) this.restartAttempts += 1
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = null
+      this.startMonitor()
+    }, delay)
+  }
+
+  private clearMonitorTimers(): void {
+    if (this.startTimer) clearTimeout(this.startTimer)
+    if (this.watchdogTimer) clearInterval(this.watchdogTimer)
+    this.startTimer = null
+    this.watchdogTimer = null
   }
 
   private handleMonitorLine(line: string): void {
+    if (line === 'heartbeat') return
     if (line === 'ready') {
+      this.monitorReady = true
+      if (this.startTimer) clearTimeout(this.startTimer)
+      this.startTimer = null
       this.setStatus({ state: 'ready', connectedControllers: 0 })
       return
     }

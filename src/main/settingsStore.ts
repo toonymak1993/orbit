@@ -11,6 +11,8 @@ const defaults: OrbitSettings = {
   customLibraries: [],
   excludedGameIds: [],
   backdropIntensity: 'balanced',
+  homeBackdropMode: 'focus',
+  homeBackdropMotion: 'drift',
   homeCardBubbleEffect: true,
   startupAnimationMode: 'orbit',
   dockTheme: 'standard',
@@ -45,6 +47,7 @@ export const settingsStore = new Store<OrbitSettings>({
 })
 
 const LEGACY_RETRO_ACHIEVEMENTS_API_KEY = 'retroAchievementsWebApiKey'
+const LEGACY_STEAM_GRID_DB_TOKEN = 'steamGridDbApiKey'
 const legacySettingsStore = settingsStore as unknown as Store<Record<string, unknown>>
 
 /**
@@ -55,6 +58,7 @@ const legacySettingsStore = settingsStore as unknown as Store<Record<string, unk
 export function publicSettingsSnapshot(): OrbitSettings {
   const snapshot = { ...legacySettingsStore.store }
   delete snapshot[LEGACY_RETRO_ACHIEVEMENTS_API_KEY]
+  delete snapshot[LEGACY_STEAM_GRID_DB_TOKEN]
   return snapshot as unknown as OrbitSettings
 }
 
@@ -64,4 +68,12 @@ export function readLegacyRetroAchievementsApiKey(): unknown {
 
 export function clearLegacyRetroAchievementsApiKey(): void {
   legacySettingsStore.delete(LEGACY_RETRO_ACHIEVEMENTS_API_KEY)
+}
+
+export function readLegacySteamGridDbToken(): unknown {
+  return legacySettingsStore.get(LEGACY_STEAM_GRID_DB_TOKEN)
+}
+
+export function clearLegacySteamGridDbToken(): void {
+  legacySettingsStore.delete(LEGACY_STEAM_GRID_DB_TOKEN)
 }

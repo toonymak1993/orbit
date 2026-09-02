@@ -2,6 +2,21 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import {
+  launchNsisInstaller,
+  nsisInstallerArguments,
+  quoteWindowsProcessArgument
+} from '../src/main/nsisInstallerLaunch.ts'
+import {
+  PENDING_INSTALL_EXIT_GRACE_MS,
+  PENDING_INSTALL_LAUNCH_GRACE_MS,
+  PENDING_INSTALL_MAX_RUNTIME_MS,
+  isPendingInstallConfirmation,
+  isPendingInstallJournal,
+  shouldWaitForPendingInstall,
+  type PendingInstallConfirmation,
+  type PendingInstallJournal
+} from '../src/main/appUpdateInstallJournal.ts'
+import {
   compareAppVersions,
   isValidAppUpdateContentRange,
   parseGitHubAppUpdateRelease,
@@ -43,6 +58,111 @@ assert.equal(isValidAppUpdateContentRange('bytes 500-999/1000', 500, 1000), true
 assert.equal(isValidAppUpdateContentRange('bytes 499-999/1000', 500, 1000), false)
 assert.equal(isValidAppUpdateContentRange('bytes 500-999/1001', 500, 1000), false)
 assert.equal(isValidAppUpdateContentRange('bytes */1000', 500, 1000), false)
+assert.deepEqual(
+  nsisInstallerArguments({
+    installDirectory: 'C:\\Users\\Orbit\\App',
+    packagePath: 'C:\\Temp\\orbit-package.7z'
+  }),
+  [
+    '--updated',
+    '/S',
+    '--force-run',
+    '/D=C:\\Users\\Orbit\\App',
+    '--package-file=C:\\Temp\\orbit-package.7z'
+  ]
+)
+assert.equal(quoteWindowsProcessArgument('--updated'), '--updated')
+assert.equal(
+  quoteWindowsProcessArgument('/D=C:\\Program Files\\ORBIT\\'),
+  '"/D=C:\\Program Files\\ORBIT\\\\"'
+)
+await assert.rejects(
+  launchNsisInstaller({ installerPath: 'relative-installer.exe' }),
+  /must be absolute/
+)
+await assert.rejects(
+  launchNsisInstaller({ installerPath: resolve(root, 'missing-update-installer.exe') }),
+  /ENOENT|not found/i
+)
+const confirmedChild = await launchNsisInstaller({ installerPath: process.execPath })
+assert.ok(confirmedChild.processId)
+
+const pendingCreatedAt = Date.now()
+const pendingJournal: PendingInstallJournal = {
+  targetVersion: '9.9.9',
+  createdAt: pendingCreatedAt,
+  transactionId: 'update-transaction',
+  phase: 'launching'
+}
+const pendingConfirmation: PendingInstallConfirmation = {
+  transactionId: pendingJournal.transactionId,
+  installerPath: 'C:\\Temp\\ORBIT-Setup.exe',
+  processId: 4242,
+  startedAt: pendingCreatedAt + 1_000
+}
+assert.equal(isPendingInstallJournal(pendingJournal), true)
+assert.equal(isPendingInstallJournal({ ...pendingJournal, transactionId: '' }), false)
+assert.equal(isPendingInstallConfirmation(pendingConfirmation), true)
+assert.equal(
+  shouldWaitForPendingInstall(
+    pendingJournal,
+    undefined,
+    false,
+    false,
+    pendingCreatedAt + 1_000
+  ),
+  true
+)
+assert.equal(
+  shouldWaitForPendingInstall(
+    pendingJournal,
+    undefined,
+    false,
+    false,
+    pendingCreatedAt + PENDING_INSTALL_LAUNCH_GRACE_MS
+  ),
+  false
+)
+assert.equal(
+  shouldWaitForPendingInstall(
+    pendingJournal,
+    undefined,
+    false,
+    true,
+    pendingCreatedAt + PENDING_INSTALL_LAUNCH_GRACE_MS
+  ),
+  true
+)
+assert.equal(
+  shouldWaitForPendingInstall(
+    pendingJournal,
+    pendingConfirmation,
+    true,
+    false,
+    pendingCreatedAt + PENDING_INSTALL_MAX_RUNTIME_MS - 1
+  ),
+  true
+)
+assert.equal(
+  shouldWaitForPendingInstall(
+    pendingJournal,
+    pendingConfirmation,
+    false,
+    false,
+    pendingConfirmation.startedAt + PENDING_INSTALL_EXIT_GRACE_MS
+  ),
+  false
+)
+assert.equal(
+  shouldWaitForPendingInstall(
+    pendingJournal,
+    pendingConfirmation,
+    true,
+    true,
+    pendingCreatedAt + PENDING_INSTALL_MAX_RUNTIME_MS
+  ),
+  false
+)
 
 const stable = parseGitHubAppUpdateRelease(release('1.2.3'), 'stable')
 assert.equal(stable?.version, '1.2.3')
@@ -103,10 +223,56 @@ const appUpdateService = readFileSync(resolve(root, 'src/main/appUpdateService.t
 assert.match(appUpdateService, /isValidAppUpdateContentRange/)
 assert.match(appUpdateService, /DOWNLOAD_STALL_TIMEOUT_MS/)
 assert.match(appUpdateService, /pending-install\.json\.tmp|pendingInstallTempPath/)
+assert.match(appUpdateService, /pending-install-confirmed\.json/)
 assert.match(appUpdateService, /verification: 'verifying'/)
 assert.match(appUpdateService, /autoUpdater\.autoDownload = false/)
 assert.match(appUpdateService, /createUpdaterCancellationToken/)
 assert.match(appUpdateService, /expectedNsisVersion/)
+assert.match(
+  appUpdateService,
+  /snapshot\.stage === 'installing'[\s\S]{0,160}handleInstallLaunchFailure\(\)/
+)
+assert.match(
+  appUpdateService,
+  /installerLaunchConfirmed && !afterConfirmedLaunch/
+)
+assert.doesNotMatch(appUpdateService, /\.quitAndInstall\(/)
+const confirmedNsisLaunch = appUpdateService.indexOf('await launchNsisInstaller')
+const quitAfterNsisLaunch = appUpdateService.indexOf('app.quit()', confirmedNsisLaunch)
+assert.ok(confirmedNsisLaunch >= 0 && quitAfterNsisLaunch > confirmedNsisLaunch)
+assert.match(appUpdateService, /start\(\): Promise<void>/)
+assert.match(appUpdateService, /prepareForInstall\(transactionId\)/)
+assert.match(appUpdateService, /await this\.waitForPendingInstall\(pending\)/)
+const suspensionRenewal = appUpdateService.indexOf('await renewBackgroundAgentSuspension')
+const installerLaunch = appUpdateService.indexOf('await launchNsisInstaller')
+assert.ok(suspensionRenewal >= 0 && installerLaunch > suspensionRenewal)
+
+const backgroundServiceManager = readFileSync(
+  resolve(root, 'src/main/orbitBackgroundServiceManager.ts'),
+  'utf8'
+)
+const startupBarrier = backgroundServiceManager.indexOf('await startupReconciliation')
+const suspensionWait = backgroundServiceManager.indexOf(
+  'await isBackgroundAgentSuspended(this.userDataPath)',
+  startupBarrier
+)
+assert.ok(startupBarrier >= 0 && suspensionWait > startupBarrier)
+assert.match(
+  appUpdateService,
+  /comparison !== null && comparison >= 0[\s\S]{0,700}recoverBackgroundAfterFailedInstall\(pending\.transactionId\)/
+)
+assert.match(
+  appUpdateService,
+  /pending === null[\s\S]{0,500}recoverBackgroundAfterFailedInstall\(\)/
+)
+
+const ipcHandlers = readFileSync(resolve(root, 'src/main/ipcHandlers.ts'), 'utf8')
+const updateStartup = ipcHandlers.indexOf('const appUpdateStartup = appUpdateService.start()')
+const backgroundStartup = ipcHandlers.indexOf(
+  'backgroundServiceManager.start(appUpdateStartup)',
+  updateStartup
+)
+assert.ok(updateStartup >= 0 && backgroundStartup > updateStartup)
 
 const sharedIpc = readFileSync(resolve(root, 'src/shared/ipc.ts'), 'utf8')
 assert.match(sharedIpc, /appUpdateDownload: 'app:update:download'/)

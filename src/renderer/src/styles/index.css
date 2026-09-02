@@ -412,10 +412,10 @@ html[data-orbit-media-keyboard='true'] #root {
 .orbit-dock {
   isolation: isolate;
   transition:
-    background-color 180ms ease,
-    border-color 180ms ease,
-    box-shadow 220ms ease,
-    backdrop-filter 220ms ease;
+    background-color 320ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 320ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 360ms cubic-bezier(0.22, 1, 0.36, 1),
+    backdrop-filter 360ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .orbit-dock::before {
@@ -426,7 +426,7 @@ html[data-orbit-media-keyboard='true'] #root {
   pointer-events: none;
   content: '';
   opacity: 0;
-  transition: opacity 180ms ease;
+  transition: opacity 320ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .orbit-dock-event-glow {
@@ -1327,6 +1327,180 @@ html[data-orbit-media-keyboard='true'] #root {
 
 }
 
+/* Rolling keeps the selected game anchored as a wide leading tile while the
+   remaining library stays in ORBIT's familiar poster format. */
+.rolling-home {
+  --rolling-card-height: clamp(17rem, 53vh, 35.75rem);
+  --rolling-hero-width: min(68vw, calc(var(--rolling-card-height) * 2.05));
+  --rolling-poster-width: calc(var(--rolling-card-height) * 0.6667);
+  --rolling-backdrop-opacity: 0.58;
+  --rolling-backdrop-brightness: 0.7;
+  --rolling-backdrop-saturation: 0.82;
+}
+
+[data-card-size='compact'] .rolling-home {
+  --rolling-card-height: clamp(15.5rem, 47vh, 31rem);
+}
+
+[data-card-size='large'] .rolling-home {
+  --rolling-card-height: clamp(18rem, 57vh, 38rem);
+}
+
+[data-backdrop-intensity='subtle'] .rolling-home {
+  --rolling-backdrop-opacity: 0.36;
+  --rolling-backdrop-brightness: 0.54;
+  --rolling-backdrop-saturation: 0.64;
+}
+
+[data-backdrop-intensity='vivid'] .rolling-home {
+  --rolling-backdrop-opacity: 0.62;
+  --rolling-backdrop-brightness: 0.72;
+  --rolling-backdrop-saturation: 0.94;
+}
+
+.rolling-home .rolling-backdrop-art {
+  opacity: var(--rolling-backdrop-opacity);
+  filter: blur(clamp(12px, 1.15vw, 22px))
+    saturate(var(--rolling-backdrop-saturation))
+    brightness(var(--rolling-backdrop-brightness));
+}
+
+.rolling-backdrop-veil {
+  background:
+    linear-gradient(180deg, rgb(3 7 14 / 0.2), rgb(3 7 14 / 0.55) 82%, rgb(3 7 14 / 0.8)),
+    linear-gradient(90deg, rgb(3 7 14 / 0.36), transparent 62%);
+}
+
+.rolling-game-row {
+  position: relative;
+  height: calc(var(--rolling-card-height) + 7.5rem);
+  min-height: calc(var(--rolling-card-height) + 7.5rem);
+  scroll-padding-inline: clamp(1rem, 2vw, 2rem);
+  overscroll-behavior-inline: contain;
+}
+
+.rolling-game-card {
+  flex: 0 0 var(--rolling-poster-width);
+  contain: layout paint;
+  transition: flex-basis 380ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.rolling-game-card[data-rolling-active='true'] {
+  flex-basis: var(--rolling-hero-width);
+}
+
+.rolling-game-card:focus-visible,
+.rolling-game-card[data-focused='true'] {
+  box-shadow: none;
+}
+
+.rolling-game-art {
+  height: var(--rolling-card-height);
+  transition: border-color 150ms ease, box-shadow 180ms ease, transform 180ms ease;
+}
+
+.rolling-game-image {
+  backface-visibility: hidden;
+  will-change: opacity, transform;
+  transition: opacity 260ms ease, transform 380ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.rolling-game-image-hero {
+  opacity: 0;
+  transform: scale(1.025);
+}
+
+.rolling-game-card[data-rolling-active='true'] .rolling-game-image-poster {
+  opacity: 0;
+  transform: scale(1.025);
+}
+
+.rolling-game-card[data-rolling-active='true'] .rolling-game-image-hero {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.rolling-game-tail {
+  flex: 0 0 max(0px, calc(100% - var(--rolling-hero-width)));
+  height: 1px;
+}
+
+.rolling-game-card:focus-visible .rolling-game-art,
+.rolling-game-card[data-focused='true'] .rolling-game-art {
+  border-color: rgb(var(--color-accent) / 0.9);
+  box-shadow:
+    0 0 0 2px rgb(var(--color-accent) / 0.22),
+    0 20px 56px rgb(0 0 0 / 0.4),
+    var(--shadow-glow);
+}
+
+.rolling-game-card:not([data-rolling-active='true']):focus-visible .rolling-game-art,
+.rolling-game-card:not([data-rolling-active='true'])[data-focused='true'] .rolling-game-art {
+  transform: translateY(-2px) scale(1.012);
+}
+
+[data-top-bar-layout='rolling'] .orbit-dock {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+[data-top-bar-layout='rolling'] .orbit-dock::before {
+  opacity: 0;
+}
+
+@media (orientation: landscape) and (max-width: 1700px) and (max-height: 900px) {
+  .rolling-home {
+    --rolling-card-height: clamp(15.5rem, 50vh, 23.5rem);
+    --rolling-hero-width: min(66vw, calc(var(--rolling-card-height) * 2));
+  }
+
+  [data-card-size='compact'] .rolling-home {
+    --rolling-card-height: clamp(14rem, 44vh, 20.5rem);
+  }
+
+  [data-card-size='large'] .rolling-home {
+    --rolling-card-height: clamp(16.5rem, 54vh, 25rem);
+  }
+}
+
+@media (orientation: landscape) and (max-height: 720px) {
+  .rolling-home {
+    --rolling-card-height: clamp(14rem, 48vh, 20.5rem);
+  }
+
+  [data-card-size='compact'] .rolling-home {
+    --rolling-card-height: clamp(12.75rem, 42vh, 18rem);
+  }
+
+  [data-card-size='large'] .rolling-home {
+    --rolling-card-height: clamp(15rem, 51vh, 22rem);
+  }
+
+  .rolling-game-row {
+    height: calc(var(--rolling-card-height) + 6.5rem);
+    min-height: calc(var(--rolling-card-height) + 6.5rem);
+  }
+
+  .rolling-game-caption {
+    margin-top: 0.5rem;
+  }
+
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rolling-game-row {
+    scroll-behavior: auto;
+  }
+
+  .rolling-game-card,
+  .rolling-game-art,
+  .rolling-game-image {
+    transition-duration: 0ms;
+  }
+}
+
 .ticker-track {
   animation: orbit-ticker 28s linear infinite;
 }
@@ -1461,6 +1635,87 @@ html[data-orbit-media-keyboard='true'] #root {
   transition: opacity 240ms ease, filter 240ms ease;
 }
 
+.home-backdrop-frame {
+  transform-origin: center;
+  backface-visibility: hidden;
+}
+
+.home-backdrop-frame[data-backdrop-motion='still'] {
+  transform: scale(1.02);
+}
+
+.home-backdrop-frame[data-backdrop-motion='drift'] {
+  animation: orbit-home-backdrop-drift 20s linear infinite alternate;
+}
+
+.home-backdrop-frame[data-backdrop-motion='cinematic'] {
+  animation: orbit-home-backdrop-cinematic 24s linear infinite alternate;
+}
+
+@keyframes orbit-home-backdrop-drift {
+  from {
+    transform: translate3d(-6%, 0, 0) scale(1.15);
+  }
+
+  to {
+    transform: translate3d(6%, 0, 0) scale(1.15);
+  }
+}
+
+@keyframes orbit-home-backdrop-cinematic {
+  from {
+    transform: translate3d(-4%, -2%, 0) scale(1.11);
+  }
+
+  to {
+    transform: translate3d(4%, 2%, 0) scale(1.2);
+  }
+}
+
+[data-backdrop-motion-preview='still'] .backdrop-motion-preview-art {
+  transform: scale(1.02);
+}
+
+[data-backdrop-motion-preview='drift'] .backdrop-motion-preview-art {
+  animation: orbit-backdrop-preview-drift 5s ease-in-out infinite alternate;
+}
+
+[data-backdrop-motion-preview='cinematic'] .backdrop-motion-preview-art {
+  animation: orbit-backdrop-preview-cinematic 6s ease-in-out infinite alternate;
+}
+
+@keyframes orbit-backdrop-preview-drift {
+  from {
+    transform: translateX(-5%) scale(1.08);
+  }
+
+  to {
+    transform: translateX(5%) scale(1.08);
+  }
+}
+
+@keyframes orbit-backdrop-preview-cinematic {
+  from {
+    transform: translate3d(-3%, -2%, 0) scale(1.08);
+  }
+
+  to {
+    transform: translate3d(3%, 2%, 0) scale(1.18);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .home-backdrop-frame {
+    animation: none !important;
+    transform: scale(1.02) !important;
+  }
+
+  .backdrop-motion-preview-art {
+    animation: none !important;
+    transform: scale(1.02) !important;
+  }
+}
+
 .home-backdrop-dim {
   background: rgb(0 0 0 / var(--home-backdrop-dim, 0.1));
   transition: background-color 240ms ease;
@@ -1580,6 +1835,11 @@ html[data-orbit-media-keyboard='true'] #root {
   height: clamp(3.5rem, 4.5vw, 4.75rem);
 }
 
+.home-focus-card-float .home-focus-logo {
+  width: clamp(8rem, 13vw, 12rem);
+  height: clamp(3.25rem, 4.5vw, 4.5rem);
+}
+
 .home-focus-card-float .home-focus-identity h2 {
   font-size: clamp(1.15rem, 2vw, 1.75rem);
   -webkit-line-clamp: 1;
@@ -1683,9 +1943,9 @@ html[data-orbit-media-keyboard='true'] #root {
     var(--focus-shadow);
 }
 
-.coresense-identity-icon {
-  width: clamp(3.75rem, 5.25vw, 8rem);
-  height: clamp(3.75rem, 5.25vw, 8rem);
+.coresense-identity-logo {
+  width: clamp(9rem, 16vw, 15rem);
+  height: clamp(3.75rem, 5.25vw, 5rem);
 }
 
 .coresense-store-card {
@@ -1729,6 +1989,12 @@ html[data-orbit-media-keyboard='true'] #root {
 
 .xmode-launcher-grid {
   gap: clamp(0.55rem, 1vw, 1rem);
+}
+
+.xmode-game-logo > span {
+  font-size: clamp(0.58rem, 0.72vw, 0.74rem);
+  line-height: 1.05;
+  letter-spacing: -0.02em;
 }
 
 .xmode-library-tile {
@@ -1848,8 +2114,8 @@ html[data-orbit-media-keyboard='true'] #root {
     --coresense-launcher-size: clamp(5rem, 15vh, 6.75rem);
   }
 
-  .coresense-identity-icon {
-    width: clamp(3.25rem, 8vh, 4rem);
+  .coresense-identity-logo {
+    width: clamp(8rem, 24vh, 11rem);
     height: clamp(3.25rem, 8vh, 4rem);
   }
 

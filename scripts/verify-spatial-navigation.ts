@@ -34,7 +34,16 @@ class FakeElement {
     return null
   }
 
-  matches(): boolean {
+  matches(selector: string): boolean {
+    if (selector === '[data-rolling-game="true"]') {
+      return this.dataset.rollingGame === 'true'
+    }
+    if (selector === '[data-rolling-shelf-tab="true"]') {
+      return this.dataset.rollingShelfTab === 'true'
+    }
+    if (selector === '[data-rolling-shelf-item="true"]') {
+      return this.dataset.rollingShelfItem === 'true'
+    }
     return false
   }
 
@@ -82,6 +91,45 @@ class FakeTopNavRoot {
   }
 }
 
+class FakeRollingRoot {
+  children: FakeElement[] = []
+
+  querySelector(selector: string): FakeElement | null {
+    if (selector.includes('data-rolling-active')) {
+      return this.children.find((item) => item.dataset.rollingActive === 'true') ?? null
+    }
+    if (selector.includes('data-rolling-shelf-tab') && selector.includes('aria-selected')) {
+      return this.children.find(
+        (item) =>
+          item.dataset.rollingShelfTab === 'true' && item.getAttribute('aria-selected') === 'true'
+      ) ?? null
+    }
+    if (selector.includes('data-rolling-shelf-tab')) {
+      return this.children.find((item) => item.dataset.rollingShelfTab === 'true') ?? null
+    }
+    if (selector.includes('data-rolling-shelf-item')) {
+      return this.children.find((item) => item.dataset.rollingShelfItem === 'true') ?? null
+    }
+    if (selector.includes('data-rolling-game')) {
+      return this.children.find((item) => item.dataset.rollingGame === 'true') ?? null
+    }
+    return null
+  }
+
+  querySelectorAll(selector: string): FakeElement[] {
+    if (selector.includes('data-rolling-game')) {
+      return this.children.filter((item) => item.dataset.rollingGame === 'true')
+    }
+    if (selector.includes('data-rolling-shelf-tab')) {
+      return this.children.filter((item) => item.dataset.rollingShelfTab === 'true')
+    }
+    if (selector.includes('data-rolling-shelf-item')) {
+      return this.children.filter((item) => item.dataset.rollingShelfItem === 'true')
+    }
+    return []
+  }
+}
+
 function domRect(left: number, top: number, width = 80, height = 40): DOMRect {
   return {
     x: left,
@@ -97,15 +145,18 @@ function domRect(left: number, top: number, width = 80, height = 40): DOMRect {
 }
 
 const topNavRoot = new FakeTopNavRoot()
+const rollingRoot = new FakeRollingRoot()
 let focusables: FakeElement[] = []
 let activeElement: FakeElement | null = null
+let rollingVisible = false
 
 const fakeDocument = {
   get activeElement(): FakeElement | null {
     return activeElement
   },
-  querySelector(selector: string): FakeTopNavRoot | null {
+  querySelector(selector: string): FakeTopNavRoot | FakeRollingRoot | null {
     if (selector === '[data-top-nav]' && topNavRoot.children.length > 0) return topNavRoot
+    if (selector === '[data-home-layout="rolling"]' && rollingVisible) return rollingRoot
     return null
   },
   querySelectorAll(selector: string): FakeElement[] {
@@ -125,6 +176,22 @@ Object.defineProperty(globalThis, 'document', {
 function setScene(elements: FakeElement[], current: FakeElement): void {
   focusables = elements
   topNavRoot.children = elements.filter((item) => item.layer === 'top')
+  rollingRoot.children = []
+  rollingVisible = false
+  activeElement = current
+}
+
+function setRollingScene(
+  topItems: FakeElement[],
+  games: FakeElement[],
+  current: FakeElement,
+  tabs: FakeElement[] = [],
+  shelfItems: FakeElement[] = []
+): void {
+  focusables = [...topItems, ...games, ...tabs, ...shelfItems]
+  topNavRoot.children = topItems
+  rollingRoot.children = [...games, ...tabs, ...shelfItems]
+  rollingVisible = true
   activeElement = current
 }
 
@@ -171,4 +238,87 @@ assert.equal(findNextFocus(top as unknown as HTMLElement, 'down'), secondary)
 setScene([top, secondary, contentCurrent], secondary)
 assert.equal(findNextFocus(secondary as unknown as HTMLElement, 'down'), contentCurrent)
 
-console.log('Spatial navigation hierarchy checks passed.')
+const rollingGames = [0, 1, 2].map((index) => {
+  const game = new FakeElement(`rolling-${index}`, 'content', domRect(80 + index * 140, 220))
+  game.dataset.rollingGame = 'true'
+  game.dataset.rollingIndex = String(index)
+  if (index === 1) game.dataset.rollingActive = 'true'
+  return game
+})
+const rollingTabs = [0, 1, 2].map((index) => {
+  const tab = new FakeElement(`rolling-tab-${index}`, 'secondary', domRect(300 + index * 120, 610))
+  tab.dataset.rollingShelfTab = 'true'
+  tab.dataset.rollingShelfTabIndex = String(index)
+  if (index === 0) tab.setAttribute('aria-selected', 'true')
+  return tab
+})
+const rollingShelfItems = [0, 1, 2].map((index) => {
+  const item = new FakeElement(`rolling-shelf-${index}`, 'content', domRect(80 + index * 240, 660, 210, 70))
+  item.dataset.rollingShelfItem = 'true'
+  item.dataset.rollingShelfItemIndex = String(index)
+  return item
+})
+
+setRollingScene([top], rollingGames, rollingGames[1], rollingTabs, rollingShelfItems)
+assert.equal(
+  findNextFocus(rollingGames[1] as unknown as HTMLElement, 'right'),
+  rollingGames[2],
+  'Rolling Right must advance by stable library identity'
+)
+assert.equal(
+  findNextFocus(rollingGames[2] as unknown as HTMLElement, 'right'),
+  null,
+  'Rolling Right must stop at the end of the track'
+)
+assert.equal(
+  findNextFocus(rollingGames[0] as unknown as HTMLElement, 'left'),
+  null,
+  'Rolling Left must stop at the start of the track'
+)
+assert.equal(
+  findNextFocus(rollingGames[1] as unknown as HTMLElement, 'left'),
+  rollingGames[0],
+  'Rolling Left must return to the previous library item'
+)
+assert.equal(
+  findNextFocus(rollingGames[1] as unknown as HTMLElement, 'up'),
+  top,
+  'Rolling Up must return to the active top navigation item'
+)
+assert.equal(
+  findNextFocus(top as unknown as HTMLElement, 'down'),
+  rollingGames[1],
+  'Top navigation Down must restore the active Rolling game'
+)
+assert.equal(
+  findNextFocus(rollingGames[1] as unknown as HTMLElement, 'down'),
+  rollingTabs[0],
+  'Rolling game Down must enter the active discovery tab'
+)
+assert.equal(
+  findNextFocus(rollingTabs[0] as unknown as HTMLElement, 'right'),
+  rollingTabs[1],
+  'Rolling discovery tabs must move in their visual order'
+)
+assert.equal(
+  findNextFocus(rollingTabs[0] as unknown as HTMLElement, 'up'),
+  rollingGames[1],
+  'Rolling discovery Up must restore the active game'
+)
+assert.equal(
+  findNextFocus(rollingTabs[0] as unknown as HTMLElement, 'down'),
+  rollingShelfItems[0],
+  'Rolling discovery Down must enter its first content item'
+)
+assert.equal(
+  findNextFocus(rollingShelfItems[1] as unknown as HTMLElement, 'left'),
+  rollingShelfItems[0],
+  'Rolling shelf items must move in their visual order'
+)
+assert.equal(
+  findNextFocus(rollingShelfItems[1] as unknown as HTMLElement, 'up'),
+  rollingTabs[0],
+  'Rolling shelf Up must return to the active discovery tab'
+)
+
+console.log('Spatial navigation hierarchy, Rolling track, and discovery shelf checks passed.')
