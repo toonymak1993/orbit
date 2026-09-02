@@ -26,6 +26,7 @@ function Invoke-LocalNodeTool {
 
 Push-Location $repoRoot
 try {
+  Invoke-LocalNodeTool 'scripts\windows\Apply-OrbitElectronBuilderPatch.mjs' @($repoRoot)
   & (Join-Path $PSScriptRoot 'Generate-OrbitBranding.ps1')
   $signingCertificate = Assert-OrbitSigningCertificateAvailable -Profile $signingProfile
 

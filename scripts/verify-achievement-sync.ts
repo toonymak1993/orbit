@@ -9,6 +9,10 @@ import {
   normalizeRetroAchievementsApiKey,
   RetroAchievementsCredentialVault
 } from '../src/main/retro/retroAchievementsCredentialVault.ts'
+import {
+  normalizeSteamWebApiKey,
+  SteamWebApiCredentialVault
+} from '../src/main/steam/steamWebApiCredentialVault.ts'
 
 const game = {
   id: 'steam:620',
@@ -123,6 +127,43 @@ credentialVault.clear()
 assert.equal(credentialVault.isConfigured(), false)
 assert.equal(normalizeRetroAchievementsApiKey(`  ${'c'.repeat(32)}  `), 'c'.repeat(32))
 
+const steamCredentialMemory: {
+  encryptionAvailable: boolean
+  encrypted?: string
+  legacy?: unknown
+} = {
+  encryptionAvailable: false,
+  legacy: 'd'.repeat(32)
+}
+const steamCredentialVault = new SteamWebApiCredentialVault({
+  encryptionAvailable: () => steamCredentialMemory.encryptionAvailable,
+  encrypt: (value) => `encrypted:${value}`,
+  decrypt: (payload) => payload.replace(/^encrypted:/u, ''),
+  readEncrypted: () => steamCredentialMemory.encrypted,
+  writeEncrypted: (payload) => {
+    steamCredentialMemory.encrypted = payload
+  },
+  clearEncrypted: () => {
+    delete steamCredentialMemory.encrypted
+  },
+  readLegacy: () => steamCredentialMemory.legacy,
+  clearLegacy: () => {
+    delete steamCredentialMemory.legacy
+  }
+})
+assert.equal(steamCredentialVault.getApiKey(), undefined)
+assert.equal(steamCredentialMemory.legacy, 'd'.repeat(32))
+steamCredentialMemory.encryptionAvailable = true
+assert.equal(steamCredentialVault.getApiKey(), 'd'.repeat(32))
+assert.equal(steamCredentialMemory.legacy, undefined)
+assert.notEqual(steamCredentialMemory.encrypted, 'd'.repeat(32))
+steamCredentialVault.setApiKey('e'.repeat(32))
+assert.equal(steamCredentialVault.getApiKey(), 'e'.repeat(32))
+assert.throws(() => steamCredentialVault.setApiKey('invalid'), /Invalid Steam Web API key/u)
+steamCredentialVault.clear()
+assert.equal(steamCredentialVault.isConfigured(), false)
+assert.equal(normalizeSteamWebApiKey(`  ${'f'.repeat(32)}  `), 'f'.repeat(32))
+
 const sharedIpcSource = await readFile(
   new URL('../src/shared/ipc.ts', import.meta.url),
   'utf8'
@@ -136,7 +177,20 @@ assert.doesNotMatch(
   /retroAchievementsWebApiKey/u,
   'renderer settings must not expose the RetroAchievements secret'
 )
+assert.doesNotMatch(
+  orbitSettingsContract,
+  /steamWebApiKey/u,
+  'renderer settings must not expose the Steam Web API secret'
+)
 assert.match(sharedIpcSource, /retroAchievementsCredentialSet/u)
 assert.match(sharedIpcSource, /retroAchievementsCredentialClear/u)
+assert.match(sharedIpcSource, /steamWebApiCredentialSet/u)
+assert.match(sharedIpcSource, /steamWebApiCredentialClear/u)
+
+const settingsStoreSource = await readFile(
+  new URL('../src/main/settingsStore.ts', import.meta.url),
+  'utf8'
+)
+assert.match(settingsStoreSource, /delete snapshot\[LEGACY_STEAM_WEB_API_KEY\]/u)
 
 console.log('Achievement sync checks passed')

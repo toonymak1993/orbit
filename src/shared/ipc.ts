@@ -367,7 +367,6 @@ export interface OrbitSettings {
   language: Language
   audioPreset: AudioPreset
   hasCompletedOnboarding: boolean
-  steamWebApiKey?: string
   storeRegion: StoreRegionId
   showStoreTab: boolean
   showFriendsHub: boolean
@@ -546,6 +545,11 @@ export type DiscordServerIssue = 'not-connected' | 'provider-unavailable'
 export interface DiscordServer {
   id: string
   name: string
+}
+
+export interface SteamWebApiCredentialStatus {
+  /** True only when the main process can decrypt the stored Steam Web API key. */
+  configured: boolean
 }
 
 export interface DiscordServerList {
@@ -1310,6 +1314,9 @@ export const IPC = {
   gameAchievementsSync: 'game:achievements:sync',
   settingsGet: 'settings:get',
   settingsSet: 'settings:set',
+  steamWebApiCredentialGet: 'steam:web-api-credential:get',
+  steamWebApiCredentialSet: 'steam:web-api-credential:set',
+  steamWebApiCredentialClear: 'steam:web-api-credential:clear',
   retroAchievementsCredentialGet: 'retro-achievements:credential:get',
   retroAchievementsCredentialSet: 'retro-achievements:credential:set',
   retroAchievementsCredentialClear: 'retro-achievements:credential:clear',

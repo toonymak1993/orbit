@@ -59,6 +59,7 @@ import {
   type RetroSystemId,
   type SteamAccount,
   type SteamGridDbTokenStatus,
+  type SteamWebApiCredentialStatus,
   type SteamLoginStatus,
   type StoreRegionId,
   type StoreSearchResponse,
@@ -183,6 +184,14 @@ const orbitApi = {
     startLogin: (): Promise<void> => ipcRenderer.invoke(IPC.steamLoginStart),
     cancelLogin: (): Promise<void> => ipcRenderer.invoke(IPC.steamLoginCancel),
     logout: (): Promise<void> => ipcRenderer.invoke(IPC.steamLogout),
+    credentials: {
+      get: (): Promise<SteamWebApiCredentialStatus> =>
+        ipcRenderer.invoke(IPC.steamWebApiCredentialGet),
+      set: (apiKey: string): Promise<SteamWebApiCredentialStatus> =>
+        ipcRenderer.invoke(IPC.steamWebApiCredentialSet, apiKey),
+      clear: (): Promise<SteamWebApiCredentialStatus> =>
+        ipcRenderer.invoke(IPC.steamWebApiCredentialClear)
+    },
     onStatus: (callback: (status: SteamLoginStatus) => void): (() => void) => {
       const listener = (_e: Electron.IpcRendererEvent, status: SteamLoginStatus): void =>
         callback(status)
