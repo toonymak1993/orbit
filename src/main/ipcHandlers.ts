@@ -49,6 +49,7 @@ import {
 } from '@shared/ipc'
 import { publicSettingsSnapshot, settingsStore } from './settingsStore'
 import { steamAuthManager } from './steam/steamAuth'
+import { steamWebApiCredentials } from './steam/steamWebApiCredentials'
 import { epicAuthManager } from './epic/epicAuth'
 import { playStationAuthManager } from './playstation/playstationAuth'
 import { playStationRemotePlayService } from './playstation/remotePlay'
@@ -231,13 +232,8 @@ function validateSettingsPartial(value: unknown): asserts value is Partial<Orbit
   if ('steamGridDbApiKey' in partial) {
     throw new Error('SteamGridDB credentials require the secure credential API')
   }
-  if (
-    'steamWebApiKey' in partial &&
-    partial.steamWebApiKey !== undefined &&
-    (typeof partial.steamWebApiKey !== 'string' ||
-      !/^[a-f\d]{32}$/i.test(partial.steamWebApiKey.trim()))
-  ) {
-    throw new Error('Invalid Steam Web API key')
+  if ('steamWebApiKey' in partial) {
+    throw new Error('Steam Web API credentials require the secure credential API')
   }
   if (
     'retroAchievementsUsername' in partial &&
@@ -717,10 +713,6 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
     ) {
       void backgroundServiceManager.reloadSettings()
     }
-    if ('steamWebApiKey' in partial) {
-      void friendsService.refresh()
-      if (next.showAchievements) void libraryService.syncAchievements(true)
-    }
     if ('showAchievements' in partial && partial.showAchievements === true) {
       void libraryService.syncAchievements(true)
     }
@@ -744,6 +736,18 @@ export function registerIpcHandlers(mainWindow: BrowserWindow): void {
   ipcMain.handle(IPC.retroAchievementsCredentialClear, () =>
     retroAchievementsCredentials.clear()
   )
+
+  ipcMain.handle(IPC.steamWebApiCredentialGet, () => steamWebApiCredentials.getStatus())
+  ipcMain.handle(IPC.steamWebApiCredentialSet, (_e, apiKey: unknown) => {
+    const status = steamWebApiCredentials.setApiKey(apiKey)
+    if (settingsStore.store.showAchievements) void libraryService.syncAchievements(true)
+    return status
+  })
+  ipcMain.handle(IPC.steamWebApiCredentialClear, () => {
+    const status = steamWebApiCredentials.clear()
+    if (settingsStore.store.showAchievements) void libraryService.syncAchievements(true)
+    return status
+  })
 
   ipcMain.handle(IPC.appVersion, () => getDisplayVersion())
   ipcMain.handle(IPC.appUpdateGet, () => appUpdateService.getSnapshot())

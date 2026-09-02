@@ -638,6 +638,7 @@ export function SettingsView(): JSX.Element {
   >('idle')
   const [retroAchievementsApiKeyConfigured, setRetroAchievementsApiKeyConfigured] =
     useState(false)
+  const [steamWebApiKeyConfigured, setSteamWebApiKeyConfigured] = useState(false)
   const [steamGridDbTokenStatus, setSteamGridDbTokenStatus] =
     useState<SteamGridDbTokenStatus | null>(null)
   const [steamGridDbTokenChecking, setSteamGridDbTokenChecking] = useState(false)
@@ -838,11 +839,13 @@ export function SettingsView(): JSX.Element {
     void window.api.app.getVersion().then(setVersion)
     void Promise.all([
       window.api.settings.get(),
-      window.api.retroAchievements.credentials.get()
-    ]).then(([value, credentialStatus]) => {
+      window.api.retroAchievements.credentials.get(),
+      window.api.steam.credentials.get()
+    ]).then(([value, credentialStatus, steamCredentialStatus]) => {
       setSettings(value)
       setRetroAchievementsUsername(value.retroAchievementsUsername ?? '')
       setRetroAchievementsApiKeyConfigured(credentialStatus.configured)
+      setSteamWebApiKeyConfigured(steamCredentialStatus.configured)
     })
   }, [])
 
@@ -1891,15 +1894,21 @@ export function SettingsView(): JSX.Element {
                           <div className="mt-3">
                             <ApiKeyField
                               label={t('settings.integrations.steamApiKey')}
-                              value={settings.steamWebApiKey ?? ''}
+                              value=""
                               placeholder={t('settings.integrations.steamApiKeyPlaceholder')}
                               getKeyLabel={t('settings.integrations.getSteamApiKey')}
                               getKeyUrl="https://steamcommunity.com/dev/apikey"
+                              configured={steamWebApiKeyConfigured}
+                              configuredLabel={t('settings.integrations.steamApiKeyConfigured')}
+                              notConfiguredLabel={t('settings.integrations.notConfigured')}
+                              clearLabel={t('settings.integrations.clearSteamApiKey')}
                               onSave={async (value) => {
-                                const next = await window.api.settings.set({
-                                  steamWebApiKey: value || undefined
-                                })
-                                setSettings(next)
+                                const status = await window.api.steam.credentials.set(value)
+                                setSteamWebApiKeyConfigured(status.configured)
+                              }}
+                              onClear={async () => {
+                                const status = await window.api.steam.credentials.clear()
+                                setSteamWebApiKeyConfigured(status.configured)
                               }}
                             />
                           </div>

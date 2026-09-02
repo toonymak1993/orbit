@@ -694,6 +694,17 @@ if (process.platform === 'win32') {
   }
 }
 const installerScript = readFileSync(new URL('../build/installer.nsh', import.meta.url), 'utf8')
+const installerBuildScript = readFileSync(
+  new URL('./windows/Build-OrbitInstaller.ps1', import.meta.url),
+  'utf8'
+)
+const electronBuilderPatchScript = readFileSync(
+  new URL('./windows/Apply-OrbitElectronBuilderPatch.mjs', import.meta.url),
+  'utf8'
+)
+assert.match(installerBuildScript, /Apply-OrbitElectronBuilderPatch\.mjs/u)
+assert.match(electronBuilderPatchScript, /Windows Smart App Control/u)
+assert.match(electronBuilderPatchScript, /UninstallerReader\.exec\(installerPath, uninstallerPath\)/u)
 assert.match(installerScript, /orbit-background-agent-shutdown/)
 assert.match(installerScript, /\$\{ifNot\} \$\{isUpdated\}/)
 assert.match(installerScript, /CurrentVersion\\Explorer\\StartupApproved\\Run/)
@@ -706,6 +717,15 @@ assert.ok(
     shutdownMacroStart < customUnWelcomeStart &&
     customUnWelcomeStart < customUnInitStart &&
     customUnInitStart < customUnInstallStart
+)
+assert.doesNotMatch(
+  installerScript,
+  /APP_EXECUTABLE_FILENAME/u,
+  'custom NSIS hooks must use command-line defines available when they are parsed'
+)
+assert.match(
+  installerScript,
+  /!ifdef BUILD_UNINSTALLER[\s\S]*Function un\.orbitStopBackgroundServiceBeforeRemove[\s\S]*!endif/u
 )
 assert.match(
   installerScript.slice(shutdownMacroStart, customUnWelcomeStart),

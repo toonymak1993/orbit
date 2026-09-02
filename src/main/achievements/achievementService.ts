@@ -9,6 +9,7 @@ import {
 } from '../retro/retroAchievements'
 import { settingsStore } from '../settingsStore'
 import { steamAuthManager } from '../steam/steamAuth'
+import { steamWebApiCredentials } from '../steam/steamWebApiCredentials'
 import { syncCoordinator } from '../sync/syncCoordinator'
 import {
   parseSteamCommunityAchievements,
@@ -144,7 +145,7 @@ async function fetchSteamAchievements(game: LibraryGame): Promise<GameAchievemen
   const account = steamAuthManager.getAccount() ?? (await steamAuthManager.restoreSession())
   if (!account) return unavailable(game, 'not-connected')
   const language = settingsStore.store.language === 'de' ? 'german' : 'english'
-  const apiKey = settingsStore.store.steamWebApiKey?.trim()
+  const apiKey = steamWebApiCredentials.getApiKey()
 
   if (apiKey) {
     const apiSnapshot = await fetchSteamWebApiAchievements(
